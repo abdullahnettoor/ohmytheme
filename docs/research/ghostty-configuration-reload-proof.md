@@ -79,7 +79,9 @@ was installed either. The current-window result is therefore source-backed
 scope analysis, not a runtime observation; a packaged-binary proof remains
 necessary before claiming live visual behavior for every existing window.
 
-## Version evidence and proposed test floor
+## Supported range and version evidence
+
+This proof supports Ghostty **1.3.x**. Version 1.3.0 is the source-reviewed floor because it contains the `config.ghostty` transition and the documented AppleScript interface. The executable proof ran on 1.3.1 stable. The script rejects other version lines until their discovery behavior and activation route receive the same review.
 
 | Version | Evidence / status |
 | --- | --- |
@@ -89,5 +91,5 @@ necessary before claiming live visual behavior for every existing window.
 | 1.3.1 stable | Locally tested for isolated XDG modern-name discovery, managed-fragment precedence, and valid and invalid `+validate-config` results. No Application Support fallback or live-reload test was performed. |
 
 No formal Ghostty support/EOL window was located in the scoped first-party
-sources. These are feature and test boundaries, not a claim that Ghostty
-supports every listed release today.
+sources. The 1.3.x boundary is this proof's explicit support policy, not a
+claim that Ghostty supports every listed release today.

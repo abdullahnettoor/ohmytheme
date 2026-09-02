@@ -12,6 +12,8 @@ Run:
 
 The script requires a locally installed Ghostty. It creates a temporary HOME and XDG configuration tree, then removes it when the script exits. It does not read, modify, or install the user's Ghostty configuration.
 
+This proof supports Ghostty 1.3.x. It uses the 1.3.0 `config.ghostty` transition as the source-reviewed floor and has an executable proof run on 1.3.1 stable. The script rejects other versions until their discovery behavior is reviewed and added to this record.
+
 The proof checks that the installed Ghostty:
 
 - prefers the modern `config.ghostty` name over the legacy `config` name in an XDG configuration directory;
@@ -39,4 +41,5 @@ Ghostty 1.3.0 added a documented AppleScript action interface, but this proof do
 
 | Date | Ghostty | Result |
 | --- | --- | --- |
+| 2026-09-02 | 1.3.0 | Source-reviewed floor. The version-tagged Ghostty source establishes the `config.ghostty` transition, include handling, validator, and AppleScript availability. |
 | 2026-09-02 | 1.3.1 stable | Pass. The disposable proof confirmed modern-name discovery, managed-fragment precedence, valid staged configuration, invalid configuration rejection, and preservation of the parent file. No user configuration or live Ghostty window was changed. |

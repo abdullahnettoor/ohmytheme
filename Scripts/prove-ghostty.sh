@@ -4,7 +4,11 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-require_tool ghostty "Install Ghostty 1.3.0 or later to run this proof."
+require_tool ghostty "Install a Ghostty 1.3.x release to run this proof."
+
+ghostty_version="$(ghostty +version | awk '/^Ghostty [0-9]+\./ { print $2; exit }')"
+[[ "$ghostty_version" =~ ^1\.3\.[0-9]+$ ]] ||
+    fail "Ghostty 1.3.x is required for this proof. Found ${ghostty_version:-an unrecognized version}."
 
 temporary_directory="$(mktemp -d)"
 temporary_home="$temporary_directory/home"
@@ -57,5 +61,5 @@ then
     fail "Ghostty accepted an invalid configuration."
 fi
 
-ghostty +version | head -1
+echo "Ghostty $ghostty_version"
 echo "Ghostty configuration proof passed. All test files were created under $temporary_directory."
