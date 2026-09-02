@@ -29,7 +29,10 @@ struct OhMyThemeApp: App {
             WorkspaceMenuView(
                 model: WorkspaceMenuModel(
                     workspace: workspaceStore.appWorkspace,
-                    themeEngine: themeEngine
+                    themeEngine: themeEngine,
+                    themeVariantSelection: { variantID in
+                        workspaceStore.selectFixedVariant(variantID)
+                    }
                 ))
         }
         .menuBarExtraStyle(.window)

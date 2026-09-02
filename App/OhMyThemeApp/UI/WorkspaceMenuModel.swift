@@ -12,16 +12,19 @@ struct WorkspaceMenuModel {
     private let quitAction: @MainActor () -> Void
     private let themePacks: [ThemePack]
     private let themeEngine: ThemeEngine?
+    private let themeVariantSelection: (String) -> Void
 
     init(
         workspace: Workspace,
         themePacks: [ThemePack] = BundledThemeCatalog().load(),
         themeEngine: ThemeEngine? = nil,
+        themeVariantSelection: @escaping (String) -> Void = { _ in },
         quitAction: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
         self.workspace = workspace
         self.themePacks = themePacks
         self.themeEngine = themeEngine
+        self.themeVariantSelection = themeVariantSelection
         self.quitAction = quitAction
     }
 
@@ -76,6 +79,16 @@ struct WorkspaceMenuModel {
 
     var canApplyThemes: Bool {
         themeEngine != nil
+    }
+
+    var selectedThemeVariantID: String? {
+        guard case .fixed(let variantID) = workspace.themeAssignment else { return nil }
+        return variantID
+    }
+
+    func selectThemeVariant(_ variantID: String?) {
+        guard let variantID else { return }
+        themeVariantSelection(variantID)
     }
 
     struct BundledThemeVariant: Equatable {

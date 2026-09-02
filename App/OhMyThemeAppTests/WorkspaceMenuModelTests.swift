@@ -84,6 +84,25 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertEqual(preview.variantID, pack.variants[0].qualifiedID)
     }
 
+    func testMenuRestoresAndPersistsTheSelectedFixedThemeVariant() {
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            themeAssignment: .fixed(variantID: "aurora/light")
+        )
+        var selectedVariantID: String?
+        let model = WorkspaceMenuModel(
+            workspace: workspace,
+            themeVariantSelection: { selectedVariantID = $0 },
+            quitAction: {}
+        )
+
+        XCTAssertEqual(model.selectedThemeVariantID, "aurora/light")
+        model.selectThemeVariant("aurora/dark")
+
+        XCTAssertEqual(selectedVariantID, "aurora/dark")
+    }
+
     func testQuitAsksTheApplicationToTerminate() {
         var terminationRequests = 0
         let model = WorkspaceMenuModel(workspace: WorkspaceStore().workspace, quitAction: { terminationRequests += 1 })

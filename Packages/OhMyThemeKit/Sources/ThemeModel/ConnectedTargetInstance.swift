@@ -1,6 +1,6 @@
 /// A Target Instance whose one-time setup and ownership scope the user has accepted,
 /// allowing later theme changes without repeated setup confirmation.
-public struct ConnectedTargetInstance: Sendable, Equatable, Identifiable {
+public struct ConnectedTargetInstance: Codable, Sendable, Equatable, Identifiable {
     public let id: TargetInstanceID
     public let displayName: String
     public let adapterID: String

@@ -9,6 +9,11 @@ struct WorkspaceMenuView: View {
     @State private var report: ApplyReport?
     @State private var operationError: String?
 
+    init(model: WorkspaceMenuModel) {
+        self.model = model
+        _selectedVariantID = State(initialValue: model.selectedThemeVariantID)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -57,6 +62,9 @@ struct WorkspaceMenuView: View {
                     }
                 }
                 .accessibilityIdentifier("theme-variant-picker")
+                .onChange(of: selectedVariantID) { _, newValue in
+                    model.selectThemeVariant(newValue)
+                }
 
                 Button("Preview selected Theme Variant") {
                     guard let selectedVariantID else { return }
