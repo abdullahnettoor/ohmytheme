@@ -1028,7 +1028,8 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
             && expectedMetadataMatches(
                 current: inspection.snapshot.metadata,
                 before: plan.inspection.snapshot.metadata,
-                intendedBytes: plan.intendedBytes
+                intendedBytes: plan.intendedBytes,
+                allowingRecoveryMarker: requiresRecoveryMarker
             )
     }
 
@@ -1101,20 +1102,22 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
     private func expectedMetadataMatches(
         current: ManagedFileMetadata?,
         before: ManagedFileMetadata?,
-        intendedBytes: Data
+        intendedBytes: Data,
+        allowingRecoveryMarker: Bool
     ) -> Bool {
         guard let current else { return false }
-        let currentWithoutRecoveryMarker = removingRecoveryMarker(from: current)
+        let comparableCurrent = allowingRecoveryMarker ? removingRecoveryMarker(from: current) : current
         if let before {
-            return currentWithoutRecoveryMarker == removingRecoveryMarker(from: before)
+            let comparableBefore = allowingRecoveryMarker ? removingRecoveryMarker(from: before) : before
+            return comparableCurrent == comparableBefore
         }
-        return currentWithoutRecoveryMarker.permissions == 0o600
-            && currentWithoutRecoveryMarker.flags == 0
-            && currentWithoutRecoveryMarker.extendedAttributes.keys.allSatisfy {
+        return comparableCurrent.permissions == 0o600
+            && comparableCurrent.flags == 0
+            && comparableCurrent.extendedAttributes.keys.allSatisfy {
                 $0 == "com.apple.provenance"
             }
-            && currentWithoutRecoveryMarker.accessControlList == nil
-            && currentWithoutRecoveryMarker.lineEnding != .none && !intendedBytes.isEmpty
+            && comparableCurrent.accessControlList == nil
+            && comparableCurrent.lineEnding != .none && !intendedBytes.isEmpty
     }
 
     private func removingRecoveryMarker(from metadata: ManagedFileMetadata) -> ManagedFileMetadata {

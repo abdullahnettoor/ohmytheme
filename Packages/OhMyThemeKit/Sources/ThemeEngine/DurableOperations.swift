@@ -485,7 +485,7 @@ extension ThemeEngine {
                     adapterID: plan.adapterID,
                     adapterVersion: plan.adapterVersion,
                     capabilityID: plan.capabilityID,
-                    phase: receipt.configurationState == .unchanged ? .skipped : .applied,
+                    phase: applyRecordPhase(for: receipt),
                     intendedChangeDigest: plan.intendedChangeDigest,
                     staleStateToken: plan.staleStateToken,
                     planDigest: planReference?.digest,
@@ -513,7 +513,7 @@ extension ThemeEngine {
                         adapterID: plan.adapterID,
                         adapterVersion: plan.adapterVersion,
                         capabilityID: plan.capabilityID,
-                        phase: recovered.configurationState == .unchanged ? .skipped : .applied,
+                        phase: applyRecordPhase(for: recovered),
                         intendedChangeDigest: plan.intendedChangeDigest,
                         staleStateToken: plan.staleStateToken,
                         planDigest: planReference?.digest,
@@ -1142,7 +1142,7 @@ extension ThemeEngine {
                 case .beforeChange: newPhase = .reconciledBefore
                 case .intendedAfterChange:
                     if let recoveredReceipt {
-                        newPhase = recoveredReceipt.configurationState == .unchanged ? .skipped : .applied
+                        newPhase = applyRecordPhase(for: recoveredReceipt)
                     } else {
                         newPhase = .reconciledIntended
                     }
@@ -1169,6 +1169,10 @@ extension ThemeEngine {
             }
             try persistence.journalTransitionState(operationID: operation.id, to: .reconciled)
         }
+    }
+
+    private func applyRecordPhase(for receipt: AdapterReceipt) -> RecordPhase {
+        receipt.configurationState == .unchanged ? .skipped : .applied
     }
 
     private func recoverApplyReceipt(plan: AdapterPlan) async -> AdapterReceipt? {
