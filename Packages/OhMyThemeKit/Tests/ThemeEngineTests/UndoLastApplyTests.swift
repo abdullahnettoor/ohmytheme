@@ -244,6 +244,48 @@ struct UndoLastApplyTests {
         #expect(try fixture.store.journalInterruptedOperations().isEmpty)
     }
 
+    @Test("A missing apply receipt is retired as conflicted instead of retried")
+    func missingReceiptIsNotRetried() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = RecordingWritableAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let workspace = Fixtures.workspace(recordingInstances: ["recording.missing-receipt"])
+        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let appliedRecord = try #require(
+            try fixture.store.journalLoadRecords(operationID: apply.operationID).first
+        )
+        try fixture.store.journalSaveRecord(
+            JournaledRecord(
+                operationID: appliedRecord.operationID,
+                targetInstanceID: appliedRecord.targetInstanceID,
+                ordinal: appliedRecord.ordinal,
+                adapterID: appliedRecord.adapterID,
+                adapterVersion: appliedRecord.adapterVersion,
+                capabilityID: appliedRecord.capabilityID,
+                phase: appliedRecord.phase,
+                intendedChangeDigest: appliedRecord.intendedChangeDigest,
+                staleStateToken: appliedRecord.staleStateToken,
+                planDigest: appliedRecord.planDigest,
+                receiptJSON: nil,
+                detail: appliedRecord.detail
+            )
+        )
+
+        let undo = try await engine.undoLast(workspace: workspace)
+
+        #expect(undo.outcomes.count == 1)
+        #expect(undo.outcomes[0].configurationState == .conflicted)
+        #expect(try fixture.store.journalLoadRecords(operationID: apply.operationID)[0].phase == .conflicted)
+        await #expect(throws: DurableOperationError.self) {
+            _ = try await engine.undoLast(workspace: workspace)
+        }
+    }
+
     @Test("Undo throws when there is no completed apply transaction")
     func undoWithoutLATThrows() async throws {
         let fixture = try Self.makeFixture()

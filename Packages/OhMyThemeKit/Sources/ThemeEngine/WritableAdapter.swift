@@ -149,6 +149,10 @@ public struct WriteBoundaryConflict: Error, Equatable, Sendable {
 ///   must refuse to overwrite state it cannot prove it still owns.
 /// - Stop and report on **external edits**, never force-overwrite.
 /// - Never leak baseline bytes or other **sensitive data** into logs or reports.
+public protocol RecoverableApplyAdapter: WritableThemeAdapter {
+    func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt
+}
+
 public protocol WritableThemeAdapter: ThemeAdapter {
     func prepareConnection(
         instance: ConnectedTargetInstance,

@@ -221,7 +221,7 @@ extension PersistenceStore {
                     SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.created_at
                     FROM operations o
                     WHERE o.kind = 'apply'
-                      AND o.state = 'applied'
+                      AND o.state IN ('applied', 'reconciled')
                       AND o.workspace_id = ?
                       AND EXISTS (
                         SELECT 1 FROM operation_records r

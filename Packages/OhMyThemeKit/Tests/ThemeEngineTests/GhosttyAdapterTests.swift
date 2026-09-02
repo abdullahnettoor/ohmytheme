@@ -44,6 +44,263 @@ struct GhosttyAdapterTests {
         #expect(plan.userActions.contains(UserAction(title: "Reload Ghostty", detail: "Press cmd+shift+,")))
     }
 
+    @Test("Theme preparation creates a deterministic Ghostty fragment without writing")
+    func themePreparationIsReadOnly() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let before = try Data(contentsOf: fixture.managedURL)
+        let theme = PreparedTheme(
+            variantID: Fixtures.pack.variants[0].qualifiedID,
+            variant: Fixtures.pack.variants[0],
+            sourceType: .generated,
+            sourceRevision: Fixtures.pack.source.revision,
+            attribution: Fixtures.pack.source.attribution,
+            themeSchemaVersion: Fixtures.pack.schemaVersion,
+            contentDigest: Fixtures.pack.variants[0].contentDigest,
+            compilerVersion: "theme-compiler-1",
+            upstreamArtifact: nil
+        )
+
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: theme)
+
+        #expect(plan.sourceType == .generated)
+        #expect(plan.activationReach == .reloadRequired)
+        #expect(String(decoding: plan.artifact, as: UTF8.self).contains("background = #112233"))
+        #expect(String(decoding: plan.artifact, as: UTF8.self).contains("foreground = #112233"))
+        #expect(try Data(contentsOf: fixture.managedURL) == before)
+    }
+
+    @Test("Theme apply validates the staged graph and can safely undo its managed fragment")
+    func themeApplyAndRollback() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let theme = PreparedTheme(
+            variantID: Fixtures.pack.variants[0].qualifiedID,
+            variant: Fixtures.pack.variants[0],
+            sourceType: .generated,
+            sourceRevision: Fixtures.pack.source.revision,
+            attribution: Fixtures.pack.source.attribution,
+            themeSchemaVersion: Fixtures.pack.schemaVersion,
+            contentDigest: Fixtures.pack.variants[0].contentDigest,
+            compilerVersion: "theme-compiler-1",
+            upstreamArtifact: nil
+        )
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: theme)
+
+        let receipt = try await adapter.apply(plan)
+        #expect(receipt.configurationState == .updated)
+        #expect(receipt.runningInstanceReach == .reloadRequired)
+        let applied = try String(contentsOf: fixture.managedURL, encoding: .utf8)
+        #expect(applied.contains("foreground = #112233"))
+        #expect(await fixture.runtime.validations == 3)
+
+        try await adapter.rollbackApply(plan: plan, receipt: receipt)
+        #expect(try String(contentsOf: fixture.managedURL, encoding: .utf8) == "# Managed by Oh My Theme\n")
+    }
+
+    @Test("Undo refuses an external replacement with the same theme bytes")
+    func themeUndoRejectsSameContentReplacement() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        let receipt = try await adapter.apply(plan)
+        let replacement = fixture.directory.appendingPathComponent("replacement.ghostty")
+        try plan.artifact.write(to: replacement)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: replacement.path
+        )
+        _ = try FileManager.default.replaceItemAt(fixture.managedURL, withItemAt: replacement)
+
+        await #expect(throws: GhosttyAdapterError.self) {
+            try await adapter.rollbackApply(plan: plan, receipt: receipt)
+        }
+        #expect(try Data(contentsOf: fixture.managedURL) == plan.artifact)
+    }
+
+    @Test("Theme apply preserves an external edit instead of overwriting it")
+    func themeApplyConflict() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let theme = PreparedTheme(
+            variantID: Fixtures.pack.variants[0].qualifiedID,
+            variant: Fixtures.pack.variants[0],
+            sourceType: .generated,
+            sourceRevision: Fixtures.pack.source.revision,
+            attribution: Fixtures.pack.source.attribution,
+            themeSchemaVersion: Fixtures.pack.schemaVersion,
+            contentDigest: Fixtures.pack.variants[0].contentDigest,
+            compilerVersion: "theme-compiler-1",
+            upstreamArtifact: nil
+        )
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: theme)
+        let external = Data("# changed outside Oh My Theme\n".utf8)
+        try external.write(to: fixture.managedURL)
+
+        await #expect(throws: GhosttyAdapterError.self) {
+            _ = try await adapter.apply(plan)
+        }
+        #expect(try Data(contentsOf: fixture.managedURL) == external)
+    }
+
+    @Test("Theme apply revalidates the parent after validation")
+    func themeApplyRevalidatesParentAfterValidation() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        await fixture.runtime.mutateParentDuringValidation(fixture.parentURL)
+
+        await #expect(throws: GhosttyAdapterError.self) {
+            _ = try await adapter.apply(plan)
+        }
+        #expect(try String(contentsOf: fixture.managedURL, encoding: .utf8) == "# Managed by Oh My Theme\n")
+    }
+
+    @Test("An upstream Ghostty artifact is applied byte-for-byte")
+    func upstreamArtifactIsNotRegenerated() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let upstream = Data("foreground = #abcdef\nbackground = #123456\n".utf8)
+        let theme = PreparedTheme(
+            variantID: Fixtures.pack.variants[0].qualifiedID,
+            variant: Fixtures.pack.variants[0],
+            sourceType: .upstream,
+            sourceRevision: Fixtures.pack.source.revision,
+            attribution: Fixtures.pack.source.attribution,
+            themeSchemaVersion: Fixtures.pack.schemaVersion,
+            contentDigest: Fixtures.pack.variants[0].contentDigest,
+            compilerVersion: "theme-compiler-1",
+            upstreamArtifact: upstream
+        )
+
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: theme)
+        _ = try await adapter.apply(plan)
+
+        #expect(plan.artifact == upstream)
+        #expect(try Data(contentsOf: fixture.managedURL) == upstream)
+    }
+
+    @Test("Durable Ghostty apply and undo restores the previous managed fragment")
+    func durableThemeApplyAndUndo() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let adapter = fixture.adapter()
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
+        let preview = try await engine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID,
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [fixture.instance]
+            ))
+
+        _ = try await engine.applyDurable(
+            previewID: preview.id,
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [fixture.instance]
+            )
+        )
+        let applied = try String(contentsOf: fixture.managedURL, encoding: .utf8)
+        #expect(applied.contains("foreground = #112233"))
+
+        let undo = try await engine.undoLast(workspace: .myMac)
+
+        #expect(undo.outcomes[0].configurationState == .updated)
+        #expect(undo.outcomes[0].runningInstanceReach == .reloadRequired)
+        #expect(try String(contentsOf: fixture.managedURL, encoding: .utf8) == "# Managed by Oh My Theme\n")
+    }
+
+    @Test("Interrupted Ghostty apply recovers its receipt for a later undo")
+    func interruptedThemeApplyRecoversReceipt() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let adapter = fixture.adapter()
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [fixture.instance]
+        )
+        let preview = try await engine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: workspace)
+        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let appliedRecord = try #require(try store.journalLoadRecords(operationID: apply.operationID).first)
+        try store.journalTransitionState(operationID: apply.operationID, to: .applying)
+        try store.journalSaveRecord(
+            JournaledRecord(
+                operationID: appliedRecord.operationID,
+                targetInstanceID: appliedRecord.targetInstanceID,
+                ordinal: appliedRecord.ordinal,
+                adapterID: appliedRecord.adapterID,
+                adapterVersion: appliedRecord.adapterVersion,
+                capabilityID: appliedRecord.capabilityID,
+                phase: .applying,
+                intendedChangeDigest: appliedRecord.intendedChangeDigest,
+                staleStateToken: appliedRecord.staleStateToken,
+                planDigest: appliedRecord.planDigest,
+                receiptJSON: nil,
+                detail: nil
+            )
+        )
+
+        let relaunched = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
+        try await relaunched.reconcileInterruptedOperations()
+
+        #expect(try store.journalLoadRecords(operationID: apply.operationID)[0].phase == .applied)
+        let undo = try await relaunched.undoLast(workspace: workspace)
+        #expect(undo.outcomes[0].configurationState == .updated)
+        #expect(undo.outcomes[0].runningInstanceReach == .reloadRequired)
+    }
+
+    @Test("Undo reports a conflict and preserves an externally changed Ghostty fragment")
+    func durableThemeUndoConflict() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let adapter = fixture.adapter()
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [fixture.instance]
+        )
+        let preview = try await engine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: workspace)
+        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let external = Data("# changed externally\n".utf8)
+        try external.write(to: fixture.managedURL)
+
+        let undo = try await engine.undoLast(workspace: workspace)
+
+        #expect(undo.outcomes[0].configurationState == .conflicted)
+        #expect(try Data(contentsOf: fixture.managedURL) == external)
+    }
+
     @Test("Connect validates the staged graph and writes only the managed include and fragment")
     func connectWritesOwnedFiles() async throws {
         let fixture = try Fixture(parentContents: "background = #101010\n")
@@ -266,6 +523,20 @@ struct GhosttyAdapterTests {
             runtime = TestGhosttyRuntime()
         }
 
+        func theme() -> PreparedTheme {
+            PreparedTheme(
+                variantID: Fixtures.pack.variants[0].qualifiedID,
+                variant: Fixtures.pack.variants[0],
+                sourceType: .generated,
+                sourceRevision: Fixtures.pack.source.revision,
+                attribution: Fixtures.pack.source.attribution,
+                themeSchemaVersion: Fixtures.pack.schemaVersion,
+                contentDigest: Fixtures.pack.variants[0].contentDigest,
+                compilerVersion: "theme-compiler-1",
+                upstreamArtifact: nil
+            )
+        }
+
         func adapter() -> GhosttyConfigurationAdapter {
             GhosttyConfigurationAdapter(
                 runtime: runtime,
@@ -291,6 +562,11 @@ struct GhosttyAdapterTests {
 
 actor TestGhosttyRuntime: GhosttyRuntime {
     private(set) var validations = 0
+    private var parentToMutateDuringValidation: URL?
+
+    func mutateParentDuringValidation(_ url: URL) {
+        parentToMutateDuringValidation = url
+    }
 
     func discoverInstallations() async throws -> [GhosttyInstallation] {
         [
@@ -303,5 +579,9 @@ actor TestGhosttyRuntime: GhosttyRuntime {
 
     func validate(_ input: GhosttyValidationInput) async throws {
         validations += 1
+        if let url = parentToMutateDuringValidation {
+            try Data("background = #202020\n".utf8).write(to: url)
+            parentToMutateDuringValidation = nil
+        }
     }
 }

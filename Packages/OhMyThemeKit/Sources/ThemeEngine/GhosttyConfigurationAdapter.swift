@@ -174,9 +174,12 @@ public final class SystemGhosttyRuntime: GhosttyRuntime, @unchecked Sendable {
         do {
             try fileManager.createDirectory(at: parentDirectory, withIntermediateDirectories: true)
             try stage(input.parent, at: parentURL)
-            try stage(input.managedArtifact, at: stagedURL(input.managedArtifactURL, input: input, root: directory))
+            try stage(
+                input.managedArtifact,
+                at: try stagedURL(input.managedArtifactURL, input: input, root: directory)
+            )
             for (url, bytes) in input.includedFiles {
-                try stage(bytes, at: stagedURL(url, input: input, root: directory))
+                try stage(bytes, at: try stagedURL(url, input: input, root: directory))
             }
             _ = try run(
                 executable: input.executableURL,
@@ -197,21 +200,20 @@ public final class SystemGhosttyRuntime: GhosttyRuntime, @unchecked Sendable {
         try bytes.write(to: url)
     }
 
-    private func stagedURL(_ url: URL, input: GhosttyValidationInput, root: URL) -> URL {
+    private func stagedURL(_ url: URL, input: GhosttyValidationInput, root: URL) throws -> URL {
         let base = input.parentURL.deletingLastPathComponent().standardizedFileURL.path
         let path = url.standardizedFileURL.path
         let stagedBase = root.appendingPathComponent("config", isDirectory: true)
         if path == base {
             return stagedBase
         }
-        if path.hasPrefix(base + "/") {
-            let relative = String(path.dropFirst(base.count + 1))
-            return stagedBase.appendingPathComponent(relative)
+        guard path.hasPrefix(base + "/") else {
+            throw GhosttyRuntimeError.validationFailed(
+                "Cannot safely stage an include outside the selected Ghostty configuration directory."
+            )
         }
-        return
-            root
-            .appendingPathComponent("external", isDirectory: true)
-            .appendingPathComponent(url.lastPathComponent)
+        let relative = String(path.dropFirst(base.count + 1))
+        return stagedBase.appendingPathComponent(relative)
     }
 
     private func run(executable: URL, arguments: [String]) throws -> String {
@@ -318,6 +320,12 @@ public struct GhosttyDisconnectPayload: Codable, Equatable, Sendable {
     }
 }
 
+private struct GhosttyThemeState: Codable {
+    let details: GhosttyConnectionDetails
+    let parent: ManagedFileInspection
+    let artifactPlan: ManagedFilePlan
+}
+
 public enum GhosttyAdapterError: Error, Equatable, Sendable {
     case installationUnavailable(GhosttyInstallationStatus)
     case configurationUnavailable(GhosttyConfigurationStatus)
@@ -329,6 +337,7 @@ public enum GhosttyAdapterError: Error, Equatable, Sendable {
     case managedArtifactConflict(URL)
     case restorationConflict
     case themeApplyUnavailable
+    case notConnected(URL)
     case filesystemFailure(String)
 }
 
@@ -350,7 +359,7 @@ extension DisconnectPlan {
     }
 }
 
-public actor GhosttyConfigurationAdapter: WritableThemeAdapter {
+public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
     public let id = "ghostty"
     public let version = "1"
     public let payloadVersion = "1"
@@ -703,23 +712,272 @@ public actor GhosttyConfigurationAdapter: WritableThemeAdapter {
         instance: ConnectedTargetInstance,
         theme: PreparedTheme
     ) async throws -> AdapterPlan {
-        throw GhosttyAdapterError.themeApplyUnavailable
+        let report = try await discover()
+        guard let installation = report.supportedInstallation else {
+            throw GhosttyAdapterError.installationUnavailable(report.installationStatus)
+        }
+        let parentURL = (configuredConfigurationURL ?? report.resolvedConfigurationURL ?? locator.defaultURL)
+            .standardizedFileURL
+        let parent = try managedFiles.inspect(at: parentURL)
+        guard let parentBytes = parent.snapshot.bytes,
+            containsManagedInclude(parentBytes)
+        else {
+            throw GhosttyAdapterError.notConnected(parent.resolvedURL)
+        }
+        if case .managedByNix = parent.ownership {
+            throw GhosttyAdapterError.managedByNix(parent.resolvedURL)
+        }
+
+        let artifactURL =
+            configuredManagedArtifactURL
+            ?? parent.resolvedURL.deletingLastPathComponent()
+            .appendingPathComponent("oh-my-theme", isDirectory: true)
+            .appendingPathComponent("config.ghostty")
+        let artifact = try managedFiles.inspect(at: artifactURL)
+        guard artifact.snapshot.exists else {
+            throw GhosttyAdapterError.notConnected(artifact.resolvedURL)
+        }
+        if case .managedByNix = artifact.ownership {
+            throw GhosttyAdapterError.managedByNix(artifact.resolvedURL)
+        }
+        if case .linkedUserOwned = artifact.ownership {
+            throw GhosttyAdapterError.managedArtifactConflict(artifact.resolvedURL)
+        }
+
+        let generatedArtifact = try theme.upstreamArtifact ?? generatedGhosttyArtifact(for: theme.variant)
+        let intendedArtifact =
+            theme.upstreamArtifact == nil
+            ? applyLineEnding(generatedArtifact, matching: artifact.snapshot.lineEnding)
+            : generatedArtifact
+        let artifactPlan = try managedFiles.prepare(
+            at: artifactURL,
+            replacingWith: intendedArtifact,
+            approveLinkedSource: true
+        )
+        let details = GhosttyConnectionDetails(
+            executableURL: installation.executableURL,
+            version: installation.version,
+            resolvedConfigURL: parent.resolvedURL,
+            resolvedConfigPermissions: parent.snapshot.metadata?.permissions ?? 0o600,
+            linkedSourceURL: linkedSourceURL(from: parent.ownership),
+            includeLine: "config-file = ?oh-my-theme/config.ghostty",
+            managedArtifactURL: artifactPlan.resolvedURL,
+            managedArtifactPermissions: artifact.snapshot.metadata?.permissions ?? 0o600,
+            expectedReload: "Press cmd+shift+,"
+        )
+        let state = GhosttyThemeState(
+            details: details,
+            parent: parent,
+            artifactPlan: artifactPlan
+        )
+        try await validateTheme(state)
+        return AdapterPlan(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            adapterVersion: version,
+            capabilityID: "theme",
+            payload: AdapterPayloadEnvelope(
+                adapterID: id,
+                adapterVersion: version,
+                payloadVersion: payloadVersion,
+                payload: intendedArtifact
+            ),
+            intendedChangeDigest: artifactPlan.intendedDigest,
+            capturedPreChangeState: try encode(state),
+            staleStateToken: digest(
+                of: Data("\(parent.snapshot.staleStateToken)|\(artifactPlan.staleStateToken)".utf8)
+            ),
+            expectedSideEffects: [
+                "Ghostty: managed theme fragment",
+                "Ghostty: configuration reload required",
+            ],
+            requiredPermissions: ["Write the connected user-owned Ghostty theme fragment"],
+            sourceType: theme.sourceType,
+            sourceRevision: theme.sourceRevision,
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: []
+        )
     }
 
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
-        throw GhosttyAdapterError.themeApplyUnavailable
+        let state = try themeState(from: plan)
+        guard plan.payload.payload == state.artifactPlan.intendedBytes else {
+            throw GhosttyAdapterError.malformedPlan
+        }
+        try await revalidateApply(plan: plan)
+        do {
+            try await validateTheme(state)
+            let latestParent = try managedFiles.inspect(at: state.parent.requestedURL)
+            guard latestParent == state.parent else {
+                throw GhosttyAdapterError.staleState
+            }
+            let receipt = try managedFiles.apply(state.artifactPlan)
+            return AdapterReceipt(
+                configurationState: receipt.changed ? .updated : .unchanged,
+                runningInstanceReach: .reloadRequired,
+                detail: receipt.changed
+                    ? "Ghostty theme updated; reload required with cmd+shift+,"
+                    : "Ghostty theme already selected; reload required with cmd+shift+,",
+                rollbackData: try encode(receipt)
+            )
+        } catch let error as GhosttyRuntimeError {
+            throw GhosttyAdapterError.validationFailed(String(describing: error))
+        } catch let error as GhosttyAdapterError {
+            throw error
+        } catch {
+            throw GhosttyAdapterError.filesystemFailure(String(describing: error))
+        }
     }
 
     public func revalidateApply(plan: AdapterPlan) async throws {
-        throw GhosttyAdapterError.themeApplyUnavailable
+        let state = try themeState(from: plan)
+        guard plan.adapterID == id,
+            plan.adapterVersion == version,
+            plan.payload.adapterID == id,
+            plan.payload.adapterVersion == version,
+            plan.payload.payloadVersion == payloadVersion,
+            plan.payload.payload == state.artifactPlan.intendedBytes
+        else {
+            throw GhosttyAdapterError.malformedPlan
+        }
+        let currentParent = try managedFiles.inspect(at: state.parent.requestedURL)
+        let currentArtifact = try managedFiles.inspect(at: state.artifactPlan.requestedURL)
+        guard currentParent.resolvedURL == state.parent.resolvedURL,
+            currentParent.snapshot.staleStateToken == state.parent.snapshot.staleStateToken,
+            currentArtifact.resolvedURL == state.artifactPlan.resolvedURL,
+            currentArtifact.snapshot.staleStateToken == state.artifactPlan.staleStateToken
+        else {
+            throw GhosttyAdapterError.staleState
+        }
+    }
+
+    public func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt {
+        let state = try themeState(from: plan)
+        let currentParent = try managedFiles.inspect(at: state.parent.requestedURL)
+        let currentArtifact = try managedFiles.inspect(at: state.artifactPlan.requestedURL)
+        guard currentParent == state.parent, matches(currentArtifact, state.artifactPlan) else {
+            throw GhosttyAdapterError.restorationConflict
+        }
+        let managedReceipt = ManagedFileReceipt(
+            planID: state.artifactPlan.id,
+            before: state.artifactPlan.inspection,
+            after: currentArtifact,
+            changed: currentArtifact != state.artifactPlan.inspection
+        )
+        return AdapterReceipt(
+            configurationState: managedReceipt.changed ? .updated : .unchanged,
+            runningInstanceReach: .reloadRequired,
+            detail: "Ghostty theme apply recovered; reload required with cmd+shift+,",
+            rollbackData: try encode(managedReceipt)
+        )
     }
 
     public func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification {
-        throw GhosttyAdapterError.themeApplyUnavailable
+        let state = try themeState(from: plan)
+        let currentParent = try managedFiles.inspect(at: state.parent.requestedURL)
+        let currentArtifact = try managedFiles.inspect(at: state.artifactPlan.requestedURL)
+        if currentParent == state.parent, currentArtifact == state.artifactPlan.inspection {
+            return .beforeChange
+        }
+        if currentParent == state.parent, matches(currentArtifact, state.artifactPlan) {
+            return .intendedAfterChange
+        }
+        return .conflicting
     }
 
     public func rollbackApply(plan: AdapterPlan, receipt: AdapterReceipt) async throws {
-        throw GhosttyAdapterError.themeApplyUnavailable
+        let state = try themeState(from: plan)
+        let currentParent = try managedFiles.inspect(at: state.parent.requestedURL)
+        guard currentParent == state.parent,
+            let rollbackData = receipt.rollbackData,
+            let managedReceipt = try? decode(ManagedFileReceipt.self, from: rollbackData),
+            managedReceipt.planID == state.artifactPlan.id
+        else {
+            throw GhosttyAdapterError.restorationConflict
+        }
+        do {
+            try managedFiles.rollback(managedReceipt)
+        } catch {
+            throw GhosttyAdapterError.filesystemFailure(String(describing: error))
+        }
+    }
+
+    private func validateTheme(_ state: GhosttyThemeState) async throws {
+        let includedFiles: [URL: Data]
+        do {
+            includedFiles = try includeGraph(
+                from: state.parent.resolvedURL,
+                bytes: state.parent.snapshot.bytes ?? Data(),
+                replacing: state.artifactPlan.resolvedURL,
+                visited: []
+            )
+            try await runtime.validate(
+                GhosttyValidationInput(
+                    executableURL: state.details.executableURL,
+                    parentURL: state.parent.resolvedURL,
+                    parent: state.parent.snapshot.bytes ?? Data(),
+                    managedArtifactURL: state.artifactPlan.resolvedURL,
+                    managedArtifact: state.artifactPlan.intendedBytes,
+                    includedFiles: includedFiles
+                ))
+        } catch let error as GhosttyRuntimeError {
+            throw GhosttyAdapterError.validationFailed(String(describing: error))
+        } catch let error as GhosttyAdapterError {
+            throw error
+        } catch {
+            throw GhosttyAdapterError.filesystemFailure(String(describing: error))
+        }
+    }
+
+    private func themeState(from plan: AdapterPlan) throws -> GhosttyThemeState {
+        guard let stateData = plan.capturedPreChangeState else {
+            throw GhosttyAdapterError.malformedPlan
+        }
+        return try decode(GhosttyThemeState.self, from: stateData)
+    }
+
+    private func generatedGhosttyArtifact(for variant: ThemeVariant) throws -> Data {
+        let keys: [(SemanticRole, String)] = [
+            (.canvas, "background = "),
+            (.primaryText, "foreground = "),
+            (.selection, "selection-background = "),
+            (.ansiBlack, "palette = 0="),
+            (.ansiRed, "palette = 1="),
+            (.ansiGreen, "palette = 2="),
+            (.ansiYellow, "palette = 3="),
+            (.ansiBlue, "palette = 4="),
+            (.ansiMagenta, "palette = 5="),
+            (.ansiCyan, "palette = 6="),
+            (.ansiWhite, "palette = 7="),
+        ]
+        let lines = try keys.map { role, prefix in
+            guard let color = variant.roles[role]?.rawValue else {
+                throw GhosttyAdapterError.themeApplyUnavailable
+            }
+            return "\(prefix)\(color)"
+        }
+        return Data((lines.joined(separator: "\n") + "\n").utf8)
+    }
+
+    private func applyLineEnding(_ bytes: Data, matching lineEnding: ManagedFileLineEnding) -> Data {
+        guard lineEnding != .lf, lineEnding != .none else { return bytes }
+        let text = String(decoding: bytes, as: UTF8.self)
+        let separator: String
+        switch lineEnding {
+        case .crlf: separator = "\r\n"
+        case .cr: separator = "\r"
+        case .lf, .none, .mixed: separator = "\n"
+        }
+        return Data(text.replacingOccurrences(of: "\n", with: separator).utf8)
+    }
+
+    private func containsManagedInclude(_ bytes: Data) -> Bool {
+        String(decoding: bytes, as: UTF8.self)
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .contains {
+                $0.trimmingCharacters(in: .whitespaces) == "config-file = ?oh-my-theme/config.ghostty"
+            }
     }
 
     private func connectionPayload(from plan: ConnectionPlan) throws -> GhosttyConnectionPayload {

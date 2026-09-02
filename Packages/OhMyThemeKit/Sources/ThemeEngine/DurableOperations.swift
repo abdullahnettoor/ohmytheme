@@ -504,6 +504,34 @@ extension ThemeEngine {
                 detail: receipt.detail
             )
         } catch {
+            if let recovered = await self.recoverApplyReceipt(plan: plan) {
+                try? persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operationID,
+                        targetInstanceID: plan.targetInstanceID,
+                        ordinal: ordinal,
+                        adapterID: plan.adapterID,
+                        adapterVersion: plan.adapterVersion,
+                        capabilityID: plan.capabilityID,
+                        phase: .applied,
+                        intendedChangeDigest: plan.intendedChangeDigest,
+                        staleStateToken: plan.staleStateToken,
+                        planDigest: planReference?.digest,
+                        receiptJSON: try? self.encodeReceipt(recovered),
+                        detail: "Recovered after apply error: \(recovered.detail ?? "write completed")"
+                    )
+                )
+                return TargetCapabilityOutcome(
+                    targetInstanceID: plan.targetInstanceID,
+                    adapterID: plan.adapterID,
+                    capabilityID: plan.capabilityID,
+                    sourceType: plan.sourceType,
+                    sourceRevision: plan.sourceRevision,
+                    configurationState: recovered.configurationState,
+                    runningInstanceReach: recovered.runningInstanceReach,
+                    detail: "Recovered after apply error: \(recovered.detail ?? "write completed")"
+                )
+            }
             try? persistence.journalSaveRecord(
                 JournaledRecord(
                     operationID: operationID,
@@ -956,6 +984,40 @@ extension ThemeEngine {
                 detail: "Could not load the original plan: \(error)"
             )
         }
+        guard let receiptJSON = record.receiptJSON,
+            let receiptData = receiptJSON.data(using: .utf8),
+            let receipt = try? JSONDecoder().decode(AdapterReceipt.self, from: receiptData)
+        else {
+            try? persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operationID,
+                    targetInstanceID: record.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: record.adapterID,
+                    adapterVersion: record.adapterVersion,
+                    capabilityID: record.capabilityID,
+                    phase: .failed,
+                    intendedChangeDigest: "undo.\(record.intendedChangeDigest)",
+                    staleStateToken: record.staleStateToken,
+                    planDigest: record.planDigest,
+                    receiptJSON: nil,
+                    detail: "The original apply receipt is missing or malformed."
+                )
+            )
+            var updated = record
+            updated.phase = .conflicted
+            try? persistence.journalSaveRecord(updated)
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: .conflicted,
+                runningInstanceReach: .unavailable,
+                detail: "The original apply receipt is missing or malformed."
+            )
+        }
 
         // Mark the undo operation as applying just before the first mutation.
         try? persistence.journalSaveRecord(
@@ -980,14 +1042,7 @@ extension ThemeEngine {
         }
 
         do {
-            try await adapter.rollbackApply(
-                plan: plan,
-                receipt: AdapterReceipt(
-                    configurationState: .updated,
-                    runningInstanceReach: .currentInstances,
-                    detail: "undo"
-                )
-            )
+            try await adapter.rollbackApply(plan: plan, receipt: receipt)
             // Mark the undo record as applied and the original apply record as rolled back.
             try? persistence.journalSaveRecord(
                 JournaledRecord(
@@ -1012,10 +1067,10 @@ extension ThemeEngine {
                 targetInstanceID: record.targetInstanceID,
                 adapterID: record.adapterID,
                 capabilityID: record.capabilityID,
-                sourceType: .unavailable,
-                sourceRevision: "n/a",
+                sourceType: plan.sourceType,
+                sourceRevision: plan.sourceRevision,
                 configurationState: .updated,
-                runningInstanceReach: .currentInstances,
+                runningInstanceReach: receipt.runningInstanceReach,
                 detail: "undone"
             )
         } catch {
@@ -1073,10 +1128,19 @@ extension ThemeEngine {
                     operationKind: operation.kind,
                     persistence: persistence
                 )
+                let recoveredReceipt: AdapterReceipt?
+                if operation.kind == .apply, classification == .intendedAfterChange {
+                    recoveredReceipt = try await recoverApplyReceipt(
+                        record: record,
+                        persistence: persistence
+                    )
+                } else {
+                    recoveredReceipt = nil
+                }
                 let newPhase: RecordPhase
                 switch classification {
                 case .beforeChange: newPhase = .reconciledBefore
-                case .intendedAfterChange: newPhase = .reconciledIntended
+                case .intendedAfterChange: newPhase = recoveredReceipt == nil ? .reconciledIntended : .applied
                 case .conflicting: newPhase = .reconciledConflict
                 }
                 try persistence.journalSaveRecord(
@@ -1091,13 +1155,34 @@ extension ThemeEngine {
                         intendedChangeDigest: record.intendedChangeDigest,
                         staleStateToken: record.staleStateToken,
                         planDigest: record.planDigest,
-                        receiptJSON: record.receiptJSON,
-                        detail: "reconciled:\(classification.rawValue)"
+                        receiptJSON: try recoveredReceipt.map(encodeReceipt),
+                        detail: recoveredReceipt == nil
+                            ? "reconciled:\(classification.rawValue)"
+                            : "reconciled:\(classification.rawValue):receipt-recovered"
                     )
                 )
             }
             try persistence.journalTransitionState(operationID: operation.id, to: .reconciled)
         }
+    }
+
+    private func recoverApplyReceipt(plan: AdapterPlan) async -> AdapterReceipt? {
+        guard let adapter = self.adapter(for: plan.adapterID) as? any RecoverableApplyAdapter else {
+            return nil
+        }
+        return try? await adapter.recoverApplyReceipt(plan: plan)
+    }
+
+    private func recoverApplyReceipt(
+        record: JournaledRecord,
+        persistence: PersistenceStore
+    ) async throws -> AdapterReceipt? {
+        guard let digest = record.planDigest else { return nil }
+        let bytes = try persistence.journalLoadContent(digest: digest)
+        guard let plan = try? JSONDecoder().decode(AdapterPlan.self, from: bytes) else {
+            return nil
+        }
+        return await recoverApplyReceipt(plan: plan)
     }
 
     private func classify(

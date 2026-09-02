@@ -175,15 +175,35 @@ public struct AdapterReceipt: Codable, Equatable, Sendable {
     public let configurationState: ConfigurationState
     public let runningInstanceReach: ActivationReach
     public let detail: String?
+    public let rollbackData: Data?
 
     public init(
         configurationState: ConfigurationState,
         runningInstanceReach: ActivationReach,
-        detail: String? = nil
+        detail: String? = nil,
+        rollbackData: Data? = nil
     ) {
         self.configurationState = configurationState
         self.runningInstanceReach = runningInstanceReach
         self.detail = detail
+        self.rollbackData = rollbackData
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case configurationState
+        case runningInstanceReach
+        case detail
+        case rollbackData
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            configurationState: try container.decode(ConfigurationState.self, forKey: .configurationState),
+            runningInstanceReach: try container.decode(ActivationReach.self, forKey: .runningInstanceReach),
+            detail: try container.decodeIfPresent(String.self, forKey: .detail),
+            rollbackData: try container.decodeIfPresent(Data.self, forKey: .rollbackData)
+        )
     }
 }
 
