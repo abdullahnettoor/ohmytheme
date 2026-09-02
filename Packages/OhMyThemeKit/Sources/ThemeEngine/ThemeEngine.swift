@@ -42,6 +42,9 @@ public struct PreparedTheme: Codable, Equatable, Sendable {
     public let sourceType: ThemeSourceKind
     public let sourceRevision: String
     public let attribution: String
+    public let themeSchemaVersion: Int
+    public let contentDigest: String
+    public let compilerVersion: String
     public let artifact: Data
 
     public init(
@@ -49,30 +52,63 @@ public struct PreparedTheme: Codable, Equatable, Sendable {
         sourceType: ThemeSourceKind,
         sourceRevision: String,
         attribution: String,
+        themeSchemaVersion: Int,
+        contentDigest: String,
+        compilerVersion: String,
         artifact: Data
     ) {
         self.variantID = variantID
         self.sourceType = sourceType
         self.sourceRevision = sourceRevision
         self.attribution = attribution
+        self.themeSchemaVersion = themeSchemaVersion
+        self.contentDigest = contentDigest
+        self.compilerVersion = compilerVersion
         self.artifact = artifact
+    }
+}
+
+public struct AdapterPayloadEnvelope: Codable, Equatable, Sendable {
+    public let adapterID: String
+    public let adapterVersion: String
+    public let payloadVersion: String
+    public let payload: Data
+
+    public init(
+        adapterID: String,
+        adapterVersion: String,
+        payloadVersion: String,
+        payload: Data
+    ) {
+        self.adapterID = adapterID
+        self.adapterVersion = adapterVersion
+        self.payloadVersion = payloadVersion
+        self.payload = payload
     }
 }
 
 public struct AdapterPlan: Codable, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
     public let adapterID: String
-    public let artifact: Data
+    public let adapterVersion: String
+    public let capabilityID: String
+    public let payload: AdapterPayloadEnvelope
     public let sourceType: ThemeSourceKind
     public let sourceRevision: String
     public let activationReach: ActivationReach
     public let setupNeeds: [UserAction]
     public let conflicts: [String]
 
+    public var artifact: Data {
+        payload.payload
+    }
+
     public init(
         targetInstanceID: TargetInstanceID,
         adapterID: String,
-        artifact: Data,
+        adapterVersion: String,
+        capabilityID: String,
+        payload: AdapterPayloadEnvelope,
         sourceType: ThemeSourceKind,
         sourceRevision: String,
         activationReach: ActivationReach,
@@ -81,7 +117,9 @@ public struct AdapterPlan: Codable, Equatable, Sendable {
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
-        self.artifact = artifact
+        self.adapterVersion = adapterVersion
+        self.capabilityID = capabilityID
+        self.payload = payload
         self.sourceType = sourceType
         self.sourceRevision = sourceRevision
         self.activationReach = activationReach
@@ -109,6 +147,7 @@ public struct AdapterReceipt: Codable, Equatable, Sendable {
 public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
     public let adapterID: String
+    public let capabilityID: String
     public let sourceType: ThemeSourceKind
     public let sourceRevision: String
     public let configurationState: ConfigurationState
@@ -118,6 +157,7 @@ public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
     public init(
         targetInstanceID: TargetInstanceID,
         adapterID: String,
+        capabilityID: String,
         sourceType: ThemeSourceKind,
         sourceRevision: String,
         configurationState: ConfigurationState,
@@ -126,6 +166,7 @@ public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
+        self.capabilityID = capabilityID
         self.sourceType = sourceType
         self.sourceRevision = sourceRevision
         self.configurationState = configurationState
@@ -189,6 +230,7 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
 
 public protocol ThemeAdapter: Sendable {
     var id: String { get }
+    var version: String { get }
 
     func prepareApply(
         instance: ConnectedTargetInstance,
@@ -250,7 +292,10 @@ public actor ThemeEngine {
             sourceType: source.type,
             sourceRevision: pack.source.revision,
             attribution: pack.source.attribution,
-            artifact: try encodeArtifact(for: variant)
+            themeSchemaVersion: pack.schemaVersion,
+            contentDigest: variant.contentDigest,
+            compilerVersion: "theme-compiler-1",
+            artifact: try encodeArtifact(for: variant, pack: pack)
         )
 
         var targetPlans: [AdapterPlan] = []
@@ -312,6 +357,7 @@ public actor ThemeEngine {
             TargetCapabilityOutcome(
                 targetInstanceID: plan.targetInstanceID,
                 adapterID: plan.adapterID,
+                capabilityID: plan.capabilityID,
                 sourceType: plan.sourceType,
                 sourceRevision: plan.sourceRevision,
                 configurationState: .failed,
@@ -324,6 +370,7 @@ public actor ThemeEngine {
                 outcomes[index] = TargetCapabilityOutcome(
                     targetInstanceID: plan.targetInstanceID,
                     adapterID: plan.adapterID,
+                    capabilityID: plan.capabilityID,
                     sourceType: plan.sourceType,
                     sourceRevision: plan.sourceRevision,
                     configurationState: .unavailable,
@@ -337,6 +384,7 @@ public actor ThemeEngine {
                 outcomes[index] = TargetCapabilityOutcome(
                     targetInstanceID: plan.targetInstanceID,
                     adapterID: plan.adapterID,
+                    capabilityID: plan.capabilityID,
                     sourceType: plan.sourceType,
                     sourceRevision: plan.sourceRevision,
                     configurationState: receipt.configurationState,
@@ -347,6 +395,7 @@ public actor ThemeEngine {
                 outcomes[index] = TargetCapabilityOutcome(
                     targetInstanceID: plan.targetInstanceID,
                     adapterID: plan.adapterID,
+                    capabilityID: plan.capabilityID,
                     sourceType: plan.sourceType,
                     sourceRevision: plan.sourceRevision,
                     configurationState: .failed,
@@ -360,6 +409,7 @@ public actor ThemeEngine {
                 TargetCapabilityOutcome(
                     targetInstanceID: $0,
                     adapterID: "unavailable",
+                    capabilityID: "theme",
                     sourceType: preview.sourceType,
                     sourceRevision: preview.sourceRevision,
                     configurationState: .unavailable,
@@ -379,20 +429,21 @@ public actor ThemeEngine {
     private func resolveSource(for pack: ThemePack) -> (type: ThemeSourceKind, revision: String)? {
         switch sourcePolicy {
         case .preferUpstream:
-            return (
-                pack.source.type == .upstream ? .upstream : .generated,
-                pack.source.revision
-            )
+            return (.generated, pack.source.revision)
         case .requireUpstream:
-            return pack.source.type == .upstream ? (.upstream, pack.source.revision) : nil
+            return nil
         case .useGenerated:
             return (.generated, pack.source.revision)
         }
     }
 
-    private func encodeArtifact(for variant: ThemeVariant) throws -> Data {
+    private func encodeArtifact(for variant: ThemeVariant, pack: ThemePack) throws -> Data {
         let artifact = GeneratedArtifact(
             variantID: variant.qualifiedID,
+            themeSchemaVersion: pack.schemaVersion,
+            sourceRevision: pack.source.revision,
+            contentDigest: variant.contentDigest,
+            compilerVersion: "theme-compiler-1",
             appearance: variant.appearance,
             roles: variant.roles
                 .map { ArtifactRole(role: $0.key.rawValue, color: $0.value.rawValue) }
@@ -419,6 +470,7 @@ public actor ThemeEngine {
 
 public actor RecordingThemeAdapter: ThemeAdapter {
     public let id = "recording"
+    public let version = "1"
     private var preparedArtifacts: [Data] = []
     private var appliedArtifactsStorage: [Data] = []
 
@@ -432,7 +484,14 @@ public actor RecordingThemeAdapter: ThemeAdapter {
         return AdapterPlan(
             targetInstanceID: instance.id,
             adapterID: id,
-            artifact: theme.artifact,
+            adapterVersion: version,
+            capabilityID: "theme",
+            payload: AdapterPayloadEnvelope(
+                adapterID: id,
+                adapterVersion: version,
+                payloadVersion: "1",
+                payload: theme.artifact
+            ),
             sourceType: theme.sourceType,
             sourceRevision: theme.sourceRevision,
             activationReach: .currentInstances
@@ -440,10 +499,13 @@ public actor RecordingThemeAdapter: ThemeAdapter {
     }
 
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
-        guard preparedArtifacts.contains(plan.artifact) else {
+        guard plan.payload.adapterID == id, plan.payload.adapterVersion == version else {
+            throw RecordingThemeAdapterError.incompatiblePayload
+        }
+        guard preparedArtifacts.contains(plan.payload.payload) else {
             throw RecordingThemeAdapterError.artifactWasNotPrepared
         }
-        appliedArtifactsStorage.append(plan.artifact)
+        appliedArtifactsStorage.append(plan.payload.payload)
         return AdapterReceipt(configurationState: .updated, runningInstanceReach: .currentInstances)
     }
 
@@ -454,10 +516,15 @@ public actor RecordingThemeAdapter: ThemeAdapter {
 
 public enum RecordingThemeAdapterError: Error, Equatable, Sendable {
     case artifactWasNotPrepared
+    case incompatiblePayload
 }
 
 private struct GeneratedArtifact: Codable, Equatable, Sendable {
     let variantID: String
+    let themeSchemaVersion: Int
+    let sourceRevision: String
+    let contentDigest: String
+    let compilerVersion: String
     let appearance: ThemeAppearance
     let roles: [ArtifactRole]
 }

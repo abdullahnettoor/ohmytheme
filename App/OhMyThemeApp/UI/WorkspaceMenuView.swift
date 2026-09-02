@@ -73,21 +73,49 @@ struct WorkspaceMenuView: View {
                 .disabled(selectedVariantID == nil)
 
                 if let preview {
-                    Text("\(preview.sourceType.rawValue) · \(preview.sourceRevision)")
+                    Text("Source: \(preview.sourceType.rawValue) · \(preview.sourceRevision)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Attribution: \(preview.attribution)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("Activation: \(preview.activationReach.rawValue)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    ForEach(preview.setupNeeds, id: \.title) { action in
-                        Text("\(action.title): \(action.detail)")
+
+                    if !preview.setupNeeds.isEmpty {
+                        Text("Setup needed")
+                            .font(.caption.weight(.semibold))
+                        ForEach(preview.setupNeeds, id: \.title) { action in
+                            Text("\(action.title): \(action.detail)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if !preview.conflicts.isEmpty {
+                        Text("Conflicts: \(preview.conflicts.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    if !preview.unavailableCapabilities.isEmpty {
+                        Text("Unavailable capabilities: \(preview.unavailableCapabilities.joined(separator: ", "))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                    if !preview.userActions.isEmpty {
+                        Text("User actions")
+                            .font(.caption.weight(.semibold))
+                        ForEach(preview.userActions, id: \.title) { action in
+                            Text("\(action.title): \(action.detail)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Button("Apply preview") {
                         Task {
                             do {
                                 report = try await model.apply(previewID: preview.id)
+                                self.preview = nil
                                 operationError = nil
                             } catch {
                                 operationError = String(describing: error)
@@ -98,9 +126,39 @@ struct WorkspaceMenuView: View {
                 }
 
                 if let report {
-                    Text("Applied to \(report.outcomes.count) Target Instance\(report.outcomes.count == 1 ? "" : "s").")
-                        .font(.caption)
-                        .accessibilityIdentifier("theme-apply-report")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Apply Report")
+                            .font(.caption.weight(.semibold))
+                        ForEach(
+                            Dictionary(grouping: report.outcomes, by: \.targetInstanceID).keys.sorted {
+                                $0.rawValue < $1.rawValue
+                            },
+                            id: \.self
+                        ) { targetInstanceID in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(targetInstanceID.rawValue)
+                                    .font(.caption.weight(.semibold))
+                                ForEach(
+                                    Dictionary(grouping: report.outcomes, by: \.targetInstanceID)[targetInstanceID]
+                                        ?? [],
+                                    id: \.capabilityID
+                                ) { outcome in
+                                    Text(
+                                        "\(outcome.capabilityID): \(outcome.configurationState.rawValue) · "
+                                            + "running \(outcome.runningInstanceReach.rawValue)"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    if let detail = outcome.detail {
+                                        Text(detail)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("theme-apply-report")
                 }
                 if let operationError {
                     Text(operationError)

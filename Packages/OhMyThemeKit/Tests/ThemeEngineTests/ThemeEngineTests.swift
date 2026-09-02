@@ -29,7 +29,7 @@ struct ThemeEngineTests {
         let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
         #expect(preview.variantID == "test-pack/dark")
-        #expect(preview.sourceType == .upstream)
+        #expect(preview.sourceType == .generated)
         #expect(preview.sourceRevision == "reviewed-revision")
         #expect(preview.activationReach == .currentInstances)
         #expect(preview.setupNeeds.isEmpty)
@@ -37,6 +37,9 @@ struct ThemeEngineTests {
         #expect(preview.unavailableCapabilities.isEmpty)
         #expect(preview.userActions.isEmpty)
         #expect(preview.targetPlans.count == 1)
+        #expect(preview.targetPlans[0].payload.adapterID == "recording")
+        #expect(preview.targetPlans[0].payload.adapterVersion == "1")
+        #expect(preview.targetPlans[0].payload.payloadVersion == "1")
         #expect(await adapter.appliedArtifacts().isEmpty)
 
         let serializedPreview = try JSONEncoder().encode(preview)

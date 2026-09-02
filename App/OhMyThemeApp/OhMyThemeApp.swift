@@ -28,7 +28,7 @@ struct OhMyThemeApp: App {
         ) {
             WorkspaceMenuView(
                 model: WorkspaceMenuModel(
-                    workspace: workspaceStore.workspace,
+                    workspace: workspaceStore.appWorkspace,
                     themeEngine: themeEngine
                 ))
         }

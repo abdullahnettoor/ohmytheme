@@ -6,4 +6,22 @@ import ThemeModel
 /// so this launch-scoped store returns the first-run Workspace.
 struct WorkspaceStore {
     var workspace: Workspace { .myMac }
+
+    var appWorkspace: Workspace {
+        #if DEBUG
+        return Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.debug"),
+                    displayName: "Recording Target",
+                    adapterID: "recording"
+                )
+            ]
+        )
+        #else
+        return workspace
+        #endif
+    }
 }
