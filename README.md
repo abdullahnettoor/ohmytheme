@@ -30,6 +30,7 @@ Scripts/                 Stable local and CI entry points
 ./Scripts/test-themes.sh    # Validate bundled Theme Packs and catalog output
 ./Scripts/test-app.sh       # App-hosted smoke tests only
 ./Scripts/build-app.sh      # Build the locally signed app
+./Scripts/prove-ghostty.sh  # Run the disposable Ghostty configuration proof
 ```
 
 Scripts report missing tools; they never install software.
