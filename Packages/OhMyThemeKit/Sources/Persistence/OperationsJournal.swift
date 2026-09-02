@@ -7,6 +7,7 @@ public enum OperationKind: String, Codable, Sendable {
     case apply
     case restore
     case disconnect
+    case undo
 }
 
 public enum OperationState: String, Codable, Sendable {
@@ -204,6 +205,34 @@ extension PersistenceStore {
                 )
             else { return nil }
             return try Self.decode(operationRow: row)
+        }
+    }
+
+    /// Returns the most recent completed Apply Transaction for `workspaceID`
+    /// that changed at least one Target Instance. This is the Last Apply
+    /// Transaction and stays valid until a replacement apply reaches terminal states.
+    public func journalFindLastAppliedTransaction(
+        workspaceID: WorkspaceID
+    ) throws -> JournaledOperation? {
+        try withRead { database in
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.created_at
+                    FROM operations o
+                    WHERE o.kind = 'apply'
+                      AND o.state = 'applied'
+                      AND o.workspace_id = ?
+                      AND EXISTS (
+                        SELECT 1 FROM operation_records r
+                        WHERE r.operation_id = o.id AND r.phase = 'applied'
+                      )
+                    ORDER BY o.created_at DESC
+                    LIMIT 1
+                    """,
+                arguments: [workspaceID.rawValue]
+            )
+            return try rows.first.map(Self.decode(operationRow:))
         }
     }
 

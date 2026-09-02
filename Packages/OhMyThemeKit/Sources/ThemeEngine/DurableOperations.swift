@@ -36,6 +36,23 @@ public enum DurableOperationError: Error, Equatable, Sendable {
     case cancellationRefused
     case operationInProgress
     case operationNotFound(UUID)
+    case noLastApplyTransaction
+}
+
+public struct UndoReport: Codable, Equatable, Sendable {
+    public let operationID: UUID
+    public let sourceOperationID: UUID
+    public let outcomes: [TargetCapabilityOutcome]
+
+    public init(
+        operationID: UUID,
+        sourceOperationID: UUID,
+        outcomes: [TargetCapabilityOutcome]
+    ) {
+        self.operationID = operationID
+        self.sourceOperationID = sourceOperationID
+        self.outcomes = outcomes
+    }
 }
 
 // MARK: - ThemeEngine additions
@@ -800,6 +817,252 @@ extension ThemeEngine {
         self.recordCancellationRequest(operationID)
         try persistence.journalTransitionState(operationID: operationID, to: .cancelled)
         return true
+    }
+
+    // MARK: Undo Last Apply Transaction
+
+    /// Undo the Last Apply Transaction for the given workspace.
+    ///
+    /// The Last Apply Transaction is the most recent completed apply operation that
+    /// changed at least one Target Instance. Undo runs through the same journal and
+    /// recovery machinery as apply: it prepares a new `undo` operation, iterates the
+    /// Last Apply Transaction's applied per-target records in deterministic order,
+    /// and rolls each one back through the writable adapter's guarded rollback.
+    ///
+    /// - A receipt whose current external state no longer matches the intended
+    ///   after-change is left visible as `.conflicted` and is not silently reused
+    ///   by a later undo.
+    /// - Records that were previously rolled back or marked conflicted are skipped.
+    public func undoLast(workspace: Workspace) async throws -> UndoReport {
+        guard let persistence = self.persistenceStore else {
+            throw DurableOperationError.persistenceRequired
+        }
+        try await ensureNoOperationInProgress()
+        try await reconcileInterruptedOperations()
+
+        guard
+            let lat = try persistence.journalFindLastAppliedTransaction(
+                workspaceID: workspace.id
+            )
+        else {
+            throw DurableOperationError.noLastApplyTransaction
+        }
+        let latRecords = try persistence.journalLoadRecords(operationID: lat.id)
+        let undoableRecords = latRecords.filter { $0.phase == .applied }
+
+        let operation = try persistence.journalStartOperation(
+            kind: .undo,
+            workspaceID: workspace.id,
+            variantID: lat.variantID
+        )
+        try await beginOperationTracking(operation)
+        defer { try? closeOperationTracking(operation.id) }
+
+        for (ordinal, record) in undoableRecords.enumerated() {
+            try persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operation.id,
+                    targetInstanceID: record.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: record.adapterID,
+                    adapterVersion: record.adapterVersion,
+                    capabilityID: record.capabilityID,
+                    phase: .prepared,
+                    intendedChangeDigest: "undo.\(record.intendedChangeDigest)",
+                    staleStateToken: record.staleStateToken,
+                    planDigest: record.planDigest,
+                    receiptJSON: record.receiptJSON,
+                    detail: nil
+                )
+            )
+        }
+
+        try await checkAndConsumeCancellation(operation.id)
+
+        var outcomes: [TargetCapabilityOutcome] = []
+        var anyRolledBack = false
+        for (ordinal, record) in undoableRecords.enumerated() {
+            let outcome = await self.runUndoStep(
+                record: record,
+                ordinal: ordinal,
+                operationID: operation.id,
+                markMutation: !anyRolledBack,
+                persistence: persistence
+            )
+            outcomes.append(outcome)
+            if outcome.configurationState == .updated {
+                anyRolledBack = true
+            }
+        }
+
+        try persistence.journalTransitionState(operationID: operation.id, to: .applied)
+        return UndoReport(
+            operationID: operation.id,
+            sourceOperationID: lat.id,
+            outcomes: outcomes
+        )
+    }
+
+    private func runUndoStep(
+        record: JournaledRecord,
+        ordinal: Int,
+        operationID: UUID,
+        markMutation: Bool,
+        persistence: PersistenceStore
+    ) async -> TargetCapabilityOutcome {
+        guard let adapter = self.writableAdapter(for: record.adapterID) else {
+            try? persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operationID,
+                    targetInstanceID: record.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: record.adapterID,
+                    adapterVersion: record.adapterVersion,
+                    capabilityID: record.capabilityID,
+                    phase: .failed,
+                    intendedChangeDigest: "undo.\(record.intendedChangeDigest)",
+                    staleStateToken: record.staleStateToken,
+                    planDigest: record.planDigest,
+                    receiptJSON: nil,
+                    detail: "adapter unavailable"
+                )
+            )
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: .unavailable,
+                runningInstanceReach: .unavailable,
+                detail: "The adapter is unavailable."
+            )
+        }
+        guard let planDigest = record.planDigest else {
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: .failed,
+                runningInstanceReach: .unavailable,
+                detail: "The original plan payload is missing."
+            )
+        }
+        let plan: AdapterPlan
+        do {
+            let bytes = try persistence.journalLoadContent(digest: planDigest)
+            plan = try JSONDecoder().decode(AdapterPlan.self, from: bytes)
+        } catch {
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: .failed,
+                runningInstanceReach: .unavailable,
+                detail: "Could not load the original plan: \(error)"
+            )
+        }
+
+        // Mark the undo operation as applying just before the first mutation.
+        try? persistence.journalSaveRecord(
+            JournaledRecord(
+                operationID: operationID,
+                targetInstanceID: record.targetInstanceID,
+                ordinal: ordinal,
+                adapterID: record.adapterID,
+                adapterVersion: record.adapterVersion,
+                capabilityID: record.capabilityID,
+                phase: .applying,
+                intendedChangeDigest: "undo.\(record.intendedChangeDigest)",
+                staleStateToken: record.staleStateToken,
+                planDigest: record.planDigest,
+                receiptJSON: record.receiptJSON,
+                detail: nil
+            )
+        )
+        if markMutation {
+            try? persistence.journalTransitionState(operationID: operationID, to: .applying)
+            await self.markMutationBegun(operationID)
+        }
+
+        do {
+            try await adapter.rollbackApply(
+                plan: plan,
+                receipt: AdapterReceipt(
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "undo"
+                )
+            )
+            // Mark the undo record as applied and the original apply record as rolled back.
+            try? persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operationID,
+                    targetInstanceID: record.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: record.adapterID,
+                    adapterVersion: record.adapterVersion,
+                    capabilityID: record.capabilityID,
+                    phase: .applied,
+                    intendedChangeDigest: "undo.\(record.intendedChangeDigest)",
+                    staleStateToken: record.staleStateToken,
+                    planDigest: record.planDigest,
+                    receiptJSON: record.receiptJSON,
+                    detail: "undone"
+                )
+            )
+            var updated = record
+            updated.phase = .rolledBack
+            try? persistence.journalSaveRecord(updated)
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: .updated,
+                runningInstanceReach: .currentInstances,
+                detail: "undone"
+            )
+        } catch {
+            // Guarded rollback refused (external edit or state mismatch) — record as conflicted.
+            try? persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operationID,
+                    targetInstanceID: record.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: record.adapterID,
+                    adapterVersion: record.adapterVersion,
+                    capabilityID: record.capabilityID,
+                    phase: .conflicted,
+                    intendedChangeDigest: "undo.\(record.intendedChangeDigest)",
+                    staleStateToken: record.staleStateToken,
+                    planDigest: record.planDigest,
+                    receiptJSON: record.receiptJSON,
+                    detail: String(describing: error)
+                )
+            )
+            // Ensure the source record is not silently reused by a later undo:
+            // promote it from `.applied` to `.conflicted` so LAT still points at
+            // this transaction but the specific receipt is no longer undoable.
+            var updated = record
+            updated.phase = .conflicted
+            try? persistence.journalSaveRecord(updated)
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: .conflicted,
+                runningInstanceReach: .unavailable,
+                detail: String(describing: error)
+            )
+        }
     }
 
     // MARK: Reconciliation
