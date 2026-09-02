@@ -6,7 +6,7 @@ let package = Package(
     name: "OhMyThemeKit",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "OhMyThemeKit", targets: ["ThemeModel", "ThemeCompiler"]),
+        .library(name: "OhMyThemeKit", targets: ["ThemeModel", "ThemeCompiler", "PlatformClients"]),
         .executable(name: "ThemeTool", targets: ["ThemeTool"]),
     ],
     targets: [
@@ -17,6 +17,10 @@ let package = Package(
         .target(
             name: "ThemeCompiler",
             dependencies: ["ThemeModel"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "PlatformClients",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
@@ -32,6 +36,11 @@ let package = Package(
         .testTarget(
             name: "ThemeCompilerTests",
             dependencies: ["ThemeCompiler", "ThemeModel"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "PlatformClientsTests",
+            dependencies: ["PlatformClients"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

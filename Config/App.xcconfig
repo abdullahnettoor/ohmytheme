@@ -10,6 +10,7 @@ GENERATE_INFOPLIST_FILE = YES
 INFOPLIST_KEY_LSUIElement = YES
 INFOPLIST_KEY_CFBundleDisplayName = Oh My Theme
 INFOPLIST_KEY_NSHumanReadableCopyright =
+INFOPLIST_KEY_NSAppleEventsUsageDescription = Oh My Theme uses Automation to change the optional system Light/Dark appearance.
 
 // Oh My Theme manages configuration the user already owns outside a container.
 ENABLE_APP_SANDBOX = NO
