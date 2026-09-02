@@ -37,6 +37,17 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertEqual(model.connectedTargetInstanceNames, ["Ghostty", "Visual Studio Code"])
     }
 
+    func testMenuListsBundledThemeVariantsWithProvenance() {
+        let model = WorkspaceMenuModel(workspace: WorkspaceStore().workspace)
+
+        XCTAssertEqual(
+            model.bundledThemeVariants.map(\.name),
+            ["Catppuccin Mocha", "Oh My Theme Aurora"]
+        )
+        XCTAssertEqual(model.bundledThemeVariants.map(\.sourceType), ["upstream", "generated"])
+        XCTAssertTrue(model.bundledThemeVariants.allSatisfy { !$0.sourceRevision.isEmpty && !$0.attribution.isEmpty })
+    }
+
     func testQuitAsksTheApplicationToTerminate() {
         var terminationRequests = 0
         let model = WorkspaceMenuModel(workspace: WorkspaceStore().workspace, quitAction: { terminationRequests += 1 })

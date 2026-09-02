@@ -25,6 +25,8 @@ jobs:
         run: ./Scripts/lint.sh
       - name: Test OhMyThemeKit
         run: ./Scripts/test-package.sh
+      - name: Validate Theme Packs and generated catalog
+        run: ./Scripts/test-themes.sh
 
   macos-app:
     name: macOS app

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Oh My Theme Pack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "displayName", "author", "source", "variants"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "$ref": "#/$defs/identifier" },
+    "displayName": { "type": "string", "minLength": 1 },
+    "author": { "type": "string", "minLength": 1 },
+    "source": { "$ref": "#/$defs/source" },
+    "variants": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/variant" } }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "color": { "type": "string", "pattern": "^#[0-9a-f]{6}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "url", "revision", "license", "attribution"],
+      "properties": {
+        "type": { "enum": ["generated", "upstream"] },
+        "url": { "type": "string", "pattern": "^https://" },
+        "revision": { "type": "string", "minLength": 1 },
+        "license": { "type": "string", "minLength": 1 },
+        "attribution": { "type": "string", "minLength": 1 }
+      }
+    },
+    "variant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "displayName", "appearance", "contentDigest", "roles"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "appearance": { "enum": ["light", "dark"] },
+        "contentDigest": { "$ref": "#/$defs/digest" },
+        "roles": { "$ref": "#/$defs/roles" },
+        "wallpaper": { "$ref": "#/$defs/wallpaper" }
+      }
+    },
+    "roles": {
+      "type": "object", "additionalProperties": false,
+      "required": ["accent", "ansi-black", "ansi-blue", "ansi-cyan", "ansi-green", "ansi-magenta", "ansi-red", "ansi-white", "ansi-yellow", "canvas", "overlay", "primary-text", "secondary-text", "selection", "surface", "syntax-comment", "syntax-keyword", "syntax-string"],
+      "patternProperties": { "^(accent|ansi-(black|blue|cyan|green|magenta|red|white|yellow)|canvas|overlay|primary-text|secondary-text|selection|surface|syntax-(comment|keyword|string))$": { "$ref": "#/$defs/color" } }
+    },
+    "wallpaper": {
+      "type": "object", "additionalProperties": false,
+      "required": ["assetPath", "contentDigest", "attribution"],
+      "properties": {
+        "assetPath": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+" },
+        "contentDigest": { "$ref": "#/$defs/digest" },
+        "attribution": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

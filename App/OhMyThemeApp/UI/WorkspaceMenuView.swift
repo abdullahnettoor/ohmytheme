@@ -27,6 +27,23 @@ struct WorkspaceMenuView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Bundled themes")
+                    .font(.headline)
+                ForEach(model.bundledThemeVariants, id: \.name) { variant in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(variant.name)
+                        Text("\(variant.appearance) · \(variant.sourceType) · \(variant.sourceRevision)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(variant.attribution)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier("bundled-theme-\(variant.name)")
+                }
+            }
+
             Divider()
 
             Button("Quit Oh My Theme") {

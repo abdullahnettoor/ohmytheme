@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "catppuccin",
+  "displayName": "Catppuccin",
+  "author": "Catppuccin",
+  "source": {
+    "type": "upstream",
+    "url": "https://github.com/catppuccin/palette",
+    "revision": "07d02aa110ef9eb7e7427afca5c73ba9cf7f8ebd",
+    "license": "MIT",
+    "attribution": "Catppuccin contributors — https://github.com/catppuccin/palette/blob/07d02aa110ef9eb7e7427afca5c73ba9cf7f8ebd/LICENSE"
+  },
+  "variants": [
+    {
+      "id": "mocha",
+      "displayName": "Mocha",
+      "appearance": "dark",
+      "contentDigest": "sha256:b8320c15be4b668fa55eb1908fd5ba7c653a76e13a2a4b9c068cb35f6c6ff62b",
+      "roles": {
+        "canvas": "#1e1e2e",
+        "primary-text": "#cdd6f4",
+        "secondary-text": "#bac2de",
+        "surface": "#313244",
+        "overlay": "#6c7086",
+        "selection": "#45475a",
+        "accent": "#89b4fa",
+        "ansi-black": "#45475a",
+        "ansi-red": "#f38ba8",
+        "ansi-green": "#a6e3a1",
+        "ansi-yellow": "#f9e2af",
+        "ansi-blue": "#89b4fa",
+        "ansi-magenta": "#cba6f7",
+        "ansi-cyan": "#89dceb",
+        "ansi-white": "#bac2de",
+        "syntax-comment": "#6c7086",
+        "syntax-keyword": "#cba6f7",
+        "syntax-string": "#a6e3a1"
+      }
+    }
+  ]
+}

@@ -27,6 +27,7 @@ Scripts/                 Stable local and CI entry points
 ./Scripts/lint.sh           # Check Swift formatting (--fix rewrites files)
 ./Scripts/test.sh           # Package tests and app-hosted smoke tests
 ./Scripts/test-package.sh   # OhMyThemeKit tests only
+./Scripts/test-themes.sh    # Validate bundled Theme Packs and catalog output
 ./Scripts/test-app.sh       # App-hosted smoke tests only
 ./Scripts/build-app.sh      # Build the locally signed app
 ```
@@ -34,3 +35,11 @@ Scripts/                 Stable local and CI entry points
 Scripts report missing tools; they never install software.
 
 Behavior that automated tests cannot prove is recorded in [`docs/manual-verification/`](docs/manual-verification).
+
+`ThemeTool` uses the same compiler as the app:
+
+```bash
+cd Packages/OhMyThemeKit
+swift run ThemeTool validate ../../Themes/Packs/*.json
+swift run ThemeTool catalog ../../Themes/Packs ../../Themes/catalog.json
+```

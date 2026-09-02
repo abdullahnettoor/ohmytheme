@@ -9,12 +9,15 @@ import ThemeModel
 struct WorkspaceMenuModel {
     private let workspace: Workspace
     private let quitAction: @MainActor () -> Void
+    private let themePacks: [ThemePack]
 
     init(
         workspace: Workspace,
+        themePacks: [ThemePack] = BundledThemeCatalog().load(),
         quitAction: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
         self.workspace = workspace
+        self.themePacks = themePacks
         self.quitAction = quitAction
     }
 
@@ -34,7 +37,29 @@ struct WorkspaceMenuModel {
         return "No apps are connected yet. Oh My Theme changes nothing until you connect an app to My Mac."
     }
 
+    var bundledThemeVariants: [BundledThemeVariant] {
+        themePacks.flatMap { pack in
+            pack.variants.map {
+                BundledThemeVariant(
+                    name: "\(pack.displayName) \($0.displayName)",
+                    appearance: $0.appearance.rawValue,
+                    sourceType: pack.source.type.rawValue,
+                    sourceRevision: pack.source.revision,
+                    attribution: pack.source.attribution
+                )
+            }
+        }
+    }
+
     func quit() {
         quitAction()
+    }
+
+    struct BundledThemeVariant: Equatable {
+        let name: String
+        let appearance: String
+        let sourceType: String
+        let sourceRevision: String
+        let attribution: String
     }
 }
