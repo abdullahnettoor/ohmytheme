@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Persistence
 import Testing
 import ThemeModel
@@ -94,6 +95,27 @@ struct PersistenceStoreTests {
         #expect(try fixture.store.loadContent(reference) == bytes)
     }
 
+    @Test("Existing databases migrate payload envelopes to include restoration references")
+    func legacyPayloadEnvelopeSchemaMigrates() throws {
+        let fixture = try LegacyFixture()
+        #expect(
+            try fixture.store.loadPayloadEnvelope(id: fixture.legacyEnvelopeID).payload == fixture.legacyPayload
+        )
+        let envelope = PersistedPayloadEnvelope(
+            id: "legacy-plan-1",
+            targetInstanceID: TargetInstanceID(rawValue: "recording.debug"),
+            adapterID: "recording",
+            adapterVersion: "1",
+            payloadVersion: "1",
+            payload: Data("prepared-artifact".utf8)
+        )
+        let restoration = Data("legacy-baseline".utf8)
+
+        _ = try fixture.store.savePayloadEnvelope(envelope, restorationData: restoration)
+
+        #expect(try fixture.store.loadRestorationContent(forEnvelopeID: envelope.id) == restoration)
+    }
+
     @Test("Content store uses user-only permissions and rejects tampering")
     func contentStoreProtectsAndVerifiesBytes() throws {
         let fixture = try Fixture()
@@ -135,6 +157,74 @@ struct PersistenceStoreTests {
         func permissions(of url: URL) throws -> Int {
             let value = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as! NSNumber
             return value.intValue & 0o777
+        }
+    }
+
+    private struct LegacyFixture {
+        let directoryURL: URL
+        let databaseURL: URL
+        let contentURL: URL
+        let legacyEnvelopeID: String
+        let legacyPayload: Data
+        let store: PersistenceStore
+
+        init() throws {
+            directoryURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("oh-my-theme-legacy-persistence-\(UUID().uuidString)", isDirectory: true)
+            databaseURL = directoryURL.appendingPathComponent("state.sqlite")
+            contentURL = directoryURL.appendingPathComponent("recovery", isDirectory: true)
+            let legacyEnvelopeID = "legacy-existing-plan"
+            let legacyPayload = Data("legacy-prepared-artifact".utf8)
+            self.legacyEnvelopeID = legacyEnvelopeID
+            self.legacyPayload = legacyPayload
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+            var migrator = DatabaseMigrator()
+            migrator.registerMigration("initial") { database in
+                try database.create(table: "content_references") { table in
+                    table.column("digest", .text).primaryKey()
+                    table.column("byte_count", .integer).notNull()
+                    table.column("kind", .text).notNull()
+                    table.column("owner_id", .text).notNull()
+                }
+                try database.create(table: "payload_envelopes") { table in
+                    table.column("id", .text).primaryKey()
+                    table.column("target_instance_id", .text).notNull()
+                    table.column("adapter_id", .text).notNull()
+                    table.column("adapter_version", .text).notNull()
+                    table.column("payload_version", .text).notNull()
+                    table.column("payload_digest", .text).notNull().references("content_references")
+                }
+            }
+            let legacyDatabase = try DatabaseQueue(path: databaseURL.path)
+            try migrator.migrate(legacyDatabase)
+            let contentStore = try ContentAddressedStore(rootURL: contentURL)
+            let payloadReference = try contentStore.put(legacyPayload)
+            try legacyDatabase.write { database in
+                try database.execute(
+                    sql: """
+                        INSERT INTO content_references (digest, byte_count, kind, owner_id)
+                        VALUES (?, ?, 'generated-artifact', ?)
+                        """,
+                    arguments: [payloadReference.digest, payloadReference.byteCount, legacyEnvelopeID]
+                )
+                try database.execute(
+                    sql: """
+                        INSERT INTO payload_envelopes
+                        (id, target_instance_id, adapter_id, adapter_version, payload_version, payload_digest)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        legacyEnvelopeID,
+                        "recording.debug",
+                        "recording",
+                        "1",
+                        "1",
+                        payloadReference.digest,
+                    ]
+                )
+            }
+            store = try PersistenceStore(databaseURL: databaseURL, contentStoreURL: contentURL)
         }
     }
 }

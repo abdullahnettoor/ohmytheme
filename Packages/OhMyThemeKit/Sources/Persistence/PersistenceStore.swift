@@ -143,6 +143,16 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("captured_at", .double).notNull()
             }
         }
+        migrator.registerMigration("add-payload-restoration-digest") { database in
+            let hasRestorationDigest = try database.columns(in: "payload_envelopes").contains {
+                $0.name == "restoration_digest"
+            }
+            if !hasRestorationDigest {
+                try database.alter(table: "payload_envelopes") { table in
+                    table.add(column: "restoration_digest", .text).references("content_references")
+                }
+            }
+        }
         try migrator.migrate(database)
     }
 

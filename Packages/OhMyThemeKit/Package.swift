@@ -69,7 +69,11 @@ let package = Package(
         ),
         .testTarget(
             name: "PersistenceTests",
-            dependencies: ["Persistence", "ThemeModel"],
+            dependencies: [
+                "Persistence",
+                "ThemeModel",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
