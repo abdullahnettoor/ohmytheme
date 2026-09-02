@@ -111,8 +111,47 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("payload_digest", .text).notNull().references("content_references")
                 table.column("restoration_digest", .text).references("content_references")
             }
+            try database.create(table: "operations") { table in
+                table.column("id", .text).primaryKey()
+                table.column("kind", .text).notNull()
+                table.column("state", .text).notNull()
+                table.column("workspace_id", .text).notNull()
+                table.column("variant_id", .text)
+                table.column("created_at", .double).notNull()
+            }
+            try database.create(table: "operation_records") { table in
+                table.column("operation_id", .text).notNull()
+                    .references("operations", onDelete: .cascade)
+                table.column("target_instance_id", .text).notNull()
+                table.column("ordinal", .integer).notNull()
+                table.column("adapter_id", .text).notNull()
+                table.column("adapter_version", .text).notNull()
+                table.column("capability_id", .text).notNull()
+                table.column("phase", .text).notNull()
+                table.column("intended_change_digest", .text).notNull()
+                table.column("stale_state_token", .text)
+                table.column("plan_digest", .text)
+                table.column("receipt_json", .text)
+                table.column("detail", .text)
+                table.primaryKey(["operation_id", "target_instance_id"])
+            }
+            try database.create(table: "connection_baselines") { table in
+                table.column("target_instance_id", .text).primaryKey()
+                table.column("adapter_id", .text).notNull()
+                table.column("adapter_version", .text).notNull()
+                table.column("baseline_digest", .text).notNull()
+                table.column("captured_at", .double).notNull()
+            }
         }
         try migrator.migrate(database)
+    }
+
+    func withWrite<T>(_ block: (Database) throws -> T) throws -> T {
+        try database.write(block)
+    }
+
+    func withRead<T>(_ block: (Database) throws -> T) throws -> T {
+        try database.read(block)
     }
 
     public func loadWorkspace() throws -> PersistedWorkspace {

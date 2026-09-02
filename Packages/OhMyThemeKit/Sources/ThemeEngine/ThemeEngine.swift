@@ -308,12 +308,15 @@ public enum ThemeEngineError: Error, Equatable, Sendable {
 
 public actor ThemeEngine {
     private let packs: [ThemePack]
-    private let adapters: [String: any ThemeAdapter]
+    internal let adaptersByID: [String: any ThemeAdapter]
     private let sourcePolicy: ThemeSourcePolicy
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
-    private let persistence: PersistenceStore?
-    private var previews: [UUID: ThemePreview] = [:]
+    internal let persistenceForOperations: PersistenceStore?
+    internal var previewsInFlight: [UUID: ThemePreview] = [:]
     private var isApplying = false
+    internal var currentOperationID: UUID?
+    internal var pendingCancellations: Set<UUID> = []
+    internal var mutationBegun: Set<UUID> = []
 
     public init(
         packs: [ThemePack],
@@ -323,10 +326,10 @@ public actor ThemeEngine {
         persistence: PersistenceStore? = nil
     ) {
         self.packs = packs
-        self.adapters = Dictionary(uniqueKeysWithValues: adapters.map { ($0.id, $0) })
+        self.adaptersByID = Dictionary(uniqueKeysWithValues: adapters.map { ($0.id, $0) })
         self.sourcePolicy = sourcePolicy
         self.upstreamArtifacts = upstreamArtifacts
-        self.persistence = persistence
+        self.persistenceForOperations = persistence
     }
 
     public func prepare(themeVariantID: String, workspace: Workspace) async throws -> ThemePreview {
@@ -353,7 +356,7 @@ public actor ThemeEngine {
                 userActions: [],
                 targetPlans: []
             )
-            previews[preview.id] = preview
+            previewsInFlight[preview.id] = preview
             return preview
         }
         let source =
@@ -369,7 +372,7 @@ public actor ThemeEngine {
         var preparationFailures: [TargetPreparationFailure] = []
         var userActions: [UserAction] = []
         for instance in workspace.connectedTargetInstances {
-            guard let adapter = adapters[instance.adapterID] else {
+            guard let adapter = adaptersByID[instance.adapterID] else {
                 unavailableCapabilities.append("theme")
                 unavailableTargetInstanceIDs.append(instance.id)
                 continue
@@ -393,7 +396,7 @@ public actor ThemeEngine {
             )
             do {
                 let plan = try await adapter.prepareApply(instance: instance, theme: preparedTheme)
-                if let persistence {
+                if let persistence = persistenceForOperations {
                     try persist(plan: plan, previewID: previewID, persistence: persistence)
                 }
                 targetPlans.append(plan)
@@ -451,7 +454,7 @@ public actor ThemeEngine {
             userActions: userActions,
             targetPlans: targetPlans
         )
-        previews[preview.id] = preview
+        previewsInFlight[preview.id] = preview
         return preview
     }
 
@@ -459,7 +462,7 @@ public actor ThemeEngine {
         guard !isApplying else {
             throw ThemeEngineError.applyInProgress
         }
-        guard let preview = previews.removeValue(forKey: previewID) else {
+        guard let preview = previewsInFlight.removeValue(forKey: previewID) else {
             throw ThemeEngineError.previewNotFound(previewID)
         }
         isApplying = true
@@ -478,7 +481,7 @@ public actor ThemeEngine {
             )
         }
         for (index, plan) in preview.targetPlans.enumerated() {
-            guard let adapter = adapters[plan.adapterID] else {
+            guard let adapter = adaptersByID[plan.adapterID] else {
                 outcomes[index] = TargetCapabilityOutcome(
                     targetInstanceID: plan.targetInstanceID,
                     adapterID: plan.adapterID,
