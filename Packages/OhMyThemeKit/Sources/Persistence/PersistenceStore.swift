@@ -221,7 +221,15 @@ public final class PersistenceStore: @unchecked Sendable {
     public func savePayloadEnvelope(_ envelope: PersistedPayloadEnvelope, restorationData: Data? = nil) throws -> String
     {
         let reference = try contentStore.put(envelope.payload)
-        let restorationReference = try restorationData.map { try contentStore.put($0) }
+        let restorationReference: ContentReference?
+        if let restorationData {
+            restorationReference = try contentStore.put(restorationData)
+        } else if let existingReference = envelope.restorationReference {
+            _ = try contentStore.get(existingReference)
+            restorationReference = existingReference
+        } else {
+            restorationReference = nil
+        }
         try database.write { database in
             try database.execute(
                 sql: """

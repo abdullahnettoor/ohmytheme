@@ -225,6 +225,10 @@ struct ThemeEngineTests {
 
         #expect(envelope.adapterID == "recording")
         #expect(envelope.payload == preview.targetPlans[0].payload.payload)
+        #expect(
+            try persistence.loadRestorationContent(forEnvelopeID: envelope.id)
+                == Data("recording-target-before-theme".utf8)
+        )
     }
 }
 

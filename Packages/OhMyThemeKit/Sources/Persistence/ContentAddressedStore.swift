@@ -28,6 +28,7 @@ public final class ContentAddressedStore: @unchecked Sendable {
         self.fileManager = fileManager
         try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
         try setUserOnlyPermissions(at: rootURL, permissions: 0o700)
+        try hardenExistingContents()
     }
 
     public func put(_ data: Data) throws -> ContentReference {
@@ -71,6 +72,8 @@ public final class ContentAddressedStore: @unchecked Sendable {
         guard fileManager.fileExists(atPath: url.path) else {
             throw ContentStoreError.missingContent(reference.digest)
         }
+        try setUserOnlyPermissions(at: url.deletingLastPathComponent(), permissions: 0o700)
+        try setUserOnlyPermissions(at: url, permissions: 0o600)
         let data = try Data(contentsOf: url)
         let actual = Self.digest(of: data)
         guard actual == reference.digest else {
@@ -105,5 +108,21 @@ public final class ContentAddressedStore: @unchecked Sendable {
 
     private func setUserOnlyPermissions(at url: URL, permissions: Int) throws {
         try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+    }
+
+    private func hardenExistingContents() throws {
+        guard
+            let enumerator = fileManager.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+        else {
+            return
+        }
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+            try setUserOnlyPermissions(at: url, permissions: values.isDirectory == true ? 0o700 : 0o600)
+        }
     }
 }

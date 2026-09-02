@@ -666,6 +666,7 @@ public actor RecordingThemeAdapter: ThemeAdapter {
                 payload: artifact
             ),
             intendedChangeDigest: theme.contentDigest,
+            capturedPreChangeState: Data("recording-target-before-theme".utf8),
             sourceType: theme.sourceType,
             sourceRevision: theme.sourceRevision,
             activationReach: .currentInstances
