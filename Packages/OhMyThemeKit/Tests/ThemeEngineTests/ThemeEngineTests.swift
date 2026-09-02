@@ -129,6 +129,22 @@ struct ThemeEngineTests {
         #expect(report.outcomes[0].configurationState == .unavailable)
         #expect(report.outcomes[0].capabilityID == "theme")
     }
+
+    @Test("Require upstream reports unavailable provenance without generating an artifact")
+    func requireUpstreamReportsUnavailableProvenance() async throws {
+        let engine = ThemeEngine(
+            packs: [testPack],
+            adapters: [RecordingThemeAdapter()],
+            sourcePolicy: .requireUpstream
+        )
+        let workspace = Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [])
+
+        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+
+        #expect(preview.sourceType == .unavailable)
+        #expect(preview.activationReach == .unavailable)
+        #expect(preview.targetPlans.isEmpty)
+    }
 }
 
 private let testPack = ThemePack(

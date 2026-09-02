@@ -10,6 +10,7 @@ public enum ThemeSourcePolicy: String, Codable, Equatable, Sendable {
 public enum ThemeSourceKind: String, Codable, Equatable, Sendable {
     case upstream
     case generated
+    case unavailable
 }
 
 public enum ActivationReach: String, Codable, Equatable, Sendable {
@@ -39,32 +40,35 @@ public struct UserAction: Codable, Equatable, Sendable {
 
 public struct PreparedTheme: Codable, Equatable, Sendable {
     public let variantID: String
+    public let variant: ThemeVariant
     public let sourceType: ThemeSourceKind
     public let sourceRevision: String
     public let attribution: String
     public let themeSchemaVersion: Int
     public let contentDigest: String
     public let compilerVersion: String
-    public let artifact: Data
+    public let upstreamArtifact: Data?
 
     public init(
         variantID: String,
+        variant: ThemeVariant,
         sourceType: ThemeSourceKind,
         sourceRevision: String,
         attribution: String,
         themeSchemaVersion: Int,
         contentDigest: String,
         compilerVersion: String,
-        artifact: Data
+        upstreamArtifact: Data?
     ) {
         self.variantID = variantID
+        self.variant = variant
         self.sourceType = sourceType
         self.sourceRevision = sourceRevision
         self.attribution = attribution
         self.themeSchemaVersion = themeSchemaVersion
         self.contentDigest = contentDigest
         self.compilerVersion = compilerVersion
-        self.artifact = artifact
+        self.upstreamArtifact = upstreamArtifact
     }
 }
 
@@ -93,6 +97,11 @@ public struct AdapterPlan: Codable, Equatable, Sendable {
     public let adapterVersion: String
     public let capabilityID: String
     public let payload: AdapterPayloadEnvelope
+    public let intendedChangeDigest: String
+    public let capturedPreChangeState: Data?
+    public let staleStateToken: String?
+    public let expectedSideEffects: [String]
+    public let requiredPermissions: [String]
     public let sourceType: ThemeSourceKind
     public let sourceRevision: String
     public let activationReach: ActivationReach
@@ -109,6 +118,11 @@ public struct AdapterPlan: Codable, Equatable, Sendable {
         adapterVersion: String,
         capabilityID: String,
         payload: AdapterPayloadEnvelope,
+        intendedChangeDigest: String,
+        capturedPreChangeState: Data? = nil,
+        staleStateToken: String? = nil,
+        expectedSideEffects: [String] = [],
+        requiredPermissions: [String] = [],
         sourceType: ThemeSourceKind,
         sourceRevision: String,
         activationReach: ActivationReach,
@@ -120,6 +134,11 @@ public struct AdapterPlan: Codable, Equatable, Sendable {
         self.adapterVersion = adapterVersion
         self.capabilityID = capabilityID
         self.payload = payload
+        self.intendedChangeDigest = intendedChangeDigest
+        self.capturedPreChangeState = capturedPreChangeState
+        self.staleStateToken = staleStateToken
+        self.expectedSideEffects = expectedSideEffects
+        self.requiredPermissions = requiredPermissions
         self.sourceType = sourceType
         self.sourceRevision = sourceRevision
         self.activationReach = activationReach
@@ -245,6 +264,7 @@ public enum ThemeEngineError: Error, Equatable, Sendable {
     case variantNotFound(String)
     case previewNotFound(UUID)
     case engineUnavailable
+    case applyInProgress
 }
 
 public actor ThemeEngine {
@@ -253,6 +273,7 @@ public actor ThemeEngine {
     private let sourcePolicy: ThemeSourcePolicy
     private let upstreamArtifacts: [String: Data]
     private var previews: [UUID: ThemePreview] = [:]
+    private var isApplying = false
 
     public init(
         packs: [ThemePack],
@@ -276,13 +297,13 @@ public actor ThemeEngine {
             let preview = ThemePreview(
                 id: UUID(),
                 variantID: variant.qualifiedID,
-                sourceType: .generated,
+                sourceType: .unavailable,
                 sourceRevision: pack.source.revision,
                 attribution: pack.source.attribution,
                 activationReach: .unavailable,
                 setupNeeds: [],
                 conflicts: [],
-                unavailableCapabilities: workspace.connectedTargetInstances.map(\.displayName),
+                unavailableCapabilities: workspace.connectedTargetInstances.map { _ in "theme" },
                 unavailableTargetInstanceIDs: workspace.connectedTargetInstances.map(\.id),
                 userActions: [],
                 targetPlans: []
@@ -293,13 +314,14 @@ public actor ThemeEngine {
         let source = resolvedSource ?? (type: .generated, revision: pack.source.revision, artifact: nil)
         let preparedTheme = PreparedTheme(
             variantID: variant.qualifiedID,
+            variant: variant,
             sourceType: source.type,
             sourceRevision: pack.source.revision,
             attribution: pack.source.attribution,
             themeSchemaVersion: pack.schemaVersion,
             contentDigest: variant.contentDigest,
             compilerVersion: "theme-compiler-1",
-            artifact: try source.artifact ?? encodeArtifact(for: variant, pack: pack)
+            upstreamArtifact: source.artifact
         )
 
         var targetPlans: [AdapterPlan] = []
@@ -340,7 +362,9 @@ public actor ThemeEngine {
             attribution: pack.source.attribution,
             activationReach: targetPlans.isEmpty
                 ? .unavailable
-                : targetPlans.map(\.activationReach).reduce(.currentInstances, Self.worstReach),
+                : unavailableTargetInstanceIDs.isEmpty
+                    ? targetPlans.map(\.activationReach).reduce(.currentInstances, Self.worstReach)
+                    : .unavailable,
             setupNeeds: setupNeeds,
             conflicts: conflicts,
             unavailableCapabilities: unavailableCapabilities,
@@ -353,9 +377,14 @@ public actor ThemeEngine {
     }
 
     public func apply(previewID: UUID) async throws -> ApplyReport {
+        guard !isApplying else {
+            throw ThemeEngineError.applyInProgress
+        }
         guard let preview = previews.removeValue(forKey: previewID) else {
             throw ThemeEngineError.previewNotFound(previewID)
         }
+        isApplying = true
+        defer { isApplying = false }
 
         var outcomes = preview.targetPlans.map { plan in
             TargetCapabilityOutcome(
@@ -463,23 +492,6 @@ public actor ThemeEngine {
         }
     }
 
-    private func encodeArtifact(for variant: ThemeVariant, pack: ThemePack) throws -> Data {
-        let artifact = GeneratedArtifact(
-            variantID: variant.qualifiedID,
-            themeSchemaVersion: pack.schemaVersion,
-            sourceRevision: pack.source.revision,
-            contentDigest: variant.contentDigest,
-            compilerVersion: "theme-compiler-1",
-            appearance: variant.appearance,
-            roles: variant.roles
-                .map { ArtifactRole(role: $0.key.rawValue, color: $0.value.rawValue) }
-                .sorted { $0.role < $1.role }
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(artifact)
-    }
-
     private static func worstReach(_ left: ActivationReach, _ right: ActivationReach) -> ActivationReach {
         let order: [ActivationReach] = [
             .currentInstances,
@@ -507,7 +519,19 @@ public actor RecordingThemeAdapter: ThemeAdapter {
         instance: ConnectedTargetInstance,
         theme: PreparedTheme
     ) async throws -> AdapterPlan {
-        preparedArtifacts.append(theme.artifact)
+        let artifact: Data
+        if let upstreamArtifact = theme.upstreamArtifact {
+            artifact = upstreamArtifact
+        } else {
+            artifact = try GeneratedArtifactEncoder.encode(
+                variant: theme.variant,
+                themeSchemaVersion: theme.themeSchemaVersion,
+                sourceRevision: theme.sourceRevision,
+                contentDigest: theme.contentDigest,
+                compilerVersion: theme.compilerVersion
+            )
+        }
+        preparedArtifacts.append(artifact)
         return AdapterPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -517,8 +541,9 @@ public actor RecordingThemeAdapter: ThemeAdapter {
                 adapterID: id,
                 adapterVersion: version,
                 payloadVersion: payloadVersion,
-                payload: theme.artifact
+                payload: artifact
             ),
+            intendedChangeDigest: theme.contentDigest,
             sourceType: theme.sourceType,
             sourceRevision: theme.sourceRevision,
             activationReach: .currentInstances
@@ -562,4 +587,29 @@ private struct GeneratedArtifact: Codable, Equatable, Sendable {
 private struct ArtifactRole: Codable, Equatable, Sendable {
     let role: String
     let color: String
+}
+
+private enum GeneratedArtifactEncoder {
+    static func encode(
+        variant: ThemeVariant,
+        themeSchemaVersion: Int,
+        sourceRevision: String,
+        contentDigest: String,
+        compilerVersion: String
+    ) throws -> Data {
+        let artifact = GeneratedArtifact(
+            variantID: variant.qualifiedID,
+            themeSchemaVersion: themeSchemaVersion,
+            sourceRevision: sourceRevision,
+            contentDigest: contentDigest,
+            compilerVersion: compilerVersion,
+            appearance: variant.appearance,
+            roles: variant.roles
+                .map { ArtifactRole(role: $0.key.rawValue, color: $0.value.rawValue) }
+                .sorted { $0.role < $1.role }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(artifact)
+    }
 }
