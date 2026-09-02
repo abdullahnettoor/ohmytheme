@@ -47,6 +47,30 @@ struct ThemeCompilerTests {
         }
     }
 
+    @Test("Validation rejects invalid provenance URLs and unsupported JSON fields")
+    func validationRejectsInvalidProvenanceAndUnsupportedFields() {
+        let compiler = ThemePackCompiler()
+
+        #expect(throws: ThemePackValidationError.inconsistentMetadata("catppuccin")) {
+            try compiler.decodePack(
+                Data(
+                    validPack.replacingOccurrences(
+                        of: "https://github.com/catppuccin/palette",
+                        with: "https:///catppuccin/palette"
+                    ).utf8
+                ))
+        }
+        #expect(throws: ThemePackValidationError.invalidJSON) {
+            try compiler.decodePack(
+                Data(
+                    validPack.replacingOccurrences(
+                        of: "\"author\": \"Catppuccin\",",
+                        with: "\"author\": \"Catppuccin\",\n  \"unsupported\": true,"
+                    ).utf8
+                ))
+        }
+    }
+
     @Test("Validation rejects an empty pack and duplicate pack identifiers")
     func validationRejectsEmptyAndDuplicatePacks() throws {
         let compiler = ThemePackCompiler()

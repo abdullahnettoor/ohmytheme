@@ -11,7 +11,10 @@ public struct ThemePackCompiler: Sendable {
     public func decodePack(_ data: Data, baseDirectory: URL? = nil) throws -> ThemePack {
         let pack: ThemePack
         do {
+            try validateJSONShape(data)
             pack = try JSONDecoder().decode(ThemePack.self, from: data)
+        } catch let error as ThemePackValidationError {
+            throw error
         } catch {
             throw ThemePackValidationError.invalidJSON
         }
@@ -133,11 +136,63 @@ public struct ThemePackCompiler: Sendable {
     }
 
     private func validateMetadata(_ pack: ThemePack) throws {
-        guard !pack.displayName.isEmpty, !pack.author.isEmpty, !pack.source.revision.isEmpty,
-            !pack.source.license.isEmpty, !pack.source.attribution.isEmpty,
-            pack.source.url.scheme == "https"
+        guard let sourceHost = pack.source.url.host,
+            !pack.displayName.isEmpty,
+            !pack.author.isEmpty,
+            !pack.source.revision.isEmpty,
+            !pack.source.license.isEmpty,
+            !pack.source.attribution.isEmpty,
+            pack.source.url.scheme == "https",
+            !sourceHost.isEmpty
         else {
             throw ThemePackValidationError.inconsistentMetadata(pack.id)
+        }
+    }
+
+    private func validateJSONShape(_ data: Data) throws {
+        let root: [String: Any]
+        do {
+            root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        } catch {
+            throw ThemePackValidationError.invalidJSON
+        }
+        guard !root.isEmpty else {
+            throw ThemePackValidationError.invalidJSON
+        }
+
+        try validateKeys(
+            root,
+            allowed: ["schemaVersion", "id", "displayName", "author", "source", "variants"]
+        )
+        if let source = root["source"] as? [String: Any] {
+            try validateKeys(
+                source,
+                allowed: ["type", "url", "revision", "license", "attribution"]
+            )
+        }
+        if let variants = root["variants"] as? [Any] {
+            for variant in variants {
+                guard let variant = variant as? [String: Any] else { continue }
+                try validateKeys(
+                    variant,
+                    allowed: ["id", "displayName", "appearance", "contentDigest", "roles", "wallpaper"]
+                )
+                if let wallpaper = variant["wallpaper"] {
+                    guard let wallpaper = wallpaper as? [String: Any] else {
+                        throw ThemePackValidationError.invalidJSON
+                    }
+                    try validateKeys(
+                        wallpaper,
+                        allowed: ["assetPath", "contentDigest", "attribution"]
+                    )
+                }
+            }
+        }
+    }
+
+    private func validateKeys(_ object: [String: Any], allowed: Set<String>) throws {
+        guard Set(object.keys).isSubset(of: allowed) else {
+            throw ThemePackValidationError.invalidJSON
         }
     }
 
