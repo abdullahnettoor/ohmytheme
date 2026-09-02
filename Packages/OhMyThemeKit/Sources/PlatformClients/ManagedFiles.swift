@@ -183,6 +183,15 @@ public final class ManagedFiles: @unchecked Sendable {
         interruptionPoint = nil
     }
 
+    public init(
+        fileManager: FileManager = .default,
+        nixRoots: [URL]
+    ) {
+        self.fileManager = fileManager
+        self.nixRoots = nixRoots.map { $0.standardizedFileURL }
+        interruptionPoint = nil
+    }
+
     init(
         fileManager: FileManager = .default,
         nixRoots: [URL],
@@ -215,17 +224,51 @@ public final class ManagedFiles: @unchecked Sendable {
         replacingWith intendedBytes: Data,
         approveLinkedSource: Bool = false
     ) throws -> ManagedFilePlan {
+        try prepare(
+            at: url,
+            replacingWith: intendedBytes,
+            approveLinkedSource: approveLinkedSource,
+            allowUnapprovedLinkedSource: false,
+            allowMissingParent: false,
+            allowLineEndingChange: false
+        )
+    }
+
+    public func prepareForConnection(
+        at url: URL,
+        replacingWith intendedBytes: Data,
+        approveLinkedSource: Bool = false
+    ) throws -> ManagedFilePlan {
+        try prepare(
+            at: url,
+            replacingWith: intendedBytes,
+            approveLinkedSource: approveLinkedSource,
+            allowUnapprovedLinkedSource: true,
+            allowMissingParent: true,
+            allowLineEndingChange: true
+        )
+    }
+
+    private func prepare(
+        at url: URL,
+        replacingWith intendedBytes: Data,
+        approveLinkedSource: Bool,
+        allowUnapprovedLinkedSource: Bool,
+        allowMissingParent: Bool,
+        allowLineEndingChange: Bool
+    ) throws -> ManagedFilePlan {
         let inspection = try inspect(at: url)
         switch inspection.ownership {
         case .managedByNix:
             throw ManagedFileError.managedByNix(inspection.resolvedURL)
-        case .linkedUserOwned(let sourcePath) where !approveLinkedSource:
+        case .linkedUserOwned(let sourcePath)
+        where !approveLinkedSource && !allowUnapprovedLinkedSource:
             throw ManagedFileError.linkedSourceRequiresApproval(URL(fileURLWithPath: sourcePath))
         case .userOwned, .linkedUserOwned:
             break
         }
 
-        if let expectedLineEnding = inspection.snapshot.metadata?.lineEnding {
+        if let expectedLineEnding = inspection.snapshot.metadata?.lineEnding, !allowLineEndingChange {
             let actualLineEnding = Self.lineEnding(of: intendedBytes)
             guard expectedLineEnding == actualLineEnding else {
                 throw ManagedFileError.lineEndingMismatch(
@@ -238,6 +281,7 @@ public final class ManagedFiles: @unchecked Sendable {
 
         guard
             inspection.snapshot.exists
+                || allowMissingParent
                 || fileManager.fileExists(atPath: inspection.resolvedURL.deletingLastPathComponent().path)
         else {
             throw ManagedFileError.parentDirectoryMissing(inspection.resolvedURL.deletingLastPathComponent())
@@ -281,7 +325,8 @@ public final class ManagedFiles: @unchecked Sendable {
         try replace(
             at: plan.resolvedURL,
             bytes: plan.intendedBytes,
-            metadata: metadata
+            metadata: metadata,
+            expected: current
         )
         let after = try inspect(at: plan.requestedURL)
         return ManagedFileReceipt(planID: plan.id, before: plan.inspection, after: after, changed: true)
@@ -303,7 +348,12 @@ public final class ManagedFiles: @unchecked Sendable {
             else {
                 throw ManagedFileError.rollbackConflict(receipt.before.resolvedURL)
             }
-            try replace(at: receipt.before.resolvedURL, bytes: bytes, metadata: metadata)
+            try replace(
+                at: receipt.before.resolvedURL,
+                bytes: bytes,
+                metadata: metadata,
+                expected: current
+            )
         } else {
             do {
                 try fileManager.removeItem(at: receipt.after.resolvedURL)
@@ -422,7 +472,12 @@ public final class ManagedFiles: @unchecked Sendable {
         #endif
     }
 
-    private func replace(at url: URL, bytes: Data, metadata: ManagedFileMetadata) throws {
+    private func replace(
+        at url: URL,
+        bytes: Data,
+        metadata: ManagedFileMetadata,
+        expected: ManagedFileInspection? = nil
+    ) throws {
         let directory = url.deletingLastPathComponent()
         var isDirectory = ObjCBool(false)
         guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
@@ -434,6 +489,12 @@ public final class ManagedFiles: @unchecked Sendable {
             try bytes.write(to: temporaryURL, options: [.atomic])
             try applyMetadata(metadata, to: temporaryURL)
             try applyFlags(metadata.flags, to: temporaryURL)
+            if let expected {
+                let current = try inspect(at: expected.requestedURL)
+                guard current == expected else {
+                    throw ManagedFileError.staleState(url)
+                }
+            }
             try trigger(.beforeRename)
             try flushAndRename(from: temporaryURL, to: url)
         } catch let error as ManagedFileError {

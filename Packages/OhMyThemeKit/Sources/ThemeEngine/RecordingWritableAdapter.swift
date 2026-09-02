@@ -111,7 +111,10 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
 
     // MARK: WritableThemeAdapter
 
-    public func prepareConnection(instance: ConnectedTargetInstance) async throws -> ConnectionPlan {
+    public func prepareConnection(
+        instance: ConnectedTargetInstance,
+        approveLinkedSource: Bool
+    ) async throws -> ConnectionPlan {
         ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -138,7 +141,46 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
         )
         connectedInstances.insert(plan.targetInstanceID)
         try trigger(.afterConnect)
-        return ConnectionReceipt(configurationState: .updated, detail: "connected")
+        return ConnectionReceipt(
+            configurationState: .updated,
+            runningInstanceReach: .currentInstances,
+            detail: "connected"
+        )
+    }
+
+    public func revalidateConnection(plan: ConnectionPlan) async throws {
+        guard plan.staleStateToken == worldState.revision else {
+            throw WriteBoundaryConflict(
+                targetInstanceID: plan.targetInstanceID,
+                detail: "world revision changed since prepare"
+            )
+        }
+    }
+
+    public func classifyConnection(plan: ConnectionPlan) async throws -> ReconciliationClassification {
+        if worldState.bytes == plan.capturedPreChangeState {
+            return .beforeChange
+        }
+        if worldState.revision == "connect-\(plan.targetInstanceID.rawValue)" {
+            return .intendedAfterChange
+        }
+        return .conflicting
+    }
+
+    public func restoreConnection(
+        instance: ConnectedTargetInstance,
+        baseline: Data
+    ) async throws -> ConnectionReceipt {
+        let suffix = Data(".connected".utf8)
+        guard connectedInstances.contains(instance.id),
+            worldState.bytes.count >= suffix.count,
+            Data(worldState.bytes.suffix(suffix.count)).elementsEqual(suffix)
+        else {
+            throw RecordingWritableAdapterError.rollbackRefused
+        }
+        worldState = WorldState(bytes: baseline, revision: "restored")
+        connectedInstances.remove(instance.id)
+        return ConnectionReceipt(configurationState: .updated, detail: "restored")
     }
 
     public func revalidateApply(plan: AdapterPlan) async throws {
@@ -175,7 +217,8 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
 
     public func prepareDisconnect(
         instance: ConnectedTargetInstance,
-        baseline: StoredConnectionBaseline
+        baseline: StoredConnectionBaseline,
+        baselineData: Data
     ) async throws -> DisconnectPlan {
         DisconnectPlan(
             targetInstanceID: instance.id,
@@ -184,6 +227,19 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             baselineReference: baseline.baselineReference,
             staleStateToken: worldState.revision
         )
+    }
+
+    public func revalidateDisconnect(plan: DisconnectPlan) async throws {
+        guard plan.staleStateToken == worldState.revision else {
+            throw WriteBoundaryConflict(
+                targetInstanceID: plan.targetInstanceID,
+                detail: "world revision changed since prepare"
+            )
+        }
+    }
+
+    public func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification {
+        connectedInstances.contains(plan.targetInstanceID) ? .beforeChange : .intendedAfterChange
     }
 
     public func disconnect(_ plan: DisconnectPlan, baseline: Data) async throws -> AdapterReceipt {

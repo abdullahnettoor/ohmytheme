@@ -22,6 +22,9 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
     public let staleStateToken: String?
     public let expectedSideEffects: [String]
     public let requiredPermissions: [String]
+    public let userActions: [UserAction]
+    public let opaquePayload: Data?
+    public let requiresApproval: Bool
 
     public init(
         targetInstanceID: TargetInstanceID,
@@ -31,7 +34,10 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         intendedChangeDigest: String,
         staleStateToken: String? = nil,
         expectedSideEffects: [String] = [],
-        requiredPermissions: [String] = []
+        requiredPermissions: [String] = [],
+        userActions: [UserAction] = [],
+        opaquePayload: Data? = nil,
+        requiresApproval: Bool = false
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
@@ -41,15 +47,55 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         self.staleStateToken = staleStateToken
         self.expectedSideEffects = expectedSideEffects
         self.requiredPermissions = requiredPermissions
+        self.userActions = userActions
+        self.opaquePayload = opaquePayload
+        self.requiresApproval = requiresApproval
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targetInstanceID
+        case adapterID
+        case adapterVersion
+        case capturedPreChangeState
+        case intendedChangeDigest
+        case staleStateToken
+        case expectedSideEffects
+        case requiredPermissions
+        case userActions
+        case opaquePayload
+        case requiresApproval
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            targetInstanceID: try container.decode(TargetInstanceID.self, forKey: .targetInstanceID),
+            adapterID: try container.decode(String.self, forKey: .adapterID),
+            adapterVersion: try container.decode(String.self, forKey: .adapterVersion),
+            capturedPreChangeState: try container.decode(Data.self, forKey: .capturedPreChangeState),
+            intendedChangeDigest: try container.decode(String.self, forKey: .intendedChangeDigest),
+            staleStateToken: try container.decodeIfPresent(String.self, forKey: .staleStateToken),
+            expectedSideEffects: try container.decodeIfPresent([String].self, forKey: .expectedSideEffects) ?? [],
+            requiredPermissions: try container.decodeIfPresent([String].self, forKey: .requiredPermissions) ?? [],
+            userActions: try container.decodeIfPresent([UserAction].self, forKey: .userActions) ?? [],
+            opaquePayload: try container.decodeIfPresent(Data.self, forKey: .opaquePayload),
+            requiresApproval: try container.decodeIfPresent(Bool.self, forKey: .requiresApproval) ?? false
+        )
     }
 }
 
 public struct ConnectionReceipt: Codable, Equatable, Sendable {
     public let configurationState: ConfigurationState
+    public let runningInstanceReach: ActivationReach
     public let detail: String?
 
-    public init(configurationState: ConfigurationState, detail: String? = nil) {
+    public init(
+        configurationState: ConfigurationState,
+        runningInstanceReach: ActivationReach = .currentInstances,
+        detail: String? = nil
+    ) {
         self.configurationState = configurationState
+        self.runningInstanceReach = runningInstanceReach
         self.detail = detail
     }
 }
@@ -60,19 +106,22 @@ public struct DisconnectPlan: Codable, Equatable, Sendable {
     public let adapterVersion: String
     public let baselineReference: ContentReference
     public let staleStateToken: String?
+    public let opaquePayload: Data?
 
     public init(
         targetInstanceID: TargetInstanceID,
         adapterID: String,
         adapterVersion: String,
         baselineReference: ContentReference,
-        staleStateToken: String? = nil
+        staleStateToken: String? = nil,
+        opaquePayload: Data? = nil
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
         self.adapterVersion = adapterVersion
         self.baselineReference = baselineReference
         self.staleStateToken = staleStateToken
+        self.opaquePayload = opaquePayload
     }
 }
 
@@ -101,8 +150,14 @@ public struct WriteBoundaryConflict: Error, Equatable, Sendable {
 /// - Stop and report on **external edits**, never force-overwrite.
 /// - Never leak baseline bytes or other **sensitive data** into logs or reports.
 public protocol WritableThemeAdapter: ThemeAdapter {
-    func prepareConnection(instance: ConnectedTargetInstance) async throws -> ConnectionPlan
+    func prepareConnection(
+        instance: ConnectedTargetInstance,
+        approveLinkedSource: Bool
+    ) async throws -> ConnectionPlan
     func connect(_ plan: ConnectionPlan) async throws -> ConnectionReceipt
+    func revalidateConnection(plan: ConnectionPlan) async throws
+    func classifyConnection(plan: ConnectionPlan) async throws -> ReconciliationClassification
+    func restoreConnection(instance: ConnectedTargetInstance, baseline: Data) async throws -> ConnectionReceipt
 
     func revalidateApply(plan: AdapterPlan) async throws
     func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification
@@ -110,7 +165,23 @@ public protocol WritableThemeAdapter: ThemeAdapter {
 
     func prepareDisconnect(
         instance: ConnectedTargetInstance,
-        baseline: StoredConnectionBaseline
+        baseline: StoredConnectionBaseline,
+        baselineData: Data
     ) async throws -> DisconnectPlan
     func disconnect(_ plan: DisconnectPlan, baseline: Data) async throws -> AdapterReceipt
+    func revalidateDisconnect(plan: DisconnectPlan) async throws
+    func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification
+}
+
+public extension WritableThemeAdapter {
+    func prepareConnection(instance: ConnectedTargetInstance) async throws -> ConnectionPlan {
+        try await prepareConnection(instance: instance, approveLinkedSource: false)
+    }
+
+    func prepareDisconnect(
+        instance: ConnectedTargetInstance,
+        baseline: StoredConnectionBaseline
+    ) async throws -> DisconnectPlan {
+        try await prepareDisconnect(instance: instance, baseline: baseline, baselineData: Data())
+    }
 }

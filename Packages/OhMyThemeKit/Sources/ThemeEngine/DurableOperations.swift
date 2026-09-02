@@ -60,7 +60,11 @@ public struct UndoReport: Codable, Equatable, Sendable {
 extension ThemeEngine {
     // MARK: Connect
 
-    public func connect(instance: ConnectedTargetInstance, workspace: Workspace) async throws -> ConnectionReport {
+    public func connect(
+        instance: ConnectedTargetInstance,
+        workspace: Workspace,
+        approveLinkedSource: Bool = false
+    ) async throws -> ConnectionReport {
         guard let persistence = self.persistenceStore else {
             throw DurableOperationError.persistenceRequired
         }
@@ -96,7 +100,10 @@ extension ThemeEngine {
 
         let plan: ConnectionPlan
         do {
-            plan = try await adapter.prepareConnection(instance: instance)
+            plan = try await adapter.prepareConnection(
+                instance: instance,
+                approveLinkedSource: approveLinkedSource
+            )
         } catch {
             try persistence.journalTransitionState(operationID: operation.id, to: .failed)
             return ConnectionReport(
@@ -169,6 +176,7 @@ extension ThemeEngine {
 
         let receipt: ConnectionReceipt
         do {
+            try await adapter.revalidateConnection(plan: plan)
             receipt = try await adapter.connect(plan)
         } catch {
             try persistence.journalSaveRecord(
@@ -234,7 +242,7 @@ extension ThemeEngine {
                     sourceType: .unavailable,
                     sourceRevision: "n/a",
                     configurationState: receipt.configurationState,
-                    runningInstanceReach: .currentInstances,
+                    runningInstanceReach: receipt.runningInstanceReach,
                     detail: receipt.detail
                 )
             ]
@@ -561,32 +569,9 @@ extension ThemeEngine {
 
         let baselineData = try persistence.loadContent(baseline.baselineReference)
         do {
-            // Model rollback by producing a synthetic AdapterPlan whose captured pre-change state
-            // is the connection baseline. This lets rollbackApply be a guarded operation.
-            let rollbackPlan = AdapterPlan(
-                targetInstanceID: instance.id,
-                adapterID: adapter.id,
-                adapterVersion: adapter.version,
-                capabilityID: "theme",
-                payload: AdapterPayloadEnvelope(
-                    adapterID: adapter.id,
-                    adapterVersion: adapter.version,
-                    payloadVersion: adapter.payloadVersion,
-                    payload: baselineData
-                ),
-                intendedChangeDigest: "restore.\(baseline.baselineReference.digest)",
-                capturedPreChangeState: baselineData,
-                sourceType: .unavailable,
-                sourceRevision: "n/a",
-                activationReach: .currentInstances
-            )
-            try await adapter.rollbackApply(
-                plan: rollbackPlan,
-                receipt: AdapterReceipt(
-                    configurationState: .updated,
-                    runningInstanceReach: .currentInstances,
-                    detail: "restore"
-                )
+            let receipt = try await adapter.restoreConnection(
+                instance: instance,
+                baseline: baselineData
             )
             try persistence.journalSaveRecord(
                 JournaledRecord(
@@ -615,8 +600,8 @@ extension ThemeEngine {
                         sourceType: .unavailable,
                         sourceRevision: "n/a",
                         configurationState: .updated,
-                        runningInstanceReach: .currentInstances,
-                        detail: "restored"
+                        runningInstanceReach: receipt.runningInstanceReach,
+                        detail: receipt.detail
                     )
                 ]
             )
@@ -687,7 +672,12 @@ extension ThemeEngine {
         try await beginOperationTracking(operation)
         defer { try? closeOperationTracking(operation.id) }
 
-        let plan = try await adapter.prepareDisconnect(instance: instance, baseline: baseline)
+        let baselineData = try persistence.loadContent(baseline.baselineReference)
+        let plan = try await adapter.prepareDisconnect(
+            instance: instance,
+            baseline: baseline,
+            baselineData: baselineData
+        )
         let planPayload = try JSONEncoder().encode(plan)
         let planReference = try persistence.journalStorePlanPayload(
             planPayload,
@@ -729,8 +719,8 @@ extension ThemeEngine {
         )
         await markMutationBegun(operation.id)
 
-        let baselineData = try persistence.loadContent(baseline.baselineReference)
         do {
+            try await adapter.revalidateDisconnect(plan: plan)
             let receipt = try await adapter.disconnect(plan, baseline: baselineData)
             try persistence.journalSaveRecord(
                 JournaledRecord(
@@ -1080,6 +1070,7 @@ extension ThemeEngine {
             for record in records where record.phase == .applying || record.phase == .prepared {
                 let classification = try await self.classify(
                     record: record,
+                    operationKind: operation.kind,
                     persistence: persistence
                 )
                 let newPhase: RecordPhase
@@ -1111,6 +1102,7 @@ extension ThemeEngine {
 
     private func classify(
         record: JournaledRecord,
+        operationKind: OperationKind,
         persistence: PersistenceStore
     ) async throws -> ReconciliationClassification {
         guard let writable = self.writableAdapter(for: record.adapterID) else {
@@ -1120,9 +1112,21 @@ extension ThemeEngine {
             return .beforeChange
         }
         let bytes = try persistence.journalLoadContent(digest: digest)
-        // Try decoding as an AdapterPlan (apply/disconnect encode both).
-        if let plan = try? JSONDecoder().decode(AdapterPlan.self, from: bytes) {
-            return try await writable.classifyApply(plan: plan)
+        switch operationKind {
+        case .connect:
+            if let plan = try? JSONDecoder().decode(ConnectionPlan.self, from: bytes) {
+                return try await writable.classifyConnection(plan: plan)
+            }
+        case .disconnect:
+            if let plan = try? JSONDecoder().decode(DisconnectPlan.self, from: bytes) {
+                return try await writable.classifyDisconnect(plan: plan)
+            }
+        case .apply, .undo:
+            if let plan = try? JSONDecoder().decode(AdapterPlan.self, from: bytes) {
+                return try await writable.classifyApply(plan: plan)
+            }
+        case .restore:
+            return .conflicting
         }
         return .conflicting
     }

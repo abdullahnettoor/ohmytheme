@@ -31,7 +31,7 @@ let package = Package(
         ),
         .target(
             name: "ThemeEngine",
-            dependencies: ["ThemeModel", "Persistence"],
+            dependencies: ["ThemeModel", "PlatformClients", "Persistence"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .target(
@@ -64,7 +64,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ThemeEngineTests",
-            dependencies: ["ThemeEngine", "ThemeModel", "Persistence"],
+            dependencies: ["ThemeEngine", "ThemeModel", "PlatformClients", "Persistence"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

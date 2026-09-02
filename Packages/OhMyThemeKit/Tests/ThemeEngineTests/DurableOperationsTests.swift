@@ -577,12 +577,30 @@ actor FaultyRecordingAdapter: WritableThemeAdapter {
         return try await inner.apply(plan)
     }
 
-    func prepareConnection(instance: ConnectedTargetInstance) async throws -> ConnectionPlan {
-        try await inner.prepareConnection(instance: instance)
+    func prepareConnection(
+        instance: ConnectedTargetInstance,
+        approveLinkedSource: Bool
+    ) async throws -> ConnectionPlan {
+        try await inner.prepareConnection(
+            instance: instance,
+            approveLinkedSource: approveLinkedSource
+        )
     }
 
     func connect(_ plan: ConnectionPlan) async throws -> ConnectionReceipt {
         try await inner.connect(plan)
+    }
+
+    func revalidateConnection(plan: ConnectionPlan) async throws {
+        try await inner.revalidateConnection(plan: plan)
+    }
+
+    func classifyConnection(plan: ConnectionPlan) async throws -> ReconciliationClassification {
+        try await inner.classifyConnection(plan: plan)
+    }
+
+    func restoreConnection(instance: ConnectedTargetInstance, baseline: Data) async throws -> ConnectionReceipt {
+        try await inner.restoreConnection(instance: instance, baseline: baseline)
     }
 
     func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification {
@@ -595,13 +613,26 @@ actor FaultyRecordingAdapter: WritableThemeAdapter {
 
     func prepareDisconnect(
         instance: ConnectedTargetInstance,
-        baseline: StoredConnectionBaseline
+        baseline: StoredConnectionBaseline,
+        baselineData: Data
     ) async throws -> DisconnectPlan {
-        try await inner.prepareDisconnect(instance: instance, baseline: baseline)
+        try await inner.prepareDisconnect(
+            instance: instance,
+            baseline: baseline,
+            baselineData: baselineData
+        )
     }
 
     func disconnect(_ plan: DisconnectPlan, baseline: Data) async throws -> AdapterReceipt {
         try await inner.disconnect(plan, baseline: baseline)
+    }
+
+    func revalidateDisconnect(plan: DisconnectPlan) async throws {
+        try await inner.revalidateDisconnect(plan: plan)
+    }
+
+    func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification {
+        try await inner.classifyDisconnect(plan: plan)
     }
 }
 
