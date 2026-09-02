@@ -102,6 +102,14 @@ struct WorkspaceMenuView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if !preview.preparationFailures.isEmpty {
+                        Text(
+                            "Preparation failures: "
+                                + preview.preparationFailures.map(\.detail).joined(separator: ", ")
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    }
                     if !preview.userActions.isEmpty {
                         Text("User actions")
                             .font(.caption.weight(.semibold))
@@ -122,7 +130,11 @@ struct WorkspaceMenuView: View {
                             }
                         }
                     }
-                    .disabled(preview.targetPlans.isEmpty && preview.unavailableTargetInstanceIDs.isEmpty)
+                    .disabled(
+                        preview.targetPlans.isEmpty
+                            && preview.unavailableTargetInstanceIDs.isEmpty
+                            && preview.preparationFailures.isEmpty
+                    )
                 }
 
                 if let report {

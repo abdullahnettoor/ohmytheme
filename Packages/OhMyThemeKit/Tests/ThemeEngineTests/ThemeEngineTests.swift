@@ -86,7 +86,15 @@ struct ThemeEngineTests {
             packs: [testPack],
             adapters: [adapter],
             sourcePolicy: .preferUpstream,
-            upstreamArtifacts: ["test-pack/dark": upstreamArtifact]
+            upstreamArtifacts: [
+                "recording/test-pack/dark": PinnedUpstreamArtifact(
+                    adapterID: "recording",
+                    variantID: "test-pack/dark",
+                    revision: "reviewed-revision",
+                    contentDigest: "sha256:test",
+                    payload: upstreamArtifact
+                )
+            ]
         )
         let workspace = Workspace(
             id: .myMac,

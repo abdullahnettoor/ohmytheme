@@ -11,6 +11,7 @@ public enum ThemeSourceKind: String, Codable, Equatable, Sendable {
     case upstream
     case generated
     case unavailable
+    case mixed
 }
 
 public enum ActivationReach: String, Codable, Equatable, Sendable {
@@ -87,6 +88,28 @@ public struct AdapterPayloadEnvelope: Codable, Equatable, Sendable {
         self.adapterID = adapterID
         self.adapterVersion = adapterVersion
         self.payloadVersion = payloadVersion
+        self.payload = payload
+    }
+}
+
+public struct PinnedUpstreamArtifact: Codable, Equatable, Sendable {
+    public let adapterID: String
+    public let variantID: String
+    public let revision: String
+    public let contentDigest: String
+    public let payload: Data
+
+    public init(
+        adapterID: String,
+        variantID: String,
+        revision: String,
+        contentDigest: String,
+        payload: Data
+    ) {
+        self.adapterID = adapterID
+        self.variantID = variantID
+        self.revision = revision
+        self.contentDigest = contentDigest
         self.payload = payload
     }
 }
@@ -204,6 +227,18 @@ public struct ApplyReport: Codable, Equatable, Sendable {
     }
 }
 
+public struct TargetPreparationFailure: Codable, Equatable, Sendable {
+    public let targetInstanceID: TargetInstanceID
+    public let adapterID: String
+    public let detail: String
+
+    public init(targetInstanceID: TargetInstanceID, adapterID: String, detail: String) {
+        self.targetInstanceID = targetInstanceID
+        self.adapterID = adapterID
+        self.detail = detail
+    }
+}
+
 public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let variantID: String
@@ -215,6 +250,7 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
     public let conflicts: [String]
     public let unavailableCapabilities: [String]
     public let unavailableTargetInstanceIDs: [TargetInstanceID]
+    public let preparationFailures: [TargetPreparationFailure]
     public let userActions: [UserAction]
     public let targetPlans: [AdapterPlan]
 
@@ -229,6 +265,7 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
         conflicts: [String],
         unavailableCapabilities: [String],
         unavailableTargetInstanceIDs: [TargetInstanceID] = [],
+        preparationFailures: [TargetPreparationFailure] = [],
         userActions: [UserAction],
         targetPlans: [AdapterPlan]
     ) {
@@ -242,6 +279,7 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
         self.conflicts = conflicts
         self.unavailableCapabilities = unavailableCapabilities
         self.unavailableTargetInstanceIDs = unavailableTargetInstanceIDs
+        self.preparationFailures = preparationFailures
         self.userActions = userActions
         self.targetPlans = targetPlans
     }
@@ -271,7 +309,7 @@ public actor ThemeEngine {
     private let packs: [ThemePack]
     private let adapters: [String: any ThemeAdapter]
     private let sourcePolicy: ThemeSourcePolicy
-    private let upstreamArtifacts: [String: Data]
+    private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
     private var previews: [UUID: ThemePreview] = [:]
     private var isApplying = false
 
@@ -279,7 +317,7 @@ public actor ThemeEngine {
         packs: [ThemePack],
         adapters: [any ThemeAdapter],
         sourcePolicy: ThemeSourcePolicy = .preferUpstream,
-        upstreamArtifacts: [String: Data] = [:]
+        upstreamArtifacts: [String: PinnedUpstreamArtifact] = [:]
     ) {
         self.packs = packs
         self.adapters = Dictionary(uniqueKeysWithValues: adapters.map { ($0.id, $0) })
@@ -292,7 +330,7 @@ public actor ThemeEngine {
             throw ThemeEngineError.variantNotFound(themeVariantID)
         }
         let (pack, variant) = packAndVariant
-        let resolvedSource = resolveSource(for: pack, variant: variant)
+        let resolvedSource = resolveSource(for: pack, variant: variant, adapterID: nil)
         guard resolvedSource != nil || sourcePolicy != .requireUpstream else {
             let preview = ThemePreview(
                 id: UUID(),
@@ -311,38 +349,57 @@ public actor ThemeEngine {
             previews[preview.id] = preview
             return preview
         }
-        let source = resolvedSource ?? (type: .generated, revision: pack.source.revision, artifact: nil)
-        let preparedTheme = PreparedTheme(
-            variantID: variant.qualifiedID,
-            variant: variant,
-            sourceType: source.type,
-            sourceRevision: pack.source.revision,
-            attribution: pack.source.attribution,
-            themeSchemaVersion: pack.schemaVersion,
-            contentDigest: variant.contentDigest,
-            compilerVersion: "theme-compiler-1",
-            upstreamArtifact: source.artifact
-        )
+        let source =
+            resolvedSource
+            ?? ResolvedSource(type: .generated, revision: pack.source.revision, artifact: nil)
 
         var targetPlans: [AdapterPlan] = []
         var setupNeeds: [UserAction] = []
         var conflicts: [String] = []
         var unavailableCapabilities: [String] = []
         var unavailableTargetInstanceIDs: [TargetInstanceID] = []
+        var preparationFailures: [TargetPreparationFailure] = []
+        var userActions: [UserAction] = []
         for instance in workspace.connectedTargetInstances {
             guard let adapter = adapters[instance.adapterID] else {
                 unavailableCapabilities.append("theme")
                 unavailableTargetInstanceIDs.append(instance.id)
                 continue
             }
+            guard let targetSource = resolveSource(for: pack, variant: variant, adapterID: instance.adapterID)
+            else {
+                unavailableCapabilities.append("theme")
+                unavailableTargetInstanceIDs.append(instance.id)
+                continue
+            }
+            let preparedTheme = PreparedTheme(
+                variantID: variant.qualifiedID,
+                variant: variant,
+                sourceType: targetSource.type,
+                sourceRevision: pack.source.revision,
+                attribution: pack.source.attribution,
+                themeSchemaVersion: pack.schemaVersion,
+                contentDigest: variant.contentDigest,
+                compilerVersion: "theme-compiler-1",
+                upstreamArtifact: targetSource.artifact
+            )
             do {
                 let plan = try await adapter.prepareApply(instance: instance, theme: preparedTheme)
                 targetPlans.append(plan)
                 setupNeeds.append(contentsOf: plan.setupNeeds)
                 conflicts.append(contentsOf: plan.conflicts)
+                userActions.append(contentsOf: plan.setupNeeds)
+                userActions.append(
+                    contentsOf: plan.requiredPermissions.map {
+                        UserAction(title: "Permission needed", detail: $0)
+                    })
             } catch {
-                unavailableCapabilities.append("theme")
-                unavailableTargetInstanceIDs.append(instance.id)
+                preparationFailures.append(
+                    TargetPreparationFailure(
+                        targetInstanceID: instance.id,
+                        adapterID: instance.adapterID,
+                        detail: String(describing: error)
+                    ))
             }
         }
         if workspace.connectedTargetInstances.isEmpty {
@@ -352,24 +409,35 @@ public actor ThemeEngine {
                     detail: "This preview has no Target Instances to change."
                 )
             )
+            userActions.append(contentsOf: setupNeeds)
         }
 
+        let sourceTypes = Set(targetPlans.map(\.sourceType))
+        let previewSourceType: ThemeSourceKind
+        if sourceTypes.count == 1, let sourceType = sourceTypes.first {
+            previewSourceType = sourceType
+        } else if sourceTypes.isEmpty {
+            previewSourceType = source.type
+        } else {
+            previewSourceType = .mixed
+        }
         let preview = ThemePreview(
             id: UUID(),
             variantID: variant.qualifiedID,
-            sourceType: source.type,
+            sourceType: previewSourceType,
             sourceRevision: pack.source.revision,
             attribution: pack.source.attribution,
             activationReach: targetPlans.isEmpty
                 ? .unavailable
-                : unavailableTargetInstanceIDs.isEmpty
+                : unavailableTargetInstanceIDs.isEmpty && preparationFailures.isEmpty
                     ? targetPlans.map(\.activationReach).reduce(.currentInstances, Self.worstReach)
                     : .unavailable,
             setupNeeds: setupNeeds,
             conflicts: conflicts,
             unavailableCapabilities: unavailableCapabilities,
             unavailableTargetInstanceIDs: unavailableTargetInstanceIDs,
-            userActions: setupNeeds,
+            preparationFailures: preparationFailures,
+            userActions: userActions,
             targetPlans: targetPlans
         )
         previews[preview.id] = preview
@@ -467,6 +535,19 @@ public actor ThemeEngine {
                     detail: "No compatible adapter prepared this Target Instance."
                 )
             })
+        outcomes.append(
+            contentsOf: preview.preparationFailures.map {
+                TargetCapabilityOutcome(
+                    targetInstanceID: $0.targetInstanceID,
+                    adapterID: $0.adapterID,
+                    capabilityID: "theme",
+                    sourceType: preview.sourceType,
+                    sourceRevision: preview.sourceRevision,
+                    configurationState: .failed,
+                    runningInstanceReach: .unavailable,
+                    detail: $0.detail
+                )
+            })
         return ApplyReport(variantID: preview.variantID, outcomes: outcomes)
     }
 
@@ -478,17 +559,32 @@ public actor ThemeEngine {
 
     private func resolveSource(
         for pack: ThemePack,
-        variant: ThemeVariant
-    ) -> (type: ThemeSourceKind, revision: String, artifact: Data?)? {
-        let upstreamArtifact = upstreamArtifacts[variant.qualifiedID]
+        variant: ThemeVariant,
+        adapterID: String?
+    ) -> ResolvedSource? {
+        let upstreamArtifact: Data?
+        if let adapterID,
+            let artifact = upstreamArtifacts["\(adapterID)/\(variant.qualifiedID)"],
+            artifact.adapterID == adapterID,
+            artifact.variantID == variant.qualifiedID,
+            artifact.revision == pack.source.revision,
+            artifact.contentDigest == variant.contentDigest
+        {
+            upstreamArtifact = artifact.payload
+        } else {
+            upstreamArtifact = nil
+        }
         switch sourcePolicy {
         case .preferUpstream:
-            return upstreamArtifact.map { (.upstream, pack.source.revision, $0) }
-                ?? (.generated, pack.source.revision, nil)
+            if let upstreamArtifact {
+                return ResolvedSource(type: .upstream, revision: pack.source.revision, artifact: upstreamArtifact)
+            }
+            return ResolvedSource(type: .generated, revision: pack.source.revision, artifact: nil)
         case .requireUpstream:
-            return upstreamArtifact.map { (.upstream, pack.source.revision, $0) }
+            guard let upstreamArtifact else { return nil }
+            return ResolvedSource(type: .upstream, revision: pack.source.revision, artifact: upstreamArtifact)
         case .useGenerated:
-            return (.generated, pack.source.revision, nil)
+            return ResolvedSource(type: .generated, revision: pack.source.revision, artifact: nil)
         }
     }
 
@@ -582,6 +678,12 @@ private struct GeneratedArtifact: Codable, Equatable, Sendable {
     let compilerVersion: String
     let appearance: ThemeAppearance
     let roles: [ArtifactRole]
+}
+
+private struct ResolvedSource {
+    let type: ThemeSourceKind
+    let revision: String
+    let artifact: Data?
 }
 
 private struct ArtifactRole: Codable, Equatable, Sendable {
