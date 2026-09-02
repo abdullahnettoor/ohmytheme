@@ -274,6 +274,60 @@ struct GhosttyAdapterTests {
         #expect(undo.outcomes[0].runningInstanceReach == .reloadRequired)
     }
 
+    @Test("Interrupted recovery rejects a same-content external replacement")
+    func interruptedThemeRecoveryRejectsSameContentReplacement() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let adapter = fixture.adapter()
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [fixture.instance]
+        )
+        let preview = try await engine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: workspace)
+        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let appliedRecord = try #require(try store.journalLoadRecords(operationID: apply.operationID).first)
+        let appliedBytes = try Data(contentsOf: fixture.managedURL)
+        let replacement = fixture.directory.appendingPathComponent("same-content.ghostty")
+        try appliedBytes.write(to: replacement)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: replacement.path
+        )
+        _ = try FileManager.default.replaceItemAt(fixture.managedURL, withItemAt: replacement)
+        try store.journalTransitionState(operationID: apply.operationID, to: .applying)
+        try store.journalSaveRecord(
+            JournaledRecord(
+                operationID: appliedRecord.operationID,
+                targetInstanceID: appliedRecord.targetInstanceID,
+                ordinal: appliedRecord.ordinal,
+                adapterID: appliedRecord.adapterID,
+                adapterVersion: appliedRecord.adapterVersion,
+                capabilityID: appliedRecord.capabilityID,
+                phase: .applying,
+                intendedChangeDigest: appliedRecord.intendedChangeDigest,
+                staleStateToken: appliedRecord.staleStateToken,
+                planDigest: appliedRecord.planDigest,
+                receiptJSON: nil,
+                detail: nil
+            )
+        )
+
+        try await engine.reconcileInterruptedOperations()
+
+        #expect(try store.journalLoadRecords(operationID: apply.operationID)[0].phase == .reconciledConflict)
+        await #expect(throws: DurableOperationError.self) {
+            _ = try await engine.undoLast(workspace: workspace)
+        }
+        #expect(try Data(contentsOf: fixture.managedURL) == appliedBytes)
+    }
+
     @Test("Undo reports a conflict and preserves an externally changed Ghostty fragment")
     func durableThemeUndoConflict() async throws {
         let fixture = try Fixture(parentContents: "background = #101010\n")

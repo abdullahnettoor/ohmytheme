@@ -297,7 +297,10 @@ public final class ManagedFiles: @unchecked Sendable {
         )
     }
 
-    public func apply(_ plan: ManagedFilePlan) throws -> ManagedFileReceipt {
+    public func apply(
+        _ plan: ManagedFilePlan,
+        recoveryMarker: Bool = false
+    ) throws -> ManagedFileReceipt {
         guard Self.digest(of: plan.intendedBytes) == plan.intendedDigest else {
             throw ManagedFileError.invalidPlan(plan.resolvedURL)
         }
@@ -326,10 +329,24 @@ public final class ManagedFiles: @unchecked Sendable {
             at: plan.resolvedURL,
             bytes: plan.intendedBytes,
             metadata: metadata,
-            expected: current
+            expected: current,
+            applyMarker: recoveryMarker ? plan.id : nil
         )
         let after = try inspect(at: plan.requestedURL)
         return ManagedFileReceipt(planID: plan.id, before: plan.inspection, after: after, changed: true)
+    }
+
+    public func hasRecoveryMarker(
+        for plan: ManagedFilePlan,
+        in inspection: ManagedFileInspection
+    ) -> Bool {
+        guard inspection.resolvedURL == plan.resolvedURL,
+            let identity = inspection.snapshot.identity,
+            let marker = inspection.snapshot.metadata?.extendedAttributes[Self.recoveryMarkerAttribute]
+        else {
+            return false
+        }
+        return marker == Self.recoveryMarker(for: plan.id, identity: identity)
     }
 
     public func rollback(_ receipt: ManagedFileReceipt) throws {
@@ -476,7 +493,8 @@ public final class ManagedFiles: @unchecked Sendable {
         at url: URL,
         bytes: Data,
         metadata: ManagedFileMetadata,
-        expected: ManagedFileInspection? = nil
+        expected: ManagedFileInspection? = nil,
+        applyMarker: UUID? = nil
     ) throws {
         let directory = url.deletingLastPathComponent()
         var isDirectory = ObjCBool(false)
@@ -488,6 +506,18 @@ public final class ManagedFiles: @unchecked Sendable {
         do {
             try bytes.write(to: temporaryURL, options: [.atomic])
             try applyMetadata(metadata, to: temporaryURL)
+            if let applyMarker {
+                let temporaryIdentity = try identity(at: temporaryURL)
+                try setExtendedAttributes(
+                    [
+                        Self.recoveryMarkerAttribute: Self.recoveryMarker(
+                            for: applyMarker,
+                            identity: temporaryIdentity
+                        )
+                    ],
+                    at: temporaryURL
+                )
+            }
             try applyFlags(metadata.flags, to: temporaryURL)
             if let expected {
                 let current = try inspect(at: expected.requestedURL)
@@ -689,6 +719,15 @@ public final class ManagedFiles: @unchecked Sendable {
             groupID: groupID,
             lineEnding: .none
         )
+    }
+
+    private static let recoveryMarkerAttribute = "com.ohmytheme.apply-id"
+
+    private static func recoveryMarker(
+        for planID: UUID,
+        identity: ManagedFileIdentity
+    ) -> Data {
+        Data("\(planID.uuidString)|\(identity.device)|\(identity.inode)".utf8)
     }
 
     private static let defaultNixRoots = [

@@ -50,6 +50,34 @@ struct UndoLastApplyTests {
         #expect(await adapter.currentWorldBytes() == Data("before-theme".utf8))
     }
 
+    @Test("A no-change apply does not replace the Last Apply Transaction")
+    func noChangeApplyDoesNotReplaceLAT() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = RecordingWritableAdapter(
+            initialWorld: Data("before-theme".utf8),
+            reportsUnchangedForSameBytes: true
+        )
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let workspace = Fixtures.workspace(recordingInstances: ["recording.no-change"])
+        let firstPreview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let firstReport = try await engine.applyDurable(previewID: firstPreview.id, workspace: workspace)
+
+        let secondPreview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let secondReport = try await engine.applyDurable(previewID: secondPreview.id, workspace: workspace)
+
+        #expect(secondReport.outcomes[0].configurationState == .unchanged)
+        let lat = try fixture.store.journalFindLastAppliedTransaction(workspaceID: workspace.id)
+        #expect(lat?.id == firstReport.operationID)
+
+        let undo = try await engine.undoLast(workspace: workspace)
+        #expect(undo.outcomes[0].configurationState == .updated)
+        #expect(await adapter.currentWorldBytes() == Data("before-theme".utf8))
+    }
+
     @Test("A partially successful apply is still the LAT and undo reports per-target results")
     func partialApplyIsLatAndUndoIsPerTarget() async throws {
         let fixture = try Self.makeFixture()

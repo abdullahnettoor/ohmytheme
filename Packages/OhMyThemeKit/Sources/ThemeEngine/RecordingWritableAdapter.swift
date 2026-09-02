@@ -33,12 +33,18 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
     public let payloadVersion = "1"
 
     private var worldState: WorldState
+    private let reportsUnchangedForSameBytes: Bool
     private var interruptions: Set<InterruptionPoint> = []
     private var connectedInstances: Set<TargetInstanceID> = []
 
-    public init(id: String = "recording", initialWorld: Data = Data("recording-world-initial".utf8)) {
+    public init(
+        id: String = "recording",
+        initialWorld: Data = Data("recording-world-initial".utf8),
+        reportsUnchangedForSameBytes: Bool = false
+    ) {
         self.id = id
         self.worldState = WorldState(bytes: initialWorld, revision: "rev-0")
+        self.reportsUnchangedForSameBytes = reportsUnchangedForSameBytes
     }
 
     public func setInterruption(_ point: InterruptionPoint, enabled: Bool) {
@@ -98,6 +104,13 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             plan.payload.payloadVersion == payloadVersion
         else {
             throw RecordingWritableAdapterError.incompatiblePayload
+        }
+        if reportsUnchangedForSameBytes && worldState.bytes == plan.payload.payload {
+            return AdapterReceipt(
+                configurationState: .unchanged,
+                runningInstanceReach: .currentInstances,
+                detail: "recording-world-already-selected"
+            )
         }
         // Perform the mutation.
         worldState = WorldState(bytes: plan.payload.payload, revision: plan.intendedChangeDigest)

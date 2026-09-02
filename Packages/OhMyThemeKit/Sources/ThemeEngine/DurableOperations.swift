@@ -485,7 +485,7 @@ extension ThemeEngine {
                     adapterID: plan.adapterID,
                     adapterVersion: plan.adapterVersion,
                     capabilityID: plan.capabilityID,
-                    phase: .applied,
+                    phase: receipt.configurationState == .unchanged ? .skipped : .applied,
                     intendedChangeDigest: plan.intendedChangeDigest,
                     staleStateToken: plan.staleStateToken,
                     planDigest: planReference?.digest,
@@ -513,7 +513,7 @@ extension ThemeEngine {
                         adapterID: plan.adapterID,
                         adapterVersion: plan.adapterVersion,
                         capabilityID: plan.capabilityID,
-                        phase: .applied,
+                        phase: recovered.configurationState == .unchanged ? .skipped : .applied,
                         intendedChangeDigest: plan.intendedChangeDigest,
                         staleStateToken: plan.staleStateToken,
                         planDigest: planReference?.digest,
@@ -1140,7 +1140,12 @@ extension ThemeEngine {
                 let newPhase: RecordPhase
                 switch classification {
                 case .beforeChange: newPhase = .reconciledBefore
-                case .intendedAfterChange: newPhase = recoveredReceipt == nil ? .reconciledIntended : .applied
+                case .intendedAfterChange:
+                    if let recoveredReceipt {
+                        newPhase = recoveredReceipt.configurationState == .unchanged ? .skipped : .applied
+                    } else {
+                        newPhase = .reconciledIntended
+                    }
                 case .conflicting: newPhase = .reconciledConflict
                 }
                 try persistence.journalSaveRecord(

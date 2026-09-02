@@ -812,7 +812,7 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
             guard latestParent == state.parent else {
                 throw GhosttyAdapterError.staleState
             }
-            let receipt = try managedFiles.apply(state.artifactPlan)
+            let receipt = try managedFiles.apply(state.artifactPlan, recoveryMarker: true)
             return AdapterReceipt(
                 configurationState: receipt.changed ? .updated : .unchanged,
                 runningInstanceReach: .reloadRequired,
@@ -856,7 +856,9 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
         let state = try themeState(from: plan)
         let currentParent = try managedFiles.inspect(at: state.parent.requestedURL)
         let currentArtifact = try managedFiles.inspect(at: state.artifactPlan.requestedURL)
-        guard currentParent == state.parent, matches(currentArtifact, state.artifactPlan) else {
+        guard currentParent == state.parent,
+            matches(currentArtifact, state.artifactPlan, requiresRecoveryMarker: true)
+        else {
             throw GhosttyAdapterError.restorationConflict
         }
         let managedReceipt = ManagedFileReceipt(
@@ -880,7 +882,9 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
         if currentParent == state.parent, currentArtifact == state.artifactPlan.inspection {
             return .beforeChange
         }
-        if currentParent == state.parent, matches(currentArtifact, state.artifactPlan) {
+        if currentParent == state.parent,
+            matches(currentArtifact, state.artifactPlan, requiresRecoveryMarker: true)
+        {
             return .intendedAfterChange
         }
         return .conflicting
@@ -1013,8 +1017,14 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
         )
     }
 
-    private func matches(_ inspection: ManagedFileInspection, _ plan: ManagedFilePlan) -> Bool {
-        inspection.resolvedURL == plan.resolvedURL && inspection.snapshot.digest == plan.intendedDigest
+    private func matches(
+        _ inspection: ManagedFileInspection,
+        _ plan: ManagedFilePlan,
+        requiresRecoveryMarker: Bool = false
+    ) -> Bool {
+        inspection.resolvedURL == plan.resolvedURL
+            && (!requiresRecoveryMarker || managedFiles.hasRecoveryMarker(for: plan, in: inspection))
+            && inspection.snapshot.digest == plan.intendedDigest
             && expectedMetadataMatches(
                 current: inspection.snapshot.metadata,
                 before: plan.inspection.snapshot.metadata,
@@ -1094,12 +1104,29 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
         intendedBytes: Data
     ) -> Bool {
         guard let current else { return false }
+        let currentWithoutRecoveryMarker = removingRecoveryMarker(from: current)
         if let before {
-            return current == before
+            return currentWithoutRecoveryMarker == removingRecoveryMarker(from: before)
         }
-        return current.permissions == 0o600 && current.flags == 0
-            && current.extendedAttributes.keys.allSatisfy { $0 == "com.apple.provenance" }
-            && current.accessControlList == nil && current.lineEnding != .none && !intendedBytes.isEmpty
+        return currentWithoutRecoveryMarker.permissions == 0o600
+            && currentWithoutRecoveryMarker.flags == 0
+            && currentWithoutRecoveryMarker.extendedAttributes.keys.allSatisfy {
+                $0 == "com.apple.provenance"
+            }
+            && currentWithoutRecoveryMarker.accessControlList == nil
+            && currentWithoutRecoveryMarker.lineEnding != .none && !intendedBytes.isEmpty
+    }
+
+    private func removingRecoveryMarker(from metadata: ManagedFileMetadata) -> ManagedFileMetadata {
+        ManagedFileMetadata(
+            permissions: metadata.permissions,
+            ownerID: metadata.ownerID,
+            groupID: metadata.groupID,
+            flags: metadata.flags,
+            extendedAttributes: metadata.extendedAttributes.filter { $0.key != "com.ohmytheme.apply-id" },
+            accessControlList: metadata.accessControlList,
+            lineEnding: metadata.lineEnding
+        )
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> Data {

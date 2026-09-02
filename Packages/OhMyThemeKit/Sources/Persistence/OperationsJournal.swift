@@ -23,6 +23,7 @@ public enum RecordPhase: String, Codable, Sendable {
     case prepared
     case applying
     case applied
+    case skipped
     case conflicted
     case failed
     case rolledBack = "rolled-back"
