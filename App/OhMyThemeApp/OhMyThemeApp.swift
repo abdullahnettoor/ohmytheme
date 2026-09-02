@@ -15,7 +15,8 @@ struct OhMyThemeApp: App {
     init() {
         themeEngine = ThemeEngine(
             packs: BundledThemeCatalog().load(),
-            adapters: [RecordingThemeAdapter()]
+            adapters: [RecordingThemeAdapter()],
+            persistence: workspaceStore.persistenceStore
         )
         MenuBarPresence.clearHiddenStatusItemPreferences(in: UserDefaults.standard)
     }
@@ -32,7 +33,8 @@ struct OhMyThemeApp: App {
                     themeEngine: themeEngine,
                     themeVariantSelection: { variantID in
                         workspaceStore.selectFixedVariant(variantID)
-                    }
+                    },
+                    persistenceError: workspaceStore.persistenceError
                 ))
         }
         .menuBarExtraStyle(.window)

@@ -1,4 +1,5 @@
 import Foundation
+import Persistence
 import ThemeModel
 
 public enum ThemeSourcePolicy: String, Codable, Equatable, Sendable {
@@ -310,6 +311,7 @@ public actor ThemeEngine {
     private let adapters: [String: any ThemeAdapter]
     private let sourcePolicy: ThemeSourcePolicy
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
+    private let persistence: PersistenceStore?
     private var previews: [UUID: ThemePreview] = [:]
     private var isApplying = false
 
@@ -317,12 +319,14 @@ public actor ThemeEngine {
         packs: [ThemePack],
         adapters: [any ThemeAdapter],
         sourcePolicy: ThemeSourcePolicy = .preferUpstream,
-        upstreamArtifacts: [String: PinnedUpstreamArtifact] = [:]
+        upstreamArtifacts: [String: PinnedUpstreamArtifact] = [:],
+        persistence: PersistenceStore? = nil
     ) {
         self.packs = packs
         self.adapters = Dictionary(uniqueKeysWithValues: adapters.map { ($0.id, $0) })
         self.sourcePolicy = sourcePolicy
         self.upstreamArtifacts = upstreamArtifacts
+        self.persistence = persistence
     }
 
     public func prepare(themeVariantID: String, workspace: Workspace) async throws -> ThemePreview {
@@ -355,6 +359,7 @@ public actor ThemeEngine {
         let source =
             resolvedSource
             ?? ResolvedSource(type: .unavailable, revision: pack.source.revision, artifact: nil)
+        let previewID = UUID()
 
         var targetPlans: [AdapterPlan] = []
         var setupNeeds: [UserAction] = []
@@ -388,6 +393,9 @@ public actor ThemeEngine {
             )
             do {
                 let plan = try await adapter.prepareApply(instance: instance, theme: preparedTheme)
+                if let persistence {
+                    try persist(plan: plan, previewID: previewID, persistence: persistence)
+                }
                 targetPlans.append(plan)
                 setupNeeds.append(contentsOf: plan.setupNeeds)
                 conflicts.append(contentsOf: plan.conflicts)
@@ -425,7 +433,7 @@ public actor ThemeEngine {
             previewSourceType = .mixed
         }
         let preview = ThemePreview(
-            id: UUID(),
+            id: previewID,
             variantID: variant.qualifiedID,
             sourceType: previewSourceType,
             sourceRevision: pack.source.revision,
@@ -558,6 +566,21 @@ public actor ThemeEngine {
         packs.lazy
             .flatMap { pack in pack.variants.map { (pack, $0) } }
             .first { $0.1.qualifiedID == qualifiedID }
+    }
+
+    private func persist(plan: AdapterPlan, previewID: UUID, persistence: PersistenceStore) throws {
+        let envelope = PersistedPayloadEnvelope(
+            id: "\(previewID.uuidString).\(plan.targetInstanceID.rawValue)",
+            targetInstanceID: plan.targetInstanceID,
+            adapterID: plan.adapterID,
+            adapterVersion: plan.adapterVersion,
+            payloadVersion: plan.payload.payloadVersion,
+            payload: plan.payload.payload
+        )
+        try persistence.savePayloadEnvelope(envelope)
+        if let baseline = plan.capturedPreChangeState {
+            _ = try persistence.saveContent(baseline, kind: "restoration", ownerID: envelope.id)
+        }
     }
 
     private func resolveSource(

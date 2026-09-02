@@ -13,18 +13,21 @@ struct WorkspaceMenuModel {
     private let themePacks: [ThemePack]
     private let themeEngine: ThemeEngine?
     private let themeVariantSelection: (String) -> Void
+    let persistenceError: String?
 
     init(
         workspace: Workspace,
         themePacks: [ThemePack] = BundledThemeCatalog().load(),
         themeEngine: ThemeEngine? = nil,
         themeVariantSelection: @escaping (String) -> Void = { _ in },
+        persistenceError: String? = nil,
         quitAction: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
         self.workspace = workspace
         self.themePacks = themePacks
         self.themeEngine = themeEngine
         self.themeVariantSelection = themeVariantSelection
+        self.persistenceError = persistenceError
         self.quitAction = quitAction
     }
 

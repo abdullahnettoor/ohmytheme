@@ -1,4 +1,5 @@
 import Foundation
+import Persistence
 import Testing
 import ThemeModel
 
@@ -188,6 +189,42 @@ struct ThemeEngineTests {
 
         #expect(preview.sourceType == .upstream)
         #expect(preview.targetPlans[0].artifact == upstreamArtifact)
+    }
+
+    @Test("Preparation persists the exact adapter payload envelope when storage is configured")
+    func preparationPersistsPayloadEnvelope() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oh-my-theme-engine-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let persistence = try PersistenceStore(
+            databaseURL: directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let engine = ThemeEngine(
+            packs: [testPack],
+            adapters: [RecordingThemeAdapter()],
+            persistence: persistence
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.persisted"),
+                    displayName: "Recording Target",
+                    adapterID: "recording"
+                )
+            ]
+        )
+
+        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let envelope = try persistence.loadPayloadEnvelope(
+            id: "\(preview.id.uuidString).recording.persisted"
+        )
+
+        #expect(envelope.adapterID == "recording")
+        #expect(envelope.payload == preview.targetPlans[0].payload.payload)
     }
 }
 

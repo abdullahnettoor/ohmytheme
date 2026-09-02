@@ -36,6 +36,11 @@ struct WorkspaceMenuView: View {
                         .font(.callout)
                 }
             }
+            if let persistenceError = model.persistenceError {
+                Text("Persistence unavailable: \(persistenceError)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Bundled themes")

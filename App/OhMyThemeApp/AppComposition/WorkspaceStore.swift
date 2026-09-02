@@ -8,18 +8,34 @@ import ThemeModel
 /// survive application relaunch.
 final class WorkspaceStore {
     private let persistence: PersistenceStore?
+    private(set) var persistenceError: String?
 
     init() {
-        persistence = try? Self.makePersistenceStore()
-        if let persistence, (try? persistence.loadWorkspace()) == nil {
-            try? persistence.saveWorkspace(.myMac)
+        do {
+            let store = try Self.makePersistenceStore()
+            do {
+                _ = try store.loadWorkspace()
+            } catch PersistenceError.workspaceNotFound {
+                try store.saveWorkspace(.myMac)
+            }
+            persistence = store
+        } catch {
+            persistence = nil
+            persistenceError = String(describing: error)
         }
     }
 
     var workspace: Workspace {
-        guard let persistence, let state = try? persistence.loadWorkspace() else { return .myMac }
-        return state.workspace
+        guard let persistence else { return .myMac }
+        do {
+            return try persistence.loadWorkspace().workspace
+        } catch {
+            persistenceError = String(describing: error)
+            return .myMac
+        }
     }
+
+    var persistenceStore: PersistenceStore? { persistence }
 
     var appWorkspace: Workspace {
         let persisted = workspace
@@ -50,7 +66,15 @@ final class WorkspaceStore {
             connectedTargetInstances: current.connectedTargetInstances,
             themeAssignment: .fixed(variantID: variantID)
         )
-        try? persistence?.saveWorkspace(updated)
+        guard let persistence else {
+            persistenceError = persistenceError ?? "Workspace persistence is unavailable."
+            return
+        }
+        do {
+            try persistence.saveWorkspace(updated)
+        } catch {
+            persistenceError = String(describing: error)
+        }
     }
 
     private static func makePersistenceStore() throws -> PersistenceStore {
