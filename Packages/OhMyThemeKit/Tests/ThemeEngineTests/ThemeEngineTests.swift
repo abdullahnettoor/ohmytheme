@@ -153,6 +153,42 @@ struct ThemeEngineTests {
         #expect(preview.activationReach == .unavailable)
         #expect(preview.targetPlans.isEmpty)
     }
+
+    @Test("Require upstream uses a valid target-specific pinned artifact")
+    func requireUpstreamUsesPinnedArtifact() async throws {
+        let adapter = RecordingThemeAdapter()
+        let upstreamArtifact = Data([0x04, 0x05, 0x06])
+        let engine = ThemeEngine(
+            packs: [testPack],
+            adapters: [adapter],
+            sourcePolicy: .requireUpstream,
+            upstreamArtifacts: [
+                "recording/test-pack/dark": PinnedUpstreamArtifact(
+                    adapterID: "recording",
+                    variantID: "test-pack/dark",
+                    revision: "reviewed-revision",
+                    contentDigest: "sha256:test",
+                    payload: upstreamArtifact
+                )
+            ]
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.required"),
+                    displayName: "Recording Target",
+                    adapterID: "recording"
+                )
+            ]
+        )
+
+        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+
+        #expect(preview.sourceType == .upstream)
+        #expect(preview.targetPlans[0].artifact == upstreamArtifact)
+    }
 }
 
 private let testPack = ThemePack(

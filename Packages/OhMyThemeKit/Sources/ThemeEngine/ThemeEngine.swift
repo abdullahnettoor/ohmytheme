@@ -331,7 +331,10 @@ public actor ThemeEngine {
         }
         let (pack, variant) = packAndVariant
         let resolvedSource = resolveSource(for: pack, variant: variant, adapterID: nil)
-        guard resolvedSource != nil || sourcePolicy != .requireUpstream else {
+        if sourcePolicy == .requireUpstream,
+            resolvedSource == nil,
+            workspace.connectedTargetInstances.isEmpty
+        {
             let preview = ThemePreview(
                 id: UUID(),
                 variantID: variant.qualifiedID,
@@ -351,7 +354,7 @@ public actor ThemeEngine {
         }
         let source =
             resolvedSource
-            ?? ResolvedSource(type: .generated, revision: pack.source.revision, artifact: nil)
+            ?? ResolvedSource(type: .unavailable, revision: pack.source.revision, artifact: nil)
 
         var targetPlans: [AdapterPlan] = []
         var setupNeeds: [UserAction] = []
