@@ -5,7 +5,7 @@ public struct ConnectedTargetInstance: Sendable, Equatable, Identifiable {
     public let displayName: String
     public let adapterID: String
 
-    public init(id: TargetInstanceID, displayName: String, adapterID: String = "recording") {
+    public init(id: TargetInstanceID, displayName: String, adapterID: String) {
         self.id = id
         self.displayName = displayName
         self.adapterID = adapterID

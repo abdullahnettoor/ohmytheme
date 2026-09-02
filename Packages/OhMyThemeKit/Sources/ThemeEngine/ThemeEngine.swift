@@ -231,6 +231,7 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
 public protocol ThemeAdapter: Sendable {
     var id: String { get }
     var version: String { get }
+    var payloadVersion: String { get }
 
     func prepareApply(
         instance: ConnectedTargetInstance,
@@ -250,16 +251,19 @@ public actor ThemeEngine {
     private let packs: [ThemePack]
     private let adapters: [String: any ThemeAdapter]
     private let sourcePolicy: ThemeSourcePolicy
+    private let upstreamArtifacts: [String: Data]
     private var previews: [UUID: ThemePreview] = [:]
 
     public init(
         packs: [ThemePack],
         adapters: [any ThemeAdapter],
-        sourcePolicy: ThemeSourcePolicy = .preferUpstream
+        sourcePolicy: ThemeSourcePolicy = .preferUpstream,
+        upstreamArtifacts: [String: Data] = [:]
     ) {
         self.packs = packs
         self.adapters = Dictionary(uniqueKeysWithValues: adapters.map { ($0.id, $0) })
         self.sourcePolicy = sourcePolicy
+        self.upstreamArtifacts = upstreamArtifacts
     }
 
     public func prepare(themeVariantID: String, workspace: Workspace) async throws -> ThemePreview {
@@ -267,7 +271,7 @@ public actor ThemeEngine {
             throw ThemeEngineError.variantNotFound(themeVariantID)
         }
         let (pack, variant) = packAndVariant
-        let resolvedSource = resolveSource(for: pack)
+        let resolvedSource = resolveSource(for: pack, variant: variant)
         guard resolvedSource != nil || sourcePolicy != .requireUpstream else {
             let preview = ThemePreview(
                 id: UUID(),
@@ -286,7 +290,7 @@ public actor ThemeEngine {
             previews[preview.id] = preview
             return preview
         }
-        let source = resolvedSource ?? (type: .generated, revision: pack.source.revision)
+        let source = resolvedSource ?? (type: .generated, revision: pack.source.revision, artifact: nil)
         let preparedTheme = PreparedTheme(
             variantID: variant.qualifiedID,
             sourceType: source.type,
@@ -295,7 +299,7 @@ public actor ThemeEngine {
             themeSchemaVersion: pack.schemaVersion,
             contentDigest: variant.contentDigest,
             compilerVersion: "theme-compiler-1",
-            artifact: try encodeArtifact(for: variant, pack: pack)
+            artifact: try source.artifact ?? encodeArtifact(for: variant, pack: pack)
         )
 
         var targetPlans: [AdapterPlan] = []
@@ -305,7 +309,7 @@ public actor ThemeEngine {
         var unavailableTargetInstanceIDs: [TargetInstanceID] = []
         for instance in workspace.connectedTargetInstances {
             guard let adapter = adapters[instance.adapterID] else {
-                unavailableCapabilities.append(instance.displayName)
+                unavailableCapabilities.append("theme")
                 unavailableTargetInstanceIDs.append(instance.id)
                 continue
             }
@@ -315,7 +319,7 @@ public actor ThemeEngine {
                 setupNeeds.append(contentsOf: plan.setupNeeds)
                 conflicts.append(contentsOf: plan.conflicts)
             } catch {
-                unavailableCapabilities.append(instance.displayName)
+                unavailableCapabilities.append("theme")
                 unavailableTargetInstanceIDs.append(instance.id)
             }
         }
@@ -379,6 +383,23 @@ public actor ThemeEngine {
                 )
                 continue
             }
+            guard plan.adapterID == plan.payload.adapterID,
+                plan.adapterVersion == plan.payload.adapterVersion,
+                plan.adapterVersion == adapter.version,
+                plan.payload.payloadVersion == adapter.payloadVersion
+            else {
+                outcomes[index] = TargetCapabilityOutcome(
+                    targetInstanceID: plan.targetInstanceID,
+                    adapterID: plan.adapterID,
+                    capabilityID: plan.capabilityID,
+                    sourceType: plan.sourceType,
+                    sourceRevision: plan.sourceRevision,
+                    configurationState: .failed,
+                    runningInstanceReach: .unavailable,
+                    detail: "The adapter payload envelope is incompatible."
+                )
+                continue
+            }
             do {
                 let receipt = try await adapter.apply(plan)
                 outcomes[index] = TargetCapabilityOutcome(
@@ -426,14 +447,19 @@ public actor ThemeEngine {
             .first { $0.1.qualifiedID == qualifiedID }
     }
 
-    private func resolveSource(for pack: ThemePack) -> (type: ThemeSourceKind, revision: String)? {
+    private func resolveSource(
+        for pack: ThemePack,
+        variant: ThemeVariant
+    ) -> (type: ThemeSourceKind, revision: String, artifact: Data?)? {
+        let upstreamArtifact = upstreamArtifacts[variant.qualifiedID]
         switch sourcePolicy {
         case .preferUpstream:
-            return (.generated, pack.source.revision)
+            return upstreamArtifact.map { (.upstream, pack.source.revision, $0) }
+                ?? (.generated, pack.source.revision, nil)
         case .requireUpstream:
-            return nil
+            return upstreamArtifact.map { (.upstream, pack.source.revision, $0) }
         case .useGenerated:
-            return (.generated, pack.source.revision)
+            return (.generated, pack.source.revision, nil)
         }
     }
 
@@ -471,6 +497,7 @@ public actor ThemeEngine {
 public actor RecordingThemeAdapter: ThemeAdapter {
     public let id = "recording"
     public let version = "1"
+    public let payloadVersion = "1"
     private var preparedArtifacts: [Data] = []
     private var appliedArtifactsStorage: [Data] = []
 
@@ -489,7 +516,7 @@ public actor RecordingThemeAdapter: ThemeAdapter {
             payload: AdapterPayloadEnvelope(
                 adapterID: id,
                 adapterVersion: version,
-                payloadVersion: "1",
+                payloadVersion: payloadVersion,
                 payload: theme.artifact
             ),
             sourceType: theme.sourceType,
@@ -499,7 +526,10 @@ public actor RecordingThemeAdapter: ThemeAdapter {
     }
 
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
-        guard plan.payload.adapterID == id, plan.payload.adapterVersion == version else {
+        guard plan.payload.adapterID == id,
+            plan.payload.adapterVersion == version,
+            plan.payload.payloadVersion == payloadVersion
+        else {
             throw RecordingThemeAdapterError.incompatiblePayload
         }
         guard preparedArtifacts.contains(plan.payload.payload) else {

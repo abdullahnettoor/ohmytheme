@@ -77,6 +77,58 @@ struct ThemeEngineTests {
         #expect(report.outcomes[0].runningInstanceReach == .currentInstances)
         #expect(report.outcomes[0].sourceRevision == "reviewed-revision")
     }
+
+    @Test("Prefer upstream uses a supplied pinned upstream artifact")
+    func preferUpstreamUsesPinnedArtifact() async throws {
+        let adapter = RecordingThemeAdapter()
+        let upstreamArtifact = Data([0x01, 0x02, 0x03])
+        let engine = ThemeEngine(
+            packs: [testPack],
+            adapters: [adapter],
+            sourcePolicy: .preferUpstream,
+            upstreamArtifacts: ["test-pack/dark": upstreamArtifact]
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.upstream"),
+                    displayName: "Recording Target",
+                    adapterID: "recording"
+                )
+            ]
+        )
+
+        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+
+        #expect(preview.sourceType == .upstream)
+        #expect(preview.targetPlans[0].artifact == upstreamArtifact)
+    }
+
+    @Test("Unavailable targets remain reportable during apply")
+    func unavailableTargetsRemainReportable() async throws {
+        let engine = ThemeEngine(packs: [testPack], adapters: [])
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "missing.target"),
+                    displayName: "Missing Target",
+                    adapterID: "missing"
+                )
+            ]
+        )
+
+        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.apply(previewID: preview.id)
+
+        #expect(preview.unavailableCapabilities == ["theme"])
+        #expect(report.outcomes.count == 1)
+        #expect(report.outcomes[0].configurationState == .unavailable)
+        #expect(report.outcomes[0].capabilityID == "theme")
+    }
 }
 
 private let testPack = ThemePack(

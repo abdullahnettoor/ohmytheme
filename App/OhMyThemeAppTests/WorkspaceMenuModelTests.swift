@@ -27,9 +27,16 @@ final class WorkspaceMenuModelTests: XCTestCase {
             id: .myMac,
             displayName: "My Mac",
             connectedTargetInstances: [
-                ConnectedTargetInstance(id: TargetInstanceID(rawValue: "ghostty.default"), displayName: "Ghostty"),
                 ConnectedTargetInstance(
-                    id: TargetInstanceID(rawValue: "vscode.default"), displayName: "Visual Studio Code"),
+                    id: TargetInstanceID(rawValue: "ghostty.default"),
+                    displayName: "Ghostty",
+                    adapterID: "recording"
+                ),
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "vscode.default"),
+                    displayName: "Visual Studio Code",
+                    adapterID: "recording"
+                ),
             ]
         )
 

@@ -122,7 +122,7 @@ struct WorkspaceMenuView: View {
                             }
                         }
                     }
-                    .disabled(preview.targetPlans.isEmpty)
+                    .disabled(preview.targetPlans.isEmpty && preview.unavailableTargetInstanceIDs.isEmpty)
                 }
 
                 if let report {
