@@ -1,0 +1,18 @@
+#include "Shared.xcconfig"
+
+PRODUCT_NAME = OhMyTheme
+PRODUCT_BUNDLE_IDENTIFIER = com.ohmytheme.OhMyTheme
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+// A menu-bar utility: no Dock icon and no default window.
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_KEY_LSUIElement = YES
+INFOPLIST_KEY_CFBundleDisplayName = Oh My Theme
+INFOPLIST_KEY_NSHumanReadableCopyright =
+
+// Oh My Theme manages configuration the user already owns outside a container.
+ENABLE_APP_SANDBOX = NO
+
+COMBINE_HIDPI_IMAGES = YES
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks

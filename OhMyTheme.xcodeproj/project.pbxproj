@@ -1,0 +1,400 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 46;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		13371C830467E02D8FE2EEB3 /* MenuBarLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F618B0C82D8C8629B72C82A1 /* MenuBarLifecycleTests.swift */; };
+		6D82B40A11F5923F6AD0194E /* OhMyThemeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */; };
+		882E5CA2392DC65C3FAED330 /* OhMyThemeKit in Frameworks */ = {isa = PBXBuildFile; productRef = 3A816AD2BA05BA84EC058C23 /* OhMyThemeKit */; };
+		8AE004071AA3A2872CA68737 /* MenuBarPresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E3F5FF97E414F622F085EAF /* MenuBarPresence.swift */; };
+		8C903EBADD4D56FA3BC0C6C5 /* WorkspaceMenuModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EC15806E271DF4577C8E93D /* WorkspaceMenuModel.swift */; };
+		E9A867BC3E759729FFB2E7FE /* WorkspaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B5F4D06C3E027280DDBB84E /* WorkspaceStore.swift */; };
+		EAA17A7543ACA9E7C3AC398A /* WorkspaceMenuModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */; };
+		EEAAC4694FEECBAA36C561E2 /* WorkspaceMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 493A5E2DC28F969912BC7DAF /* WorkspaceMenuView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BC042921F913F35229044216 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 195433E6DC06040C040D8986 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7AF9DB32332B68D80AC8FFB4;
+			remoteInfo = OhMyTheme;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0614E79C5FB1CE681EE0CDC9 /* Shared.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
+		0A12BF2FF965EA32D0E90291 /* App.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; path = App.xcconfig; sourceTree = "<group>"; };
+		1CEF6E5A22E000386F25EB4B /* OhMyTheme.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OhMyTheme.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		327F9E3D0D148A2CDE38B673 /* AppTests.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; path = AppTests.xcconfig; sourceTree = "<group>"; };
+		3B5F4D06C3E027280DDBB84E /* WorkspaceStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceStore.swift; sourceTree = "<group>"; };
+		493A5E2DC28F969912BC7DAF /* WorkspaceMenuView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceMenuView.swift; sourceTree = "<group>"; };
+		4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceMenuModelTests.swift; sourceTree = "<group>"; };
+		547A744BB39A61EAF180D92B /* OhMyThemeKit */ = {isa = PBXFileReference; includeInIndex = 1; path = OhMyThemeKit; sourceTree = "<group>"; };
+		8E3F5FF97E414F622F085EAF /* MenuBarPresence.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarPresence.swift; sourceTree = "<group>"; };
+		9EC15806E271DF4577C8E93D /* WorkspaceMenuModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceMenuModel.swift; sourceTree = "<group>"; };
+		AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OhMyThemeApp.swift; sourceTree = "<group>"; };
+		EA9658908A51B95EDF2E6E3C /* OhMyThemeAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OhMyThemeAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F618B0C82D8C8629B72C82A1 /* MenuBarLifecycleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarLifecycleTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		888CBB1C6775091331BA643D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B8EE67FB294E668F2715F3F5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				882E5CA2392DC65C3FAED330 /* OhMyThemeKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		05300B4CA9EB59CC3BA60FD0 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		2A431F63304E8802166AE476 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1CEF6E5A22E000386F25EB4B /* OhMyTheme.app */,
+				EA9658908A51B95EDF2E6E3C /* OhMyThemeAppTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		2A4BABC391C431046E3B0F2B /* AppComposition */ = {
+			isa = PBXGroup;
+			children = (
+				8E3F5FF97E414F622F085EAF /* MenuBarPresence.swift */,
+				3B5F4D06C3E027280DDBB84E /* WorkspaceStore.swift */,
+			);
+			name = AppComposition;
+			path = AppComposition;
+			sourceTree = "<group>";
+		};
+		33A5BD521F6BBFC6031CE09B /* OhMyThemeAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				F618B0C82D8C8629B72C82A1 /* MenuBarLifecycleTests.swift */,
+				4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */,
+			);
+			name = OhMyThemeAppTests;
+			path = OhMyThemeAppTests;
+			sourceTree = "<group>";
+		};
+		586F21FF52ABB74AE8E5A986 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				0614E79C5FB1CE681EE0CDC9 /* Shared.xcconfig */,
+				0A12BF2FF965EA32D0E90291 /* App.xcconfig */,
+				327F9E3D0D148A2CDE38B673 /* AppTests.xcconfig */,
+			);
+			name = Config;
+			path = Config;
+			sourceTree = "<group>";
+		};
+		6C32E16D3870C2673D3C0502 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				9EC15806E271DF4577C8E93D /* WorkspaceMenuModel.swift */,
+				493A5E2DC28F969912BC7DAF /* WorkspaceMenuView.swift */,
+			);
+			name = UI;
+			path = UI;
+			sourceTree = "<group>";
+		};
+		6C6B982860F450C0E2761A28 /* OhMyThemeApp */ = {
+			isa = PBXGroup;
+			children = (
+				AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */,
+				2A4BABC391C431046E3B0F2B /* AppComposition */,
+				6C32E16D3870C2673D3C0502 /* UI */,
+			);
+			name = OhMyThemeApp;
+			path = OhMyThemeApp;
+			sourceTree = "<group>";
+		};
+		7CFCD33E76559233CBB6B37E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				05300B4CA9EB59CC3BA60FD0 /* OS X */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		B02AC712163E4C0783D0E408 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				6C6B982860F450C0E2761A28 /* OhMyThemeApp */,
+				33A5BD521F6BBFC6031CE09B /* OhMyThemeAppTests */,
+			);
+			name = App;
+			path = App;
+			sourceTree = "<group>";
+		};
+		CC45F780142E92CD432A963C = {
+			isa = PBXGroup;
+			children = (
+				2A431F63304E8802166AE476 /* Products */,
+				7CFCD33E76559233CBB6B37E /* Frameworks */,
+				586F21FF52ABB74AE8E5A986 /* Config */,
+				B02AC712163E4C0783D0E408 /* App */,
+				CE2DBC4792F6D31C0E988B3C /* Packages */,
+			);
+			sourceTree = "<group>";
+		};
+		CE2DBC4792F6D31C0E988B3C /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				547A744BB39A61EAF180D92B /* OhMyThemeKit */,
+			);
+			name = Packages;
+			path = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1B5FE05EC40F7876A74FA4CF /* OhMyThemeAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3AEC4517A3CE29C59DABD7D2 /* Build configuration list for PBXNativeTarget "OhMyThemeAppTests" */;
+			buildPhases = (
+				B302EC6432505448A13061BB /* Sources */,
+				888CBB1C6775091331BA643D /* Frameworks */,
+				E8AA605D85F261B343A620A8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9DF7ECA87ED8390A0E785441 /* PBXTargetDependency */,
+			);
+			name = OhMyThemeAppTests;
+			productName = OhMyThemeAppTests;
+			productReference = EA9658908A51B95EDF2E6E3C /* OhMyThemeAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7AF9DB32332B68D80AC8FFB4 /* OhMyTheme */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 442F8E73479D86DCF529905C /* Build configuration list for PBXNativeTarget "OhMyTheme" */;
+			buildPhases = (
+				E3711A5E36F75D24370CD577 /* Sources */,
+				B8EE67FB294E668F2715F3F5 /* Frameworks */,
+				DCD6A258067F76326CE88D98 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OhMyTheme;
+			packageProductDependencies = (
+				3A816AD2BA05BA84EC058C23 /* OhMyThemeKit */,
+			);
+			productName = OhMyTheme;
+			productReference = 1CEF6E5A22E000386F25EB4B /* OhMyTheme.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		195433E6DC06040C040D8986 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = C1BED06FF140DFBEB7706BB0 /* Build configuration list for PBXProject "OhMyTheme" */;
+			compatibilityVersion = "Xcode 3.2";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = CC45F780142E92CD432A963C;
+			minimizedProjectReferenceProxies = 0;
+			packageReferences = (
+				B737443F56DE8DF144FCFEB9 /* XCLocalSwiftPackageReference "OhMyThemeKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 2A431F63304E8802166AE476 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7AF9DB32332B68D80AC8FFB4 /* OhMyTheme */,
+				1B5FE05EC40F7876A74FA4CF /* OhMyThemeAppTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		DCD6A258067F76326CE88D98 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E8AA605D85F261B343A620A8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B302EC6432505448A13061BB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				13371C830467E02D8FE2EEB3 /* MenuBarLifecycleTests.swift in Sources */,
+				EAA17A7543ACA9E7C3AC398A /* WorkspaceMenuModelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E3711A5E36F75D24370CD577 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6D82B40A11F5923F6AD0194E /* OhMyThemeApp.swift in Sources */,
+				8AE004071AA3A2872CA68737 /* MenuBarPresence.swift in Sources */,
+				E9A867BC3E759729FFB2E7FE /* WorkspaceStore.swift in Sources */,
+				8C903EBADD4D56FA3BC0C6C5 /* WorkspaceMenuModel.swift in Sources */,
+				EEAAC4694FEECBAA36C561E2 /* WorkspaceMenuView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9DF7ECA87ED8390A0E785441 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = OhMyTheme;
+			target = 7AF9DB32332B68D80AC8FFB4 /* OhMyTheme */;
+			targetProxy = BC042921F913F35229044216 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1EFB6C125DF272B231DF89AC /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0614E79C5FB1CE681EE0CDC9 /* Shared.xcconfig */;
+			buildSettings = {
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_TESTABILITY = NO;
+				ONLY_ACTIVE_ARCH = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		5F959CFE7BDFB0EFFCD9EDA0 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 327F9E3D0D148A2CDE38B673 /* AppTests.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		82B324CBA413326F65486BF4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0A12BF2FF965EA32D0E90291 /* App.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+		96775B03F385F0EAFFBD816E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0A12BF2FF965EA32D0E90291 /* App.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		B8C6057A98AAB4CBF452F7B8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 327F9E3D0D148A2CDE38B673 /* AppTests.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		F776F75EF52F7B3C1F0B6F8F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0614E79C5FB1CE681EE0CDC9 /* Shared.xcconfig */;
+			buildSettings = {
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_COMPILATION_MODE = singlefile;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		3AEC4517A3CE29C59DABD7D2 /* Build configuration list for PBXNativeTarget "OhMyThemeAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F959CFE7BDFB0EFFCD9EDA0 /* Release */,
+				B8C6057A98AAB4CBF452F7B8 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		442F8E73479D86DCF529905C /* Build configuration list for PBXNativeTarget "OhMyTheme" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				82B324CBA413326F65486BF4 /* Release */,
+				96775B03F385F0EAFFBD816E /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C1BED06FF140DFBEB7706BB0 /* Build configuration list for PBXProject "OhMyTheme" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F776F75EF52F7B3C1F0B6F8F /* Debug */,
+				1EFB6C125DF272B231DF89AC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B737443F56DE8DF144FCFEB9 /* XCLocalSwiftPackageReference "OhMyThemeKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/OhMyThemeKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		3A816AD2BA05BA84EC058C23 /* OhMyThemeKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OhMyThemeKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 195433E6DC06040C040D8986 /* Project object */;
+}
