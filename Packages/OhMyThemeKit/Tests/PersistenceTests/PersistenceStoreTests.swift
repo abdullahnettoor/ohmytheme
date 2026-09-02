@@ -81,11 +81,14 @@ struct PersistenceStoreTests {
             payloadVersion: "1",
             payload: bytes
         )
+        let restoration = Data("baseline".utf8)
 
-        _ = try fixture.store.savePayloadEnvelope(envelope)
+        _ = try fixture.store.savePayloadEnvelope(envelope, restorationData: restoration)
         let restored = try fixture.store.loadPayloadEnvelope(id: envelope.id)
 
-        #expect(restored == envelope)
+        #expect(restored.payload == envelope.payload)
+        #expect(restored.restorationReference?.digest == ContentAddressedStore.digest(of: restoration))
+        #expect(try fixture.store.loadRestorationContent(forEnvelopeID: envelope.id) == restoration)
         let reference = try fixture.store.saveContent(bytes, kind: "restoration", ownerID: "baseline-1")
         #expect(reference.digest == ContentAddressedStore.digest(of: bytes))
         #expect(try fixture.store.loadContent(reference) == bytes)

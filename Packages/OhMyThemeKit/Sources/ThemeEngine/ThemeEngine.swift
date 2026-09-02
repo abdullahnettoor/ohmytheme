@@ -577,10 +577,10 @@ public actor ThemeEngine {
             payloadVersion: plan.payload.payloadVersion,
             payload: plan.payload.payload
         )
-        try persistence.savePayloadEnvelope(envelope)
-        if let baseline = plan.capturedPreChangeState {
-            _ = try persistence.saveContent(baseline, kind: "restoration", ownerID: envelope.id)
-        }
+        try persistence.savePayloadEnvelope(
+            envelope,
+            restorationData: plan.capturedPreChangeState
+        )
     }
 
     private func resolveSource(

@@ -33,6 +33,7 @@ public struct PersistedPayloadEnvelope: Codable, Equatable, Sendable, Identifiab
     public let adapterVersion: String
     public let payloadVersion: String
     public let payload: Data
+    public let restorationReference: ContentReference?
 
     public init(
         id: String,
@@ -40,7 +41,8 @@ public struct PersistedPayloadEnvelope: Codable, Equatable, Sendable, Identifiab
         adapterID: String,
         adapterVersion: String,
         payloadVersion: String,
-        payload: Data
+        payload: Data,
+        restorationReference: ContentReference? = nil
     ) {
         self.id = id
         self.targetInstanceID = targetInstanceID
@@ -48,6 +50,7 @@ public struct PersistedPayloadEnvelope: Codable, Equatable, Sendable, Identifiab
         self.adapterVersion = adapterVersion
         self.payloadVersion = payloadVersion
         self.payload = payload
+        self.restorationReference = restorationReference
     }
 }
 
@@ -106,6 +109,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("adapter_version", .text).notNull()
                 table.column("payload_version", .text).notNull()
                 table.column("payload_digest", .text).notNull().references("content_references")
+                table.column("restoration_digest", .text).references("content_references")
             }
         }
         try migrator.migrate(database)
@@ -214,8 +218,10 @@ public final class PersistenceStore: @unchecked Sendable {
     }
 
     @discardableResult
-    public func savePayloadEnvelope(_ envelope: PersistedPayloadEnvelope) throws -> String {
+    public func savePayloadEnvelope(_ envelope: PersistedPayloadEnvelope, restorationData: Data? = nil) throws -> String
+    {
         let reference = try contentStore.put(envelope.payload)
+        let restorationReference = try restorationData.map { try contentStore.put($0) }
         try database.write { database in
             try database.execute(
                 sql: """
@@ -224,11 +230,20 @@ public final class PersistenceStore: @unchecked Sendable {
                     """,
                 arguments: [reference.digest, reference.byteCount, envelope.id]
             )
+            if let restorationReference {
+                try database.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO content_references (digest, byte_count, kind, owner_id)
+                        VALUES (?, ?, 'restoration', ?)
+                        """,
+                    arguments: [restorationReference.digest, restorationReference.byteCount, envelope.id]
+                )
+            }
             try database.execute(
                 sql: """
                     INSERT OR REPLACE INTO payload_envelopes
-                    (id, target_instance_id, adapter_id, adapter_version, payload_version, payload_digest)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (id, target_instance_id, adapter_id, adapter_version, payload_version, payload_digest, restoration_digest)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     envelope.id,
@@ -237,6 +252,7 @@ public final class PersistenceStore: @unchecked Sendable {
                     envelope.adapterVersion,
                     envelope.payloadVersion,
                     reference.digest,
+                    restorationReference?.digest,
                 ]
             )
         }
@@ -250,6 +266,7 @@ public final class PersistenceStore: @unchecked Sendable {
                     database,
                     sql: """
                         SELECT target_instance_id, adapter_id, adapter_version, payload_version, payload_digest
+                            , restoration_digest
                         FROM payload_envelopes WHERE id = ?
                         """,
                     arguments: [id]
@@ -265,15 +282,36 @@ public final class PersistenceStore: @unchecked Sendable {
                     arguments: [digest]
                 )?["byte_count"] ?? 0
             let payload = try contentStore.get(ContentReference(digest: digest, byteCount: count))
+            let restorationReference: ContentReference?
+            if let restorationDigest: String = row["restoration_digest"] {
+                let restorationCount: Int =
+                    try Row.fetchOne(
+                        database,
+                        sql: "SELECT byte_count FROM content_references WHERE digest = ?",
+                        arguments: [restorationDigest]
+                    )?["byte_count"] ?? 0
+                restorationReference = ContentReference(digest: restorationDigest, byteCount: restorationCount)
+            } else {
+                restorationReference = nil
+            }
             return PersistedPayloadEnvelope(
                 id: id,
                 targetInstanceID: TargetInstanceID(rawValue: row["target_instance_id"]),
                 adapterID: row["adapter_id"],
                 adapterVersion: row["adapter_version"],
                 payloadVersion: row["payload_version"],
-                payload: payload
+                payload: payload,
+                restorationReference: restorationReference
             )
         }
+    }
+
+    public func loadRestorationContent(forEnvelopeID id: String) throws -> Data {
+        let envelope = try loadPayloadEnvelope(id: id)
+        guard let reference = envelope.restorationReference else {
+            throw PersistenceError.payloadEnvelopeNotFound("\(id).restoration")
+        }
+        return try contentStore.get(reference)
     }
 
     @discardableResult

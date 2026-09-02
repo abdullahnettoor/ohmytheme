@@ -42,6 +42,7 @@ public final class ContentAddressedStore: @unchecked Sendable {
             guard Self.digest(of: existing) == digest else {
                 throw ContentStoreError.digestMismatch(expected: digest, actual: Self.digest(of: existing))
             }
+            try setUserOnlyPermissions(at: destination, permissions: 0o600)
             return ContentReference(digest: digest, byteCount: existing.count)
         }
 
