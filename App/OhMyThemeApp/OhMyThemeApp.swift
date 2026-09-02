@@ -1,4 +1,6 @@
 import SwiftUI
+import ThemeEngine
+import ThemeModel
 
 @main
 struct OhMyThemeApp: App {
@@ -8,8 +10,13 @@ struct OhMyThemeApp: App {
     @State private var isMenuBarItemInserted = true
 
     private let workspaceStore = WorkspaceStore()
+    private let themeEngine: ThemeEngine
 
     init() {
+        themeEngine = ThemeEngine(
+            packs: BundledThemeCatalog().load(),
+            adapters: [RecordingThemeAdapter()]
+        )
         MenuBarPresence.clearHiddenStatusItemPreferences(in: UserDefaults.standard)
     }
 
@@ -19,7 +26,11 @@ struct OhMyThemeApp: App {
             systemImage: "paintpalette",
             isInserted: $isMenuBarItemInserted
         ) {
-            WorkspaceMenuView(model: WorkspaceMenuModel(workspace: workspaceStore.workspace))
+            WorkspaceMenuView(
+                model: WorkspaceMenuModel(
+                    workspace: workspaceStore.workspace,
+                    themeEngine: themeEngine
+                ))
         }
         .menuBarExtraStyle(.window)
     }

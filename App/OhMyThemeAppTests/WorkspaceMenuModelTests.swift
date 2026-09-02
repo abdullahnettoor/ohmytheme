@@ -1,3 +1,5 @@
+import Foundation
+import ThemeEngine
 import ThemeModel
 import XCTest
 
@@ -46,6 +48,33 @@ final class WorkspaceMenuModelTests: XCTestCase {
         )
         XCTAssertEqual(model.bundledThemeVariants.map(\.sourceType), ["upstream", "generated"])
         XCTAssertTrue(model.bundledThemeVariants.allSatisfy { !$0.sourceRevision.isEmpty && !$0.attribution.isEmpty })
+    }
+
+    func testMenuRequestsPreviewThroughThemeEngine() async throws {
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.preview"),
+                    displayName: "Recording Target",
+                    adapterID: "recording"
+                )
+            ]
+        )
+        let pack = try XCTUnwrap(BundledThemeCatalog().load().first)
+        let engine = ThemeEngine(packs: [pack], adapters: [RecordingThemeAdapter()])
+        let model = WorkspaceMenuModel(
+            workspace: workspace,
+            themePacks: [pack],
+            themeEngine: engine,
+            quitAction: {}
+        )
+
+        let preview = try await model.prepare(themeVariantID: pack.variants[0].qualifiedID)
+
+        XCTAssertEqual(preview.targetPlans.count, 1)
+        XCTAssertEqual(preview.variantID, pack.variants[0].qualifiedID)
     }
 
     func testQuitAsksTheApplicationToTerminate() {
