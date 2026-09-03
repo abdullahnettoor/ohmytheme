@@ -11,6 +11,7 @@ struct WorkspaceMenuView: View {
                     header
                     targetSection
                     themeSection
+                    startupSection
 
                     if let preview = model.preview {
                         previewSection(preview)
@@ -376,6 +377,46 @@ struct WorkspaceMenuView: View {
         .padding(14)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
         .accessibilityIdentifier("theme-apply-report")
+    }
+
+    private var startupSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeading("Startup", detail: "Choose whether Oh My Theme opens when you log in.")
+
+            Toggle(
+                isOn: Binding(
+                    get: { model.isLaunchAtLoginSelected },
+                    set: { enabled in
+                        Task {
+                            await model.setLaunchAtLoginEnabled(enabled)
+                        }
+                    }
+                )
+            ) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Launch at Login")
+                        .font(.callout.weight(.medium))
+                    Text(model.launchAtLoginDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(!model.canChangeLaunchAtLogin)
+            .accessibilityIdentifier("launch-at-login")
+
+            if let error = model.launchAtLoginError {
+                messageRow(
+                    title: "Couldn't change Launch at Login",
+                    detail: error,
+                    systemImage: "exclamationmark.triangle.fill",
+                    color: .red
+                )
+            }
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var footer: some View {

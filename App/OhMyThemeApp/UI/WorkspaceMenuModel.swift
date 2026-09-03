@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import PlatformClients
 import ThemeEngine
 import ThemeModel
 
@@ -88,7 +89,11 @@ final class WorkspaceMenuModel: ObservableObject {
     @Published private(set) var operationError: String?
     @Published private(set) var isBusy = false
     @Published private(set) var isReady = true
+    @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus
+    @Published private(set) var isChangingLaunchAtLogin = false
+    @Published private(set) var launchAtLoginError: String?
 
+    private let launchAtLogin: any LaunchAtLoginPlatform
     private let quitAction: @MainActor () -> Void
     private let themePacks: [ThemePack]
     private let themeEngine: ThemeEngine?
@@ -104,6 +109,7 @@ final class WorkspaceMenuModel: ObservableObject {
         runtime: (any WorkspaceRuntime)? = nil,
         themeVariantSelection: @escaping (String) -> Void = { _ in },
         persistenceError: String? = nil,
+        launchAtLogin: any LaunchAtLoginPlatform = LaunchAtLoginClient(),
         quitAction: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
         self.workspace = workspace
@@ -112,19 +118,25 @@ final class WorkspaceMenuModel: ObservableObject {
         self.runtime = runtime
         self.themeVariantSelection = themeVariantSelection
         self.persistenceError = persistenceError
+        self.launchAtLogin = launchAtLogin
+        self.launchAtLoginStatus = launchAtLogin.status
         self.quitAction = quitAction
         self.applicationTargets = applicationTargets ?? Self.connectedApplicationTargets(in: workspace)
         self.isReady = runtime == nil
     }
 
-    convenience init(runtime: any WorkspaceRuntime) {
+    convenience init(
+        runtime: any WorkspaceRuntime,
+        launchAtLogin: any LaunchAtLoginPlatform = LaunchAtLoginClient()
+    ) {
         self.init(
             workspace: runtime.workspace,
             themePacks: runtime.themePacks,
             themeEngine: runtime.themeEngine,
             runtime: runtime,
             themeVariantSelection: { variantID in runtime.selectFixedThemeVariant(variantID) },
-            persistenceError: runtime.persistenceError
+            persistenceError: runtime.persistenceError,
+            launchAtLogin: launchAtLogin
         )
     }
 
@@ -156,6 +168,27 @@ final class WorkspaceMenuModel: ObservableObject {
         }
     }
 
+    var isLaunchAtLoginSelected: Bool {
+        launchAtLoginStatus == .enabled || launchAtLoginStatus == .requiresApproval
+    }
+
+    var canChangeLaunchAtLogin: Bool {
+        launchAtLoginStatus != .unavailable && !isChangingLaunchAtLogin
+    }
+
+    var launchAtLoginDetail: String {
+        switch launchAtLoginStatus {
+        case .disabled:
+            "Open Oh My Theme automatically after you log in."
+        case .enabled:
+            "Oh My Theme will open automatically after you log in."
+        case .requiresApproval:
+            "Allow Oh My Theme in System Settings > General > Login Items & Extensions."
+        case .unavailable:
+            "Launch at Login is unavailable for this copy of the app."
+        }
+    }
+
     var canApplyThemes: Bool {
         themeEngine != nil && persistenceError == nil && isReady
             && !workspace.connectedTargetInstances.isEmpty
@@ -170,7 +203,23 @@ final class WorkspaceMenuModel: ObservableObject {
         quitAction()
     }
 
+    func setLaunchAtLoginEnabled(_ enabled: Bool) async {
+        guard !isChangingLaunchAtLogin else { return }
+        isChangingLaunchAtLogin = true
+        launchAtLoginError = nil
+        defer { isChangingLaunchAtLogin = false }
+
+        do {
+            try await launchAtLogin.setEnabled(enabled)
+        } catch {
+            launchAtLoginError =
+                "macOS couldn't update Launch at Login. \(error.localizedDescription) Try the toggle again."
+        }
+        launchAtLoginStatus = launchAtLogin.status
+    }
+
     func start() async {
+        launchAtLoginStatus = launchAtLogin.status
         guard let runtime else {
             await refreshUndoAvailability()
             return

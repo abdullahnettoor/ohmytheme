@@ -1,5 +1,6 @@
 import Foundation
 import Persistence
+import PlatformClients
 import ThemeEngine
 import ThemeModel
 import XCTest
@@ -407,13 +408,157 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertEqual(selectedVariantID, "aurora/dark")
     }
 
-    func testQuitAsksTheApplicationToTerminate() {
+    func testLaunchAtLoginIsDisabledUntilTheUserOptsIn() {
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
+        let model = WorkspaceMenuModel(
+            workspace: WorkspaceStore().workspace,
+            launchAtLogin: launchAtLogin,
+            quitAction: {}
+        )
+
+        XCTAssertFalse(model.isLaunchAtLoginSelected)
+        XCTAssertEqual(model.launchAtLoginStatus, .disabled)
+        XCTAssertTrue(launchAtLogin.requests.isEmpty)
+    }
+
+    func testMenuExplainsWhenLaunchAtLoginRequiresApproval() {
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .requiresApproval)
+        let model = WorkspaceMenuModel(
+            workspace: WorkspaceStore().workspace,
+            launchAtLogin: launchAtLogin,
+            quitAction: {}
+        )
+
+        XCTAssertTrue(model.isLaunchAtLoginSelected)
+        XCTAssertTrue(model.canChangeLaunchAtLogin)
+        XCTAssertEqual(
+            model.launchAtLoginDetail,
+            "Allow Oh My Theme in System Settings > General > Login Items & Extensions."
+        )
+    }
+
+    func testMenuDisablesUnavailableLaunchAtLogin() {
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .unavailable)
+        let model = WorkspaceMenuModel(
+            workspace: WorkspaceStore().workspace,
+            launchAtLogin: launchAtLogin,
+            quitAction: {}
+        )
+
+        XCTAssertFalse(model.isLaunchAtLoginSelected)
+        XCTAssertFalse(model.canChangeLaunchAtLogin)
+        XCTAssertEqual(
+            model.launchAtLoginDetail,
+            "Launch at Login is unavailable for this copy of the app."
+        )
+    }
+
+    func testMenuCanEnableAndDisableLaunchAtLogin() async {
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
+        let model = WorkspaceMenuModel(
+            workspace: WorkspaceStore().workspace,
+            launchAtLogin: launchAtLogin,
+            quitAction: {}
+        )
+
+        await model.setLaunchAtLoginEnabled(true)
+
+        XCTAssertEqual(launchAtLogin.requests, [true])
+        XCTAssertTrue(model.isLaunchAtLoginSelected)
+        XCTAssertEqual(model.launchAtLoginStatus, .enabled)
+
+        await model.setLaunchAtLoginEnabled(false)
+
+        XCTAssertEqual(launchAtLogin.requests, [true, false])
+        XCTAssertFalse(model.isLaunchAtLoginSelected)
+        XCTAssertEqual(model.launchAtLoginStatus, .disabled)
+    }
+
+    func testLaunchAtLoginFailureKeepsTheCurrentStateAndExplainsHowToRetry() async {
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
+        launchAtLogin.failure = RecordingLaunchAtLoginError.denied
+        let model = WorkspaceMenuModel(
+            workspace: WorkspaceStore().workspace,
+            launchAtLogin: launchAtLogin,
+            quitAction: {}
+        )
+
+        await model.setLaunchAtLoginEnabled(true)
+
+        XCTAssertFalse(model.isLaunchAtLoginSelected)
+        XCTAssertEqual(
+            model.launchAtLoginError,
+            "macOS couldn't update Launch at Login. Registration was denied. Try the toggle again."
+        )
+    }
+
+    func testStartingTheMenuDoesNotChangeThemeAssignmentOrLaunchAtLogin() async {
+        let runtime = RecordingWorkspaceRuntime()
+        runtime.workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .enabled)
+        let model = WorkspaceMenuModel(runtime: runtime, launchAtLogin: launchAtLogin)
+
+        await model.start()
+
+        XCTAssertEqual(model.selectedThemeVariantID, "oh-my-theme/aurora")
+        XCTAssertTrue(launchAtLogin.requests.isEmpty)
+    }
+
+    func testQuitOnlyAsksTheApplicationToTerminate() {
+        let connectedInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "ghostty.default"),
+            displayName: "Ghostty",
+            adapterID: "ghostty"
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [connectedInstance]
+        )
+        let launchAtLogin = RecordingLaunchAtLoginClient(status: .enabled)
         var terminationRequests = 0
-        let model = WorkspaceMenuModel(workspace: WorkspaceStore().workspace, quitAction: { terminationRequests += 1 })
+        let model = WorkspaceMenuModel(
+            workspace: workspace,
+            launchAtLogin: launchAtLogin,
+            quitAction: { terminationRequests += 1 }
+        )
 
         model.quit()
 
         XCTAssertEqual(terminationRequests, 1)
+        XCTAssertEqual(model.workspace.connectedTargetInstances, [connectedInstance])
+        XCTAssertTrue(launchAtLogin.requests.isEmpty)
+    }
+}
+
+@MainActor
+private final class RecordingLaunchAtLoginClient: LaunchAtLoginPlatform {
+    private(set) var requests: [Bool] = []
+    var status: LaunchAtLoginStatus
+    var failure: (any Error)?
+
+    init(status: LaunchAtLoginStatus) {
+        self.status = status
+    }
+
+    func setEnabled(_ enabled: Bool) async throws {
+        requests.append(enabled)
+        if let failure {
+            throw failure
+        }
+        status = enabled ? .enabled : .disabled
+    }
+}
+
+private enum RecordingLaunchAtLoginError: LocalizedError {
+    case denied
+
+    var errorDescription: String? {
+        "Registration was denied."
     }
 }
 
@@ -421,7 +566,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
 private final class RecordingWorkspaceRuntime: WorkspaceRuntime {
     private(set) var reviewCalls = 0
     private(set) var connectCalls = 0
-    private(set) var workspace = Workspace.myMac
+    var workspace = Workspace.myMac
     let themePacks: [ThemePack] = []
     let themeEngine: ThemeEngine? = nil
     let persistenceError: String? = nil
