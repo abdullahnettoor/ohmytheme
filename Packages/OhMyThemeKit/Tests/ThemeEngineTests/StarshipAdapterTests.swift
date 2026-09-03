@@ -90,6 +90,36 @@ struct StarshipAdapterTests {
         #expect(result.hasPrefix("  palette"))
     }
 
+    @Test("Transformer preserves a comment after a multiline managed value")
+    func preservesCommentAfterMultilineManagedValue() throws {
+        let original = Data(
+            "[palettes.oh_my_theme]\ncanvas = \"\"\"\\\n#112233\"\"\" # keep me\n".utf8
+        )
+
+        let transformed = try StarshipPaletteTransformer.applyTheme(
+            to: original,
+            variant: Fixtures.pack.variants[0]
+        )
+        let result = String(decoding: transformed, as: UTF8.self)
+
+        #expect(result.contains("canvas = \"#112233\" # keep me"))
+    }
+
+    @Test("Transformer keeps an EOF comment separate from generated palette entries")
+    func preservesOwnedEOFComment() throws {
+        let original = Data("[palettes.oh_my_theme]\n# note".utf8)
+
+        let transformed = try StarshipPaletteTransformer.applyTheme(
+            to: original,
+            variant: Fixtures.pack.variants[0]
+        )
+        let result = String(decoding: transformed, as: UTF8.self)
+
+        #expect(result.contains("# note\n"))
+        #expect(!result.contains("# noteaccent"))
+        #expect(result.contains("accent ="))
+    }
+
     @Test("Transformer preserves mixed line endings and comments inside its owned table")
     func preservesMixedLineEndingsAndOwnedComments() throws {
         let original = Data(
@@ -208,14 +238,78 @@ struct StarshipAdapterTests {
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data("café = \"quoted key required\"\n".utf8))
         }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("values = [\"a\" \"b\"]\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("settings = { color = \"blue\" size = \"large\" }\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("fraction = .5\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("fraction = 01.2\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("integer = -0x1\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("date = 1979-05-27T07:32:00+24:00\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("integer = 9223372036854775808\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("x = 1 # raw\u{0001}control\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[[battery.display]]\nthreshold = 10\nthreshold.value = 20\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[battery.display.meta]\n[[battery.display]]\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[[battery.display.meta]]\n[[battery.display]]\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[[battery.display]]\n[battery.display.meta]\n[[battery.display.meta]]\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[directory.style.extra]\n[directory]\nstyle = \"bold\"\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("label = \"raw\u{0001}control\"\n".utf8))
+        }
 
         try StarshipPaletteTransformer.validate(Data("\"\" = \"empty quoted key\"\n".utf8))
+        try StarshipPaletteTransformer.validate(Data("[character] # comment with ]\nvalue = 1\n".utf8))
         let multiline = Data("description = \"\"\"first line\nsecond line\"\"\"\n".utf8)
         try StarshipPaletteTransformer.validate(multiline)
         let arraysOfTables = Data(
             "[[battery.display]]\nthreshold = 10\n[[battery.display]]\nthreshold = 20\n".utf8
         )
         try StarshipPaletteTransformer.validate(arraysOfTables)
+        let nestedArraysOfTables = Data(
+            "[[fruits]]\n[fruits.physical]\ncolor = \"red\"\n[[fruits]]\n[fruits.physical]\ncolor = \"yellow\"\n".utf8
+        )
+        try StarshipPaletteTransformer.validate(nestedArraysOfTables)
+        try StarshipPaletteTransformer.validate(Data("format = \"\"\"abc\"\"\"\"\n".utf8))
+        try StarshipPaletteTransformer.validate(Data("literal = '''abc''''\n".utf8))
+        try StarshipPaletteTransformer.validate(
+            Data("format = \"\"\"abc\\   \n  def\"\"\"\n".utf8)
+        )
     }
 
     @Test("Validation rejects ambiguous duplicate owned palette table")
@@ -260,6 +354,25 @@ struct StarshipAdapterTests {
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(inlineOwnedPalette)
         }
+        let inlineRootPalette = Data(
+            "palettes = { oh_my_theme = { canvas = \"#000000\" } }\n".utf8
+        )
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(inlineRootPalette)
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("x = { a = 1, a.b = 2 }\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[palettes.oh_my_theme.canvas]\nvalue = \"nested\"\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("[palettes.oh_my_theme]\ncanvas.tint = \"nested\"\n".utf8)
+            )
+        }
     }
 
     @Test("Validation rejects TOML key and table namespace conflicts")
@@ -282,6 +395,20 @@ struct StarshipAdapterTests {
                 variant: Fixtures.pack.variants[0]
             )
         }
+    }
+
+    @Test("Theme application replaces a multiline top-level palette value")
+    func replacesMultilinePaletteValue() throws {
+        let original = Data("palette = \"\"\"\nold\n\"\"\" # selected\n".utf8)
+
+        let transformed = try StarshipPaletteTransformer.applyTheme(
+            to: original,
+            variant: Fixtures.pack.variants[0]
+        )
+        let result = String(decoding: transformed, as: UTF8.self)
+
+        #expect(result.contains("palette = \"oh_my_theme\" # selected"))
+        #expect(result.contains("[palettes.oh_my_theme]"))
     }
 
     @Test("Validation rejects ambiguous duplicate top-level palette keys")
@@ -410,6 +537,42 @@ struct StarshipAdapterTests {
         #expect(try Data(contentsOf: fixture.configURL) == external)
     }
 
+    @Test("Persisted version-one connection and disconnect payloads still decode")
+    func decodesLegacyConnectionPayloads() throws {
+        struct LegacyConnectionBaseline: Encodable {
+            let inspection: ManagedFileInspection
+        }
+        struct LegacyDisconnectPayload: Encodable {
+            let details: StarshipConnectionDetails
+            let fileAfter: ManagedFileInspection
+        }
+
+        let fixture = try Fixture(existingContents: "format = \"test\"\n")
+        let inspection = try fixture.managedFiles.inspect(at: fixture.configURL)
+        let details = StarshipConnectionDetails(
+            resolvedConfigURL: inspection.resolvedURL,
+            resolvedConfigPermissions: inspection.snapshot.metadata?.permissions ?? 0o600,
+            linkedSourceURL: nil,
+            expectedReach: "next prompt"
+        )
+
+        let baseline = try JSONDecoder().decode(
+            StarshipConnectionBaseline.self,
+            from: JSONEncoder().encode(LegacyConnectionBaseline(inspection: inspection))
+        )
+        let disconnect = try JSONDecoder().decode(
+            StarshipDisconnectPayload.self,
+            from: JSONEncoder().encode(
+                LegacyDisconnectPayload(details: details, fileAfter: inspection)
+            )
+        )
+
+        #expect(baseline.inspection == inspection)
+        #expect(baseline.approvedLinkedSourceURL == nil)
+        #expect(disconnect.fileAfter == inspection)
+        #expect(disconnect.restorationReceipt == nil)
+    }
+
     @Test("Prepared Starship plans survive serialization with exact intended bytes")
     func preparedPlanSurvivesSerialization() async throws {
         let fixture = try Fixture(existingContents: "format = \"test\"\n")
@@ -466,6 +629,43 @@ struct StarshipAdapterTests {
 
         let recovered = try await adapter.recoverApplyReceipt(plan: plan)
         try await adapter.rollbackApply(plan: plan, receipt: recovered)
+
+        #expect(try Data(contentsOf: fixture.configURL) == original)
+    }
+
+    @Test("Rolling back consecutive applies preserves proof for the earlier receipt")
+    func consecutiveRollbacksRemainGuarded() async throws {
+        let original = Data("format = \"before\"\n".utf8)
+        let fixture = try Fixture(existingContents: String(decoding: original, as: UTF8.self))
+        let adapter = fixture.adapter()
+        let firstPlan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        let firstReceipt = try await adapter.apply(firstPlan)
+
+        var secondVariant = Fixtures.pack.variants[0]
+        secondVariant = ThemeVariant(
+            id: secondVariant.id,
+            displayName: secondVariant.displayName,
+            appearance: secondVariant.appearance,
+            contentDigest: "second-variant",
+            roles: secondVariant.roles.merging([.ansiRed: ThemeColor(rawValue: "#abcdef")]) { _, new in new },
+            wallpaper: secondVariant.wallpaper
+        )
+        let secondTheme = PreparedTheme(
+            variantID: secondVariant.qualifiedID,
+            variant: secondVariant,
+            sourceType: .generated,
+            sourceRevision: Fixtures.pack.source.revision,
+            attribution: Fixtures.pack.source.attribution,
+            themeSchemaVersion: Fixtures.pack.schemaVersion,
+            contentDigest: secondVariant.contentDigest,
+            compilerVersion: "theme-compiler-1",
+            upstreamArtifact: nil
+        )
+        let secondPlan = try await adapter.prepareApply(instance: fixture.instance, theme: secondTheme)
+        let secondReceipt = try await adapter.apply(secondPlan)
+
+        try await adapter.rollbackApply(plan: secondPlan, receipt: secondReceipt)
+        try await adapter.rollbackApply(plan: firstPlan, receipt: firstReceipt)
 
         #expect(try Data(contentsOf: fixture.configURL) == original)
     }

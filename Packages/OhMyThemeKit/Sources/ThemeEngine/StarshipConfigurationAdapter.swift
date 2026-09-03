@@ -127,11 +127,13 @@ public struct StarshipConnectionBaseline: Codable, Equatable, Sendable {
 
 public struct StarshipDisconnectPayload: Codable, Equatable, Sendable {
     public let details: StarshipConnectionDetails
-    public let restorationReceipt: ManagedFileReceipt
+    public let restorationReceipt: ManagedFileReceipt?
+    public let fileAfter: ManagedFileInspection?
 
     public init(details: StarshipConnectionDetails, restorationReceipt: ManagedFileReceipt) {
         self.details = details
         self.restorationReceipt = restorationReceipt
+        self.fileAfter = nil
     }
 }
 
@@ -404,20 +406,28 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
         try await revalidateDisconnect(plan: plan)
         let saved = try decode(StarshipConnectionBaseline.self, from: baseline)
         let payload = try disconnectPayload(from: plan)
-        guard payload.restorationReceipt.before == saved.inspection else {
+        let restorationReceipt: ManagedFileReceipt
+        if let preparedReceipt = payload.restorationReceipt {
+            guard preparedReceipt.before == saved.inspection else {
+                throw StarshipAdapterError.malformedPlan
+            }
+            restorationReceipt = preparedReceipt
+        } else if let legacyFileAfter = payload.fileAfter {
+            restorationReceipt = try self.restorationReceipt(from: legacyFileAfter, to: saved.inspection)
+        } else {
             throw StarshipAdapterError.malformedPlan
         }
-        if payload.restorationReceipt.changed {
+        if restorationReceipt.changed {
             do {
-                try managedFiles.rollback(payload.restorationReceipt)
+                try managedFiles.rollback(restorationReceipt)
             } catch {
                 throw StarshipAdapterError.restorationConflict
             }
         }
         return AdapterReceipt(
-            configurationState: payload.restorationReceipt.changed ? .updated : .unchanged,
+            configurationState: restorationReceipt.changed ? .updated : .unchanged,
             runningInstanceReach: .nextPrompt,
-            detail: payload.restorationReceipt.changed
+            detail: restorationReceipt.changed
                 ? "Starship disconnected and restored its baseline; the next prompt will use it"
                 : "Starship disconnected without changing its configuration"
         )
@@ -425,19 +435,27 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
 
     public func revalidateDisconnect(plan: DisconnectPlan) async throws {
         let payload = try disconnectPayload(from: plan)
-        let current = try managedFiles.inspect(at: payload.restorationReceipt.after.requestedURL)
-        guard current == payload.restorationReceipt.after else {
+        guard let expected = payload.restorationReceipt?.after ?? payload.fileAfter else {
+            throw StarshipAdapterError.malformedPlan
+        }
+        let current = try managedFiles.inspect(at: expected.requestedURL)
+        guard current == expected else {
             throw StarshipAdapterError.staleState
         }
     }
 
     public func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification {
         let payload = try disconnectPayload(from: plan)
-        let current = try managedFiles.inspect(at: payload.restorationReceipt.after.requestedURL)
-        if current == payload.restorationReceipt.after {
+        guard let expected = payload.restorationReceipt?.after ?? payload.fileAfter else {
+            throw StarshipAdapterError.malformedPlan
+        }
+        let current = try managedFiles.inspect(at: expected.requestedURL)
+        if current == expected {
             return .beforeChange
         }
-        if current == payload.restorationReceipt.before {
+        if let restorationReceipt = payload.restorationReceipt,
+            current == restorationReceipt.before
+        {
             return .intendedAfterChange
         }
         return .conflicting
@@ -633,8 +651,23 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
         else {
             throw StarshipAdapterError.restorationConflict
         }
+        if !managedReceipt.changed {
+            guard current == managedReceipt.before else {
+                throw StarshipAdapterError.restorationConflict
+            }
+            return
+        }
+        guard managedFiles.matchesMarkedApplication(current, of: state.filePlan) else {
+            throw StarshipAdapterError.restorationConflict
+        }
+        let currentReceipt = ManagedFileReceipt(
+            planID: managedReceipt.planID,
+            before: managedReceipt.before,
+            after: current,
+            changed: true
+        )
         do {
-            try managedFiles.rollback(managedReceipt)
+            try managedFiles.rollback(currentReceipt)
         } catch {
             throw StarshipAdapterError.filesystemFailure(
                 "the Starship configuration no longer matches its apply receipt"

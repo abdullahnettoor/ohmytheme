@@ -375,7 +375,7 @@ public final class ManagedFiles: @unchecked Sendable {
         guard inspection.requestedURL == baseline.requestedURL,
             inspection.resolvedURL == baseline.resolvedURL,
             inspection.ownership == baseline.ownership,
-            Self.validRecoveryMarker(in: inspection) != nil
+            Self.validRecoveryMarker(in: inspection)?.bindsDigest == true
         else {
             return false
         }
@@ -410,7 +410,8 @@ public final class ManagedFiles: @unchecked Sendable {
                 at: receipt.before.resolvedURL,
                 bytes: bytes,
                 metadata: metadata,
-                expected: current
+                expected: current,
+                applyMarker: Self.recoveryPlanID(in: metadata.extendedAttributes)
             )
         } else {
             do {
@@ -769,6 +770,7 @@ public final class ManagedFiles: @unchecked Sendable {
         let planID: UUID
         let identity: ManagedFileIdentity
         let digest: String
+        let bindsDigest: Bool
     }
 
     private static func recoveryMarker(
@@ -788,16 +790,31 @@ public final class ManagedFiles: @unchecked Sendable {
             return nil
         }
         let fields = encoded.split(separator: "|", omittingEmptySubsequences: false)
-        guard fields.count == 4,
+        guard (fields.count == 3 || fields.count == 4),
             let planID = UUID(uuidString: String(fields[0])),
             let device = UInt64(fields[1]),
             let inode = UInt64(fields[2]),
-            fields[3] == Substring(digest),
-            identity == ManagedFileIdentity(device: device, inode: inode)
+            identity == ManagedFileIdentity(device: device, inode: inode),
+            fields.count == 3 || fields[3] == Substring(digest)
         else {
             return nil
         }
-        return RecoveryMarker(planID: planID, identity: identity, digest: digest)
+        return RecoveryMarker(
+            planID: planID,
+            identity: identity,
+            digest: digest,
+            bindsDigest: fields.count == 4
+        )
+    }
+
+    private static func recoveryPlanID(in attributes: [String: Data]) -> UUID? {
+        guard let data = attributes[recoveryMarkerAttribute],
+            let encoded = String(data: data, encoding: .utf8),
+            let first = encoded.split(separator: "|", maxSplits: 1).first
+        else {
+            return nil
+        }
+        return UUID(uuidString: String(first))
     }
 
     private static func metadataMatchesManagedReplacement(
