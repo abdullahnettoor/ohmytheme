@@ -21,7 +21,15 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
-  "contributes": {},
+  "contributes": {
+    "themes": [
+      {
+        "label": "Oh My Theme Aurora",
+        "uiTheme": "vs-dark",
+        "path": "./themes/oh-my-theme-aurora-color-theme.json"
+      }
+    ]
+  },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",

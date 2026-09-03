@@ -239,6 +239,7 @@ struct VSCodeCompanionServerSessionTests {
                     status: .applied,
                     effectiveSetting: "Mocha",
                     requestedSetting: "Mocha",
+                    configuredSetting: "Mocha",
                     overrides: [],
                     failure: nil
                 )
@@ -251,6 +252,93 @@ struct VSCodeCompanionServerSessionTests {
                 || effects.allSatisfy { effect in
                     if case .deliverAcknowledgement = effect { return true } else { return false }
                 })
+        #expect(session.outstandingRequestCount == 0)
+    }
+
+    @Test("Inspect acknowledgement matches the inspect request")
+    func inspectAcknowledgementMatchesOutstandingRequest() throws {
+        var session = Self.makeSession()
+        _ = session.receive(body: try Self.makeRegisterBody())
+
+        guard case .send(.inspectTheme(let sent))? = session.sendInspectTheme().first else {
+            Issue.record("failed to send inspect_theme")
+            return
+        }
+        let acknowledgement = try CompanionMessageCodec.encodeBody(
+            .inspectThemeAck(
+                .init(
+                    protocolVersion: 1,
+                    id: sent.id,
+                    configuredSetting: "Mocha",
+                    effectiveSetting: "Solarized Dark",
+                    overrides: [.init(scope: .workspace, folder: nil, value: "Solarized Dark")]
+                )
+            )
+        )
+
+        let effects = session.receive(body: acknowledgement)
+
+        guard case .deliverInspectionAcknowledgement(let delivered)? = effects.first else {
+            Issue.record("expected inspection acknowledgement")
+            return
+        }
+        #expect(delivered.configuredSetting == "Mocha")
+        #expect(session.outstandingRequestCount == 0)
+    }
+
+    @Test("An acknowledgement with the wrong request kind fails as malformed")
+    func mismatchedAcknowledgementKindIsMalformed() throws {
+        var session = Self.makeSession()
+        _ = session.receive(body: try Self.makeRegisterBody())
+
+        guard case .send(.inspectTheme(let sent))? = session.sendInspectTheme().first else {
+            Issue.record("failed to send inspect_theme")
+            return
+        }
+        let acknowledgement = try CompanionMessageCodec.encodeBody(
+            .applyThemeAck(
+                .init(
+                    protocolVersion: 1,
+                    id: sent.id,
+                    status: .applied,
+                    effectiveSetting: "Mocha",
+                    requestedSetting: "Mocha",
+                    configuredSetting: "Mocha",
+                    overrides: [],
+                    failure: nil
+                )
+            )
+        )
+
+        let effects = session.receive(body: acknowledgement)
+
+        #expect(effects.contains(.failRequest(sent.id, .malformedAcknowledgement)))
+        #expect(session.outstandingRequestCount == 0)
+    }
+
+    @Test("A correlated peer protocol error fails the request specifically")
+    func correlatedProtocolErrorFailsRequest() throws {
+        var session = Self.makeSession()
+        _ = session.receive(body: try Self.makeRegisterBody())
+        guard case .send(.inspectTheme(let sent))? = session.sendInspectTheme().first else {
+            Issue.record("failed to send inspect_theme")
+            return
+        }
+        let errorBody = try CompanionMessageCodec.encodeBody(
+            .protocolError(
+                .init(
+                    protocolVersion: 1,
+                    id: UUID(),
+                    requestId: sent.id,
+                    code: .duplicateRequestID,
+                    message: "duplicate"
+                )
+            )
+        )
+
+        let effects = session.receive(body: errorBody)
+
+        #expect(effects == [.failRequest(sent.id, .duplicateRequest)])
         #expect(session.outstandingRequestCount == 0)
     }
 

@@ -95,6 +95,15 @@ public protocol VSCodeConnectionPlatform: Sendable {
         profileName: String
     ) async throws
     func registration(matching expectation: VSCodeRegistrationExpectation) async -> CompanionRegistration?
+    func inspectTheme(
+        serverSessionID: String,
+        matching expectation: VSCodeRegistrationExpectation
+    ) async throws -> CompanionThemeInspection
+    func applyTheme(
+        _ request: VSCodeCompanionThemeRequest,
+        serverSessionID: String,
+        matching expectation: VSCodeRegistrationExpectation
+    ) async throws -> CompanionApplyOutcome
 }
 
 /// Production composition for bundle discovery, CLI installation, and matching
@@ -179,5 +188,45 @@ public final class SystemVSCodeConnectionPlatform: VSCodeConnectionPlatform, @un
             try? await Task.sleep(for: pollInterval)
         } while !Task.isCancelled
         return nil
+    }
+
+    public func inspectTheme(
+        serverSessionID: String,
+        matching expectation: VSCodeRegistrationExpectation
+    ) async throws -> CompanionThemeInspection {
+        guard server.registrations().contains(where: {
+            $0.serverSessionID == serverSessionID && expectation.matches($0)
+        }) else {
+            throw VSCodeCompanionRequestError.disconnected
+        }
+        do {
+            return try await server.inspectTheme(serverSessionID: serverSessionID)
+        } catch VSCodeCompanionRequestError.targetUnavailable,
+            VSCodeCompanionRequestError.notRunning
+        {
+            throw VSCodeCompanionRequestError.disconnected
+        }
+    }
+
+    public func applyTheme(
+        _ request: VSCodeCompanionThemeRequest,
+        serverSessionID: String,
+        matching expectation: VSCodeRegistrationExpectation
+    ) async throws -> CompanionApplyOutcome {
+        guard server.registrations().contains(where: {
+            $0.serverSessionID == serverSessionID && expectation.matches($0)
+        }) else {
+            throw VSCodeCompanionRequestError.disconnected
+        }
+        do {
+            return try await server.applyTheme(
+                request,
+                serverSessionID: serverSessionID
+            )
+        } catch VSCodeCompanionRequestError.targetUnavailable,
+            VSCodeCompanionRequestError.notRunning
+        {
+            throw VSCodeCompanionRequestError.disconnected
+        }
     }
 }

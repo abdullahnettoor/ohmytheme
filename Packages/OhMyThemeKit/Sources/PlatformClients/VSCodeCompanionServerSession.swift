@@ -30,32 +30,19 @@ public struct CompanionRegistration: Codable, Equatable, Sendable {
 
 /// Outcomes produced by a ``CompanionServerSession`` in response to an
 /// incoming frame or a caller-initiated request.
-///
-/// The session itself performs no I/O: callers translate `send` effects
-/// into framed writes and `close` effects into socket shutdown.
-/// `deliverAcknowledgement` surfaces a matched acknowledgement to the
-/// caller so it can be recorded in an adapter receipt.
 public enum CompanionServerEffect: Equatable, Sendable {
     case send(CompanionMessage)
     case close
+    case deliverInspectionAcknowledgement(CompanionInspectThemeAckMessage)
     case deliverAcknowledgement(CompanionApplyThemeAckMessage)
+    case failRequest(UUID, VSCodeCompanionRequestError)
 }
 
 // MARK: - Session state
 
-/// The state machine that governs one companion connection on the
-/// server side. The session validates registration, tracks outstanding
-/// `apply_theme` requests, matches acknowledgements, and turns protocol
-/// violations into `protocol_error` messages or connection closure.
-///
-/// The type is a `struct` so callers can compose it with their own
-/// synchronization strategy. Everything is single-threaded and
-/// side-effect free.
+/// The state machine for one companion connection. The socket layer owns
+/// synchronization and executes the effects returned by this value.
 public struct CompanionServerSession {
-
-    /// Provides monotonically fresh request identifiers for
-    /// server-originated messages. Overridable so tests can produce
-    /// deterministic IDs.
     public typealias UUIDProvider = @Sendable () -> UUID
 
     private enum State {
@@ -64,9 +51,14 @@ public struct CompanionServerSession {
         case closed
     }
 
+    private enum OutstandingRequest {
+        case inspect(CompanionInspectThemeMessage)
+        case apply(CompanionApplyThemeMessage)
+    }
+
     private var state: State = .awaitingRegister
     private var seenIncomingIDs: Set<UUID> = []
-    private var outstandingRequests: [UUID: CompanionApplyThemeMessage] = [:]
+    private var outstandingRequests: [UUID: OutstandingRequest] = [:]
     private var acceptedRegistration: CompanionRegistration?
 
     private let launchNonce: String
@@ -74,27 +66,24 @@ public struct CompanionServerSession {
     private let sessionIdProvider: @Sendable () -> String
     private let uuidProvider: UUIDProvider
 
-    /// Number of `apply_theme` requests the server has sent that have
-    /// not yet been acknowledged. Exposed for tests and diagnostics.
+    /// Number of inspect and apply requests awaiting a reply.
     public var outstandingRequestCount: Int { outstandingRequests.count }
 
-    /// True after the extension has registered successfully and before
-    /// the session is closed.
     public var isRegistered: Bool {
-        if case .registered = state { return true } else { return false }
+        if case .registered = state { return true }
+        return false
     }
 
-    /// The session identifier assigned at register time, if any.
     public var negotiatedSessionID: String? {
-        if case .registered(let id, _) = state { return id } else { return nil }
+        if case .registered(let id, _) = state { return id }
+        return nil
     }
 
-    /// The protocol version negotiated at register time, if any.
     public var negotiatedProtocolVersion: Int? {
-        if case .registered(_, let version) = state { return version } else { return nil }
+        if case .registered(_, let version) = state { return version }
+        return nil
     }
 
-    /// The authenticated identity accepted for this session.
     public var registration: CompanionRegistration? { acceptedRegistration }
 
     public init(
@@ -111,8 +100,6 @@ public struct CompanionServerSession {
 
     // MARK: - Incoming frames
 
-    /// Process a single frame body that just arrived from the peer.
-    /// Returns the effects the caller must perform, in order.
     public mutating func receive(body: Data) -> [CompanionServerEffect] {
         if case .closed = state { return [] }
 
@@ -120,9 +107,15 @@ public struct CompanionServerSession {
         do {
             message = try CompanionMessageCodec.decodeBody(body)
         } catch let error as CompanionProtocolError {
-            return protocolErrorAndClose(error: error, requestId: nil)
+            return protocolErrorAndClose(
+                error: error,
+                correlatedRequestID: acknowledgementRequestID(in: body)
+            )
         } catch {
-            return protocolErrorAndClose(error: .malformedJSON, requestId: nil)
+            return protocolErrorAndClose(
+                error: .malformedJSON,
+                correlatedRequestID: acknowledgementRequestID(in: body)
+            )
         }
 
         switch state {
@@ -130,8 +123,12 @@ public struct CompanionServerSession {
             return receiveWhileAwaitingRegister(message)
         case .registered(_, let negotiatedVersion):
             guard message.protocolVersion == negotiatedVersion else {
+                var effects = failCorrelatedRequest(
+                    messageID: correlatedRequestID(for: message),
+                    error: .unsupportedProtocol
+                )
                 state = .closed
-                return [
+                effects.append(
                     .send(
                         protocolError(
                             protocolVersion: negotiatedVersion,
@@ -140,9 +137,10 @@ public struct CompanionServerSession {
                             message:
                                 "Message protocol version \(message.protocolVersion) does not match the negotiated version \(negotiatedVersion)."
                         )
-                    ),
-                    .close,
-                ]
+                    )
+                )
+                effects.append(.close)
+                return effects
             }
             return receiveWhileRegistered(message)
         case .closed:
@@ -150,8 +148,6 @@ public struct CompanionServerSession {
         }
     }
 
-    /// Signal that the register timeout has elapsed. If the session has
-    /// not yet registered, close it; otherwise do nothing.
     public mutating func onRegisterTimeout() -> [CompanionServerEffect] {
         if case .awaitingRegister = state {
             state = .closed
@@ -162,23 +158,57 @@ public struct CompanionServerSession {
 
     // MARK: - Outgoing requests
 
-    /// Produce an `apply_theme` request targeting the registered
-    /// extension. Returns an empty array when the session is not
-    /// registered.
+    public mutating func sendInspectTheme() -> [CompanionServerEffect] {
+        guard case .registered(let sessionId, let negotiatedVersion) = state else { return [] }
+        let request = CompanionInspectThemeMessage(
+            protocolVersion: negotiatedVersion,
+            id: uuidProvider(),
+            sessionId: sessionId
+        )
+        outstandingRequests[request.id] = .inspect(request)
+        return [.send(.inspectTheme(request))]
+    }
+
+    public mutating func sendApplyTheme(
+        _ request: VSCodeCompanionThemeRequest
+    ) throws -> [CompanionServerEffect] {
+        guard case .registered(let sessionId, let negotiatedVersion) = state else {
+            throw VSCodeCompanionRequestError.disconnected
+        }
+        guard request.protocolVersion == negotiatedVersion else {
+            throw VSCodeCompanionRequestError.unsupportedProtocol
+        }
+        let message = CompanionApplyThemeMessage(
+            protocolVersion: request.protocolVersion,
+            id: uuidProvider(),
+            sessionId: sessionId,
+            themeName: request.themeName,
+            expectedSetting: request.expectedSetting,
+            target: request.target
+        )
+        outstandingRequests[message.id] = .apply(message)
+        return [.send(.applyTheme(message))]
+    }
+
+    /// Compatibility entry point for callers that only supply a theme name.
     public mutating func sendApplyTheme(
         themeName: String,
         target: CompanionApplyTarget = .global
     ) -> [CompanionServerEffect] {
-        guard case .registered(let sessionId, let negotiatedVersion) = state else { return [] }
-        let request = CompanionApplyThemeMessage(
-            protocolVersion: negotiatedVersion,
-            id: uuidProvider(),
-            sessionId: sessionId,
-            themeName: themeName,
-            target: target
-        )
-        outstandingRequests[request.id] = request
-        return [.send(.applyTheme(request))]
+        guard let protocolVersion = negotiatedProtocolVersion else { return [] }
+        return (try? sendApplyTheme(
+            VSCodeCompanionThemeRequest(
+                protocolVersion: protocolVersion,
+                themeName: themeName,
+                expectedSetting: nil,
+                target: target
+            )
+        )) ?? []
+    }
+
+    /// Stop tracking a request whose socket-level waiter timed out.
+    public mutating func cancelRequest(id: UUID) {
+        outstandingRequests.removeValue(forKey: id)
     }
 
     // MARK: - Handlers
@@ -240,43 +270,16 @@ public struct CompanionServerSession {
         case .register(let register):
             return rejectRegister(id: register.id, reason: .duplicateRegistration)
 
-        case .applyThemeAck(let ack):
-            if seenIncomingIDs.contains(ack.id) {
-                return [
-                    .send(
-                        protocolError(
-                            requestId: ack.id,
-                            code: .duplicateRequestID,
-                            message: "This request identifier was already acknowledged."
-                        )
-                    )
-                ]
-            }
-            guard outstandingRequests.removeValue(forKey: ack.id) != nil else {
-                seenIncomingIDs.insert(ack.id)
-                return [
-                    .send(
-                        protocolError(
-                            requestId: ack.id,
-                            code: .unexpectedMessage,
-                            message: "No apply_theme request is outstanding for this id."
-                        )
-                    )
-                ]
-            }
-            seenIncomingIDs.insert(ack.id)
-            return [.deliverAcknowledgement(ack)]
+        case .inspectThemeAck(let acknowledgement):
+            return receiveInspectionAcknowledgement(acknowledgement)
 
-        case .protocolError:
-            // Peer-reported protocol errors are surfaced to the caller
-            // by dropping them into the effect list unchanged is not
-            // useful here: the socket layer records them separately.
-            // Returning an empty effect list keeps the connection open.
-            return []
+        case .applyThemeAck(let acknowledgement):
+            return receiveApplyAcknowledgement(acknowledgement)
 
-        case .applyTheme, .registerAck, .registerRejected:
-            // These messages are only ever sent server-to-extension.
-            // Seeing one from the extension is a protocol violation.
+        case .protocolError(let error):
+            return receivePeerProtocolError(error)
+
+        case .inspectTheme, .applyTheme, .registerAck, .registerRejected:
             state = .closed
             return [
                 .send(
@@ -289,6 +292,114 @@ public struct CompanionServerSession {
                 .close,
             ]
         }
+    }
+
+    private mutating func receiveInspectionAcknowledgement(
+        _ acknowledgement: CompanionInspectThemeAckMessage
+    ) -> [CompanionServerEffect] {
+        if seenIncomingIDs.contains(acknowledgement.id) {
+            return duplicateAcknowledgementEffects(id: acknowledgement.id)
+        }
+        guard let outstanding = outstandingRequests.removeValue(forKey: acknowledgement.id) else {
+            return staleAcknowledgementEffects(id: acknowledgement.id, requestType: "inspect_theme")
+        }
+        seenIncomingIDs.insert(acknowledgement.id)
+        guard case .inspect = outstanding else {
+            return malformedAcknowledgementEffects(
+                id: acknowledgement.id,
+                message: "An inspect_theme_ack cannot acknowledge an apply_theme request."
+            )
+        }
+        return [.deliverInspectionAcknowledgement(acknowledgement)]
+    }
+
+    private mutating func receiveApplyAcknowledgement(
+        _ acknowledgement: CompanionApplyThemeAckMessage
+    ) -> [CompanionServerEffect] {
+        if seenIncomingIDs.contains(acknowledgement.id) {
+            return duplicateAcknowledgementEffects(id: acknowledgement.id)
+        }
+        guard let outstanding = outstandingRequests.removeValue(forKey: acknowledgement.id) else {
+            return staleAcknowledgementEffects(id: acknowledgement.id, requestType: "apply_theme")
+        }
+        seenIncomingIDs.insert(acknowledgement.id)
+        guard case .apply(let request) = outstanding else {
+            return malformedAcknowledgementEffects(
+                id: acknowledgement.id,
+                message: "An apply_theme_ack cannot acknowledge an inspect_theme request."
+            )
+        }
+        guard acknowledgement.requestedSetting == request.themeName else {
+            return malformedAcknowledgementEffects(
+                id: acknowledgement.id,
+                message: "The acknowledgement requestedSetting does not match the request."
+            )
+        }
+        if acknowledgement.status == .applied || acknowledgement.status == .overridden {
+            guard acknowledgement.configuredSetting == request.themeName else {
+                return malformedAcknowledgementEffects(
+                    id: acknowledgement.id,
+                    message: "The acknowledgement configuredSetting does not match the request."
+                )
+            }
+        }
+        return [.deliverAcknowledgement(acknowledgement)]
+    }
+
+    private mutating func receivePeerProtocolError(
+        _ error: CompanionProtocolErrorMessage
+    ) -> [CompanionServerEffect] {
+        guard let requestID = error.requestId,
+            outstandingRequests.removeValue(forKey: requestID) != nil
+        else {
+            return []
+        }
+        seenIncomingIDs.insert(requestID)
+        return [.failRequest(requestID, requestError(for: error.code))]
+    }
+
+    private mutating func duplicateAcknowledgementEffects(id: UUID) -> [CompanionServerEffect] {
+        [
+            .send(
+                protocolError(
+                    requestId: id,
+                    code: .duplicateRequestID,
+                    message: "This request identifier was already acknowledged."
+                )
+            )
+        ]
+    }
+
+    private mutating func staleAcknowledgementEffects(
+        id: UUID,
+        requestType: String
+    ) -> [CompanionServerEffect] {
+        seenIncomingIDs.insert(id)
+        return [
+            .send(
+                protocolError(
+                    requestId: id,
+                    code: .unexpectedMessage,
+                    message: "No \(requestType) request is outstanding for this id."
+                )
+            )
+        ]
+    }
+
+    private func malformedAcknowledgementEffects(
+        id: UUID,
+        message: String
+    ) -> [CompanionServerEffect] {
+        [
+            .failRequest(id, .malformedAcknowledgement),
+            .send(
+                protocolError(
+                    requestId: id,
+                    code: .unexpectedMessage,
+                    message: message
+                )
+            ),
+        ]
     }
 
     private mutating func rejectRegister(
@@ -312,26 +423,83 @@ public struct CompanionServerSession {
 
     private mutating func protocolErrorAndClose(
         error: CompanionProtocolError,
-        requestId: UUID?
+        correlatedRequestID: UUID?
     ) -> [CompanionServerEffect] {
+        var effects: [CompanionServerEffect] = []
+        if let requestID = correlatedRequestID,
+            outstandingRequests.removeValue(forKey: requestID) != nil
+        {
+            seenIncomingIDs.insert(requestID)
+            effects.append(.failRequest(requestID, .malformedAcknowledgement))
+        }
         state = .closed
-        return [
+        effects.append(
             .send(
                 protocolError(
-                    requestId: requestId,
+                    requestId: correlatedRequestID,
                     code: error.wireCode,
                     message: error.wireMessage
                 )
-            ),
-            .close,
-        ]
+            )
+        )
+        effects.append(.close)
+        return effects
     }
 
-    /// Build a `.send(.protocolError(...))` effect using the session's
-    /// UUID provider and, by default, the current protocol version.
-    /// The version override exists for the single case where the peer
-    /// already negotiated a specific version and the error needs to be
-    /// tagged at that version.
+    private mutating func failCorrelatedRequest(
+        messageID: UUID?,
+        error: VSCodeCompanionRequestError
+    ) -> [CompanionServerEffect] {
+        guard let messageID,
+            outstandingRequests.removeValue(forKey: messageID) != nil
+        else {
+            return []
+        }
+        seenIncomingIDs.insert(messageID)
+        return [.failRequest(messageID, error)]
+    }
+
+    private func correlatedRequestID(for message: CompanionMessage) -> UUID? {
+        switch message {
+        case .inspectThemeAck, .applyThemeAck:
+            return message.id
+        case .protocolError(let error):
+            return error.requestId
+        case .register, .registerAck, .registerRejected, .inspectTheme, .applyTheme:
+            return nil
+        }
+    }
+
+    private func requestError(
+        for code: CompanionProtocolErrorCode
+    ) -> VSCodeCompanionRequestError {
+        switch code {
+        case .duplicateRequestID:
+            return .duplicateRequest
+        case .unexpectedMessage:
+            return .staleRequest
+        case .unsupportedProtocolVersion:
+            return .unsupportedProtocol
+        case .notRegistered:
+            return .disconnected
+        case .malformedFrame, .unsupportedType, .missingRequiredField:
+            return .malformedAcknowledgement
+        }
+    }
+
+    private func acknowledgementRequestID(in body: Data) -> UUID? {
+        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+            let type = object["type"] as? String,
+            type == "inspect_theme_ack" || type == "apply_theme_ack",
+            let rawID = object["id"] as? String,
+            let id = UUID(uuidString: rawID),
+            outstandingRequests[id] != nil
+        else {
+            return nil
+        }
+        return id
+    }
+
     private func protocolError(
         protocolVersion: Int = CompanionProtocol.currentVersion,
         requestId: UUID?,

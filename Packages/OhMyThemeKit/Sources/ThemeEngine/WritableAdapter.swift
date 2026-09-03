@@ -159,6 +159,10 @@ public protocol MutationRecoveryRequiredError: CapabilityOutcomeError {}
 /// external state, allowing a newly captured baseline to be discarded safely.
 public protocol ConnectionMutationNotStartedError: Error {}
 
+/// Marks an Undo failure known to precede any external mutation. The source
+/// apply receipt remains valid so the user can retry after the transient issue.
+public protocol RollbackMutationNotStartedError: Error {}
+
 /// A conflict raised when write-boundary revalidation detects that the plan is stale.
 public struct WriteBoundaryConflict: ConnectionMutationNotStartedError, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
@@ -185,6 +189,23 @@ public struct WriteBoundaryConflict: ConnectionMutationNotStartedError, Equatabl
 /// - Never leak baseline bytes or other **sensitive data** into logs or reports.
 public protocol RecoverableApplyAdapter: WritableThemeAdapter {
     func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt
+}
+
+/// A writable adapter whose Undo operation produces a new target acknowledgement.
+/// The engine persists this returned receipt on the Undo record instead of copying
+/// the original apply receipt.
+public protocol AcknowledgedRollbackAdapter: WritableThemeAdapter {
+    func rollbackApplyWithReceipt(
+        plan: AdapterPlan,
+        receipt: AdapterReceipt
+    ) async throws -> AdapterReceipt
+}
+
+public protocol RecoverableRollbackAdapter: AcknowledgedRollbackAdapter {
+    func recoverRollbackReceipt(
+        plan: AdapterPlan,
+        originalReceipt: AdapterReceipt
+    ) async throws -> AdapterReceipt
 }
 
 public protocol RecoverableConnectionAdapter: ConnectionAdapter {

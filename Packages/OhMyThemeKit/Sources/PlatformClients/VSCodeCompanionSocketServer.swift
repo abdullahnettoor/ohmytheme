@@ -46,6 +46,8 @@ public struct CompanionSocketServerConfiguration: Sendable {
     /// Register timeout applied to each new connection. A connection
     /// that has not sent `register` within this window is closed.
     public let registerTimeout: TimeInterval
+    /// Maximum time to await an inspect or apply acknowledgement.
+    public let requestTimeout: TimeInterval
     /// Peer euid the server expects. Defaults to the app's own euid.
     public let expectedPeerEUID: uid_t
 
@@ -55,6 +57,7 @@ public struct CompanionSocketServerConfiguration: Sendable {
         launchNonce: String,
         sessionIDProvider: @escaping @Sendable () -> String = { UUID().uuidString },
         registerTimeout: TimeInterval = 5,
+        requestTimeout: TimeInterval = 5,
         expectedPeerEUID: uid_t = geteuid()
     ) {
         self.paths = paths
@@ -62,6 +65,7 @@ public struct CompanionSocketServerConfiguration: Sendable {
         self.launchNonce = launchNonce
         self.sessionIDProvider = sessionIDProvider
         self.registerTimeout = registerTimeout
+        self.requestTimeout = requestTimeout
         self.expectedPeerEUID = expectedPeerEUID
     }
 }
@@ -69,9 +73,14 @@ public struct CompanionSocketServerConfiguration: Sendable {
 // MARK: - Ack callback
 
 /// Result of an `applyTheme` round-trip against a connected extension.
-public struct CompanionApplyOutcome: Sendable {
+public struct CompanionApplyOutcome: Equatable, Sendable {
     public let sessionID: String
     public let acknowledgement: CompanionApplyThemeAckMessage
+
+    public init(sessionID: String, acknowledgement: CompanionApplyThemeAckMessage) {
+        self.sessionID = sessionID
+        self.acknowledgement = acknowledgement
+    }
 }
 
 // MARK: - Server
@@ -96,8 +105,20 @@ public final class CompanionSocketServer: @unchecked Sendable {
     private var connections: [UUID: CompanionConnection] = [:]
     private var isRunning = false
 
-    /// Continuations awaiting an ack for a given request id.
-    private var pendingAcks: [UUID: CheckedContinuation<CompanionApplyOutcome, Error>] = [:]
+    private struct PendingInspection {
+        let connectionID: UUID
+        let timer: DispatchSourceTimer
+        let continuation: CheckedContinuation<CompanionThemeInspection, Error>
+    }
+
+    private struct PendingApply {
+        let connectionID: UUID
+        let timer: DispatchSourceTimer
+        let continuation: CheckedContinuation<CompanionApplyOutcome, Error>
+    }
+
+    private var pendingInspections: [UUID: PendingInspection] = [:]
+    private var pendingApplies: [UUID: PendingApply] = [:]
 
     public init(configuration: CompanionSocketServerConfiguration) {
         self.configuration = configuration
@@ -138,39 +159,77 @@ public final class CompanionSocketServer: @unchecked Sendable {
         }
     }
 
-    /// Send an `apply_theme` request to the first registered
-    /// connection and await its acknowledgement, or fail if none is
-    /// registered.
+    /// Inspect the theme state of one exact registered server session.
+    public func inspectTheme(
+        serverSessionID: String
+    ) async throws -> CompanionThemeInspection {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<CompanionThemeInspection, Error>) in
+            queue.async {
+                guard self.isRunning else {
+                    continuation.resume(throwing: VSCodeCompanionRequestError.notRunning)
+                    return
+                }
+                guard let connection = self.connection(serverSessionID: serverSessionID) else {
+                    continuation.resume(throwing: VSCodeCompanionRequestError.targetUnavailable)
+                    return
+                }
+                let effects = connection.sendInspectTheme()
+                guard case .send(.inspectTheme(let request))? = effects.first else {
+                    continuation.resume(throwing: VSCodeCompanionRequestError.disconnected)
+                    return
+                }
+                let timer = self.makeRequestTimer(requestID: request.id)
+                self.pendingInspections[request.id] = PendingInspection(
+                    connectionID: connection.identifier,
+                    timer: timer,
+                    continuation: continuation
+                )
+                timer.resume()
+                self.handle(effects: effects, from: connection)
+            }
+        }
+    }
+
+    /// Apply a versioned, guarded theme request to one exact registered server session.
     public func applyTheme(
-        themeName: String
+        _ request: VSCodeCompanionThemeRequest,
+        serverSessionID: String
     ) async throws -> CompanionApplyOutcome {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<CompanionApplyOutcome, Error>) in
             queue.async {
-                guard
-                    let connection = self.connections.values.first(where: {
-                        $0.isRegistered
-                    })
-                else {
-                    continuation.resume(
-                        throwing: CompanionSocketServerError.notRunning)
+                guard self.isRunning else {
+                    continuation.resume(throwing: VSCodeCompanionRequestError.notRunning)
                     return
                 }
-                let effects = connection.sendApplyTheme(themeName: themeName)
-                var requestID: UUID? = nil
-                for effect in effects {
-                    if case .send(.applyTheme(let request)) = effect {
-                        requestID = request.id
-                    }
-                }
-                guard let id = requestID else {
-                    continuation.resume(throwing: CompanionSocketServerError.notRunning)
+                guard let connection = self.connection(serverSessionID: serverSessionID) else {
+                    continuation.resume(throwing: VSCodeCompanionRequestError.targetUnavailable)
                     return
                 }
-                self.pendingAcks[id] = continuation
+                let effects: [CompanionServerEffect]
+                do {
+                    effects = try connection.sendApplyTheme(request)
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard case .send(.applyTheme(let message))? = effects.first else {
+                    continuation.resume(throwing: VSCodeCompanionRequestError.disconnected)
+                    return
+                }
+                let timer = self.makeRequestTimer(requestID: message.id)
+                self.pendingApplies[message.id] = PendingApply(
+                    connectionID: connection.identifier,
+                    timer: timer,
+                    continuation: continuation
+                )
+                timer.resume()
+                self.handle(effects: effects, from: connection)
             }
         }
     }
+
 
     // MARK: - Bind / listen / accept
 
@@ -227,6 +286,7 @@ public final class CompanionSocketServer: @unchecked Sendable {
             throw CompanionSocketServerError.listenFailed(err)
         }
 
+        _ = fcntl(fd, F_SETFL, O_NONBLOCK)
         listenerFD = fd
     }
 
@@ -317,6 +377,77 @@ public final class CompanionSocketServer: @unchecked Sendable {
 
     private func removeConnection(_ connection: CompanionConnection) {
         connections.removeValue(forKey: connection.identifier)
+        failPendingRequests(
+            forConnectionID: connection.identifier,
+            error: .disconnected
+        )
+    }
+
+    private func connection(serverSessionID: String) -> CompanionConnection? {
+        connections.values.first {
+            $0.registration?.serverSessionID == serverSessionID
+        }
+    }
+
+    private func makeRequestTimer(requestID: UUID) -> DispatchSourceTimer {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now() + max(0, configuration.requestTimeout),
+            leeway: .milliseconds(10)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.requestTimedOut(requestID: requestID)
+        }
+        return timer
+    }
+
+    private func requestTimedOut(requestID: UUID) {
+        if let pending = pendingInspections.removeValue(forKey: requestID) {
+            pending.timer.cancel()
+            connections[pending.connectionID]?.cancelRequest(id: requestID)
+            pending.continuation.resume(throwing: VSCodeCompanionRequestError.timeout)
+            return
+        }
+        if let pending = pendingApplies.removeValue(forKey: requestID) {
+            pending.timer.cancel()
+            connections[pending.connectionID]?.cancelRequest(id: requestID)
+            pending.continuation.resume(throwing: VSCodeCompanionRequestError.timeout)
+        }
+    }
+
+    private func failPendingRequests(
+        forConnectionID connectionID: UUID,
+        error: VSCodeCompanionRequestError
+    ) {
+        let inspectionIDs = pendingInspections.compactMap { requestID, pending in
+            pending.connectionID == connectionID ? requestID : nil
+        }
+        for requestID in inspectionIDs {
+            guard let pending = pendingInspections.removeValue(forKey: requestID) else { continue }
+            pending.timer.cancel()
+            pending.continuation.resume(throwing: error)
+        }
+
+        let applyIDs = pendingApplies.compactMap { requestID, pending in
+            pending.connectionID == connectionID ? requestID : nil
+        }
+        for requestID in applyIDs {
+            guard let pending = pendingApplies.removeValue(forKey: requestID) else { continue }
+            pending.timer.cancel()
+            pending.continuation.resume(throwing: error)
+        }
+    }
+
+    private func failRequest(id: UUID, error: VSCodeCompanionRequestError) {
+        if let pending = pendingInspections.removeValue(forKey: id) {
+            pending.timer.cancel()
+            pending.continuation.resume(throwing: error)
+            return
+        }
+        if let pending = pendingApplies.removeValue(forKey: id) {
+            pending.timer.cancel()
+            pending.continuation.resume(throwing: error)
+        }
     }
 
     private func handle(
@@ -328,15 +459,29 @@ public final class CompanionSocketServer: @unchecked Sendable {
                 connection.write(message: message)
             case .close:
                 connection.close()
-            case .deliverAcknowledgement(let ack):
-                if let waiter = pendingAcks.removeValue(forKey: ack.id) {
-                    waiter.resume(
-                        returning: CompanionApplyOutcome(
-                            sessionID: connection.sessionID ?? "",
-                            acknowledgement: ack
+            case .deliverInspectionAcknowledgement(let acknowledgement):
+                if let pending = pendingInspections.removeValue(forKey: acknowledgement.id) {
+                    pending.timer.cancel()
+                    pending.continuation.resume(
+                        returning: CompanionThemeInspection(
+                            configuredSetting: acknowledgement.configuredSetting,
+                            effectiveSetting: acknowledgement.effectiveSetting,
+                            overrides: acknowledgement.overrides
                         )
                     )
                 }
+            case .deliverAcknowledgement(let acknowledgement):
+                if let pending = pendingApplies.removeValue(forKey: acknowledgement.id) {
+                    pending.timer.cancel()
+                    pending.continuation.resume(
+                        returning: CompanionApplyOutcome(
+                            sessionID: connection.sessionID ?? "",
+                            acknowledgement: acknowledgement
+                        )
+                    )
+                }
+            case .failRequest(let id, let error):
+                failRequest(id: id, error: error)
             }
         }
     }
@@ -355,15 +500,21 @@ public final class CompanionSocketServer: @unchecked Sendable {
             listenerFD = -1
         }
 
-        for connection in connections.values {
+        for connection in Array(connections.values) {
             connection.close()
         }
         connections.removeAll()
 
-        for continuation in pendingAcks.values {
-            continuation.resume(throwing: CompanionSocketServerError.notRunning)
+        for pending in pendingInspections.values {
+            pending.timer.cancel()
+            pending.continuation.resume(throwing: VSCodeCompanionRequestError.notRunning)
         }
-        pendingAcks.removeAll()
+        pendingInspections.removeAll()
+        for pending in pendingApplies.values {
+            pending.timer.cancel()
+            pending.continuation.resume(throwing: VSCodeCompanionRequestError.notRunning)
+        }
+        pendingApplies.removeAll()
 
         CompanionFilesystem.removeItemIfPresent(at: configuration.paths.rendezvousFile)
         CompanionFilesystem.removeItemIfPresent(at: configuration.paths.socketFile)
@@ -537,9 +688,17 @@ final class CompanionConnection: @unchecked Sendable {
         }
     }
 
-    func sendApplyTheme(themeName: String) -> [CompanionServerEffect] {
-        let effects = session.sendApplyTheme(themeName: themeName)
-        onEffects(self, effects)
-        return effects
+    func sendInspectTheme() -> [CompanionServerEffect] {
+        session.sendInspectTheme()
+    }
+
+    func sendApplyTheme(
+        _ request: VSCodeCompanionThemeRequest
+    ) throws -> [CompanionServerEffect] {
+        try session.sendApplyTheme(request)
+    }
+
+    func cancelRequest(id: UUID) {
+        session.cancelRequest(id: id)
     }
 }

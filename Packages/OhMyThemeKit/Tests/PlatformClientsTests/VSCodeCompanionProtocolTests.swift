@@ -157,7 +157,33 @@ struct VSCodeCompanionProtocolTests {
         }
     }
 
-    @Test("Apply theme request round-trips")
+    @Test("Inspect theme messages round-trip")
+    func inspectThemeRoundTrips() throws {
+        let uuid = UUID()
+        let request = CompanionMessage.inspectTheme(
+            .init(protocolVersion: 1, id: uuid, sessionId: "s-1")
+        )
+        let acknowledgement = CompanionMessage.inspectThemeAck(
+            .init(
+                protocolVersion: 1,
+                id: uuid,
+                configuredSetting: nil,
+                effectiveSetting: "Default Dark+",
+                overrides: [.init(scope: .remote, folder: nil, value: "Default Dark+")]
+            )
+        )
+
+        #expect(
+            try CompanionMessageCodec.decodeBody(CompanionMessageCodec.encodeBody(request))
+                == request
+        )
+        #expect(
+            try CompanionMessageCodec.decodeBody(CompanionMessageCodec.encodeBody(acknowledgement))
+                == acknowledgement
+        )
+    }
+
+    @Test("Apply theme request round-trips nullable settings")
     func applyThemeRoundTrips() throws {
         let uuid = UUID()
         let request = CompanionMessage.applyTheme(
@@ -165,13 +191,18 @@ struct VSCodeCompanionProtocolTests {
                 protocolVersion: 1,
                 id: uuid,
                 sessionId: "s-1",
-                themeName: "Catppuccin Mocha",
+                themeName: nil,
+                expectedSetting: "Catppuccin Mocha",
                 target: .global
             )
         )
         let encoded = try CompanionMessageCodec.encodeBody(request)
         let decoded = try CompanionMessageCodec.decodeBody(encoded)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+
         #expect(decoded == request)
+        #expect(object?["themeName"] is NSNull)
+        #expect(object?["expectedSetting"] as? String == "Catppuccin Mocha")
     }
 
     @Test("Apply theme acknowledgement round-trips with overrides and failure")
@@ -185,6 +216,8 @@ struct VSCodeCompanionProtocolTests {
                 status: .applied,
                 effectiveSetting: "Catppuccin Mocha",
                 requestedSetting: "Catppuccin Mocha",
+                previousSetting: nil,
+                configuredSetting: "Catppuccin Mocha",
                 overrides: [],
                 failure: nil
             )
@@ -201,6 +234,8 @@ struct VSCodeCompanionProtocolTests {
                 status: .overridden,
                 effectiveSetting: "Some Other",
                 requestedSetting: "Catppuccin Mocha",
+                previousSetting: "Old",
+                configuredSetting: "Catppuccin Mocha",
                 overrides: [
                     .init(scope: .workspace, folder: nil, value: "Some Other"),
                     .init(scope: .workspaceFolder, folder: "/repo", value: "Other"),
@@ -220,6 +255,8 @@ struct VSCodeCompanionProtocolTests {
                 status: .failed,
                 effectiveSetting: nil,
                 requestedSetting: "Catppuccin Mocha",
+                previousSetting: "Old",
+                configuredSetting: "Old",
                 overrides: [],
                 failure: .init(code: "update_threw", message: "boom")
             )
@@ -359,6 +396,7 @@ struct VSCodeCompanionProtocolTests {
             (CompanionApplyThemeStatus.applied, "applied"),
             (.overridden, "overridden"),
             (.unsupportedTheme, "unsupported_theme"),
+            (.conflicted, "conflicted"),
             (.failed, "failed"),
         ] {
             let message = CompanionMessage.applyThemeAck(
@@ -375,6 +413,23 @@ struct VSCodeCompanionProtocolTests {
             let encoded = try CompanionMessageCodec.encodeBody(message)
             let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
             #expect(object?["status"] as? String == expected)
+        }
+    }
+
+    @Test("Decoder requires overrides and a failure payload for failed acknowledgements")
+    func decoderValidatesAcknowledgementShape() {
+        let missingOverrides = Data(
+            #"{"protocolVersion":1,"type":"inspect_theme_ack","id":"11111111-2222-3333-4444-555555555555"}"#.utf8
+        )
+        let failedWithoutFailure = Data(
+            #"{"protocolVersion":1,"type":"apply_theme_ack","id":"11111111-2222-3333-4444-555555555555","status":"failed","requestedSetting":null,"overrides":[]}"#.utf8
+        )
+
+        #expect(throws: CompanionProtocolError.self) {
+            try CompanionMessageCodec.decodeBody(missingOverrides)
+        }
+        #expect(throws: CompanionProtocolError.self) {
+            try CompanionMessageCodec.decodeBody(failedWithoutFailure)
         }
     }
 }

@@ -71,7 +71,47 @@ describe("message codec", () => {
     assert.deepStrictEqual(decoded, message);
   });
 
-  it("round-trips apply_theme_ack with overrides and failure", () => {
+  it("round-trips inspect and nullable apply messages", () => {
+    const inspect: CompanionMessage = {
+      type: "inspect_theme",
+      protocolVersion: 1,
+      id: randomUUID(),
+      sessionId: "s-1",
+    };
+    assert.deepStrictEqual(
+      decodeMessage(encodeMessage(inspect).subarray(4)),
+      inspect,
+    );
+
+    const inspectAck: CompanionMessage = {
+      type: "inspect_theme_ack",
+      protocolVersion: 1,
+      id: inspect.id,
+      configuredSetting: null,
+      effectiveSetting: "Default Dark+",
+      overrides: [{ scope: "remote", value: "Default Dark+" }],
+    };
+    assert.deepStrictEqual(
+      decodeMessage(encodeMessage(inspectAck).subarray(4)),
+      inspectAck,
+    );
+
+    const undo: CompanionMessage = {
+      type: "apply_theme",
+      protocolVersion: 1,
+      id: randomUUID(),
+      sessionId: "s-1",
+      themeName: null,
+      expectedSetting: "Mocha",
+      target: "global",
+    };
+    assert.deepStrictEqual(
+      decodeMessage(encodeMessage(undo).subarray(4)),
+      undo,
+    );
+  });
+
+  it("round-trips apply_theme_ack with settings, conflict, and failure", () => {
     const id = randomUUID();
     const applied: CompanionMessage = {
       type: "apply_theme_ack",
@@ -79,6 +119,8 @@ describe("message codec", () => {
       id,
       status: "applied",
       requestedSetting: "Mocha",
+      previousSetting: null,
+      configuredSetting: "Mocha",
       effectiveSetting: "Mocha",
       overrides: [],
     };
@@ -88,12 +130,31 @@ describe("message codec", () => {
       applied,
     );
 
+    const conflicted: CompanionMessage = {
+      type: "apply_theme_ack",
+      protocolVersion: 1,
+      id,
+      status: "conflicted",
+      requestedSetting: null,
+      previousSetting: "External Theme",
+      configuredSetting: "External Theme",
+      effectiveSetting: "External Theme",
+      overrides: [],
+    };
+    const conflictedBody = encodeMessage(conflicted);
+    assert.deepStrictEqual(
+      decodeMessage(conflictedBody.subarray(4)),
+      conflicted,
+    );
+
     const failed: CompanionMessage = {
       type: "apply_theme_ack",
       protocolVersion: 1,
       id,
       status: "failed",
       requestedSetting: "Mocha",
+      configuredSetting: null,
+      effectiveSetting: null,
       overrides: [],
       failure: { code: "update_threw", message: "boom" },
     };
@@ -144,5 +205,68 @@ describe("message codec", () => {
       }),
     );
     assert.throws(() => decodeMessage(body), /UUID/);
+  });
+
+  it("rejects malformed new protocol fields", () => {
+    const malformedMessages = [
+      {
+        protocolVersion: 1,
+        type: "apply_theme",
+        id: randomUUID(),
+        sessionId: "s-1",
+        themeName: 42,
+        expectedSetting: null,
+        target: "global",
+      },
+      {
+        protocolVersion: 1,
+        type: "apply_theme",
+        id: randomUUID(),
+        sessionId: "s-1",
+        themeName: null,
+        target: "global",
+      },
+      {
+        protocolVersion: 1,
+        type: "apply_theme_ack",
+        id: randomUUID(),
+        status: "changed",
+        requestedSetting: "Mocha",
+        overrides: [],
+      },
+      {
+        protocolVersion: 1,
+        type: "apply_theme_ack",
+        id: randomUUID(),
+        status: "failed",
+        requestedSetting: "Mocha",
+        overrides: [],
+      },
+      {
+        protocolVersion: 1,
+        type: "inspect_theme_ack",
+        id: randomUUID(),
+        configuredSetting: 42,
+        overrides: [],
+      },
+      {
+        protocolVersion: 1,
+        type: "inspect_theme_ack",
+        id: randomUUID(),
+        overrides: [{ scope: "machine", value: "Mocha" }],
+      },
+      {
+        protocolVersion: 1,
+        type: "inspect_theme_ack",
+        id: randomUUID(),
+      },
+    ];
+
+    for (const message of malformedMessages) {
+      assert.throws(
+        () => decodeMessage(Buffer.from(JSON.stringify(message))),
+        ProtocolError,
+      );
+    }
   });
 });

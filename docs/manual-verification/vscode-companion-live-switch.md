@@ -18,11 +18,11 @@ matters an extension-host test cannot cover from CI.
   file, malformed frames, stale nonce, reconnect).
 - `Scripts/prove-vscode-companion.sh` — extension unit tests and (when
   a VS Code test host can be downloaded) the extension-host tests that
-  boot a real VS Code and verify one full live-switch round-trip.
+  boot a real VS Code and verify inspect, apply, and guarded Undo round-trips.
 - `Extensions/VSCode/oh-my-theme-companion/src/test/host/` — the
-  extension-host test that connects to a native stub server, applies
-  `Default Dark Modern`, and asserts the reported `effectiveSetting`
-  matches the value VS Code itself now returns.
+  extension-host test that connects to a native stub server, applies an
+  installed theme, acknowledges guarded Undo, and confirms the original
+  profile setting is restored.
 
 ## Manual proof cases
 
@@ -58,6 +58,8 @@ installed as a `.vsix` under the intended profile.
 2. VS Code's title bar and editor colors change without any prompt.
 3. In VS Code, run `> Preferences: Open User Settings (JSON)` and
    confirm `workbench.colorTheme` is set to the requested value.
+4. Run Undo Last Theme Change and confirm a second acknowledged update
+   restores the prior profile setting.
 
 ### 4. Override reporting
 

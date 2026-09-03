@@ -1,0 +1,39 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "Oh My Theme Aurora",
+  "type": "dark",
+  "colors": {
+    "activityBar.background": "#10151f",
+    "activityBar.foreground": "#e5eefc",
+    "editor.background": "#10151f",
+    "editor.foreground": "#e5eefc",
+    "editor.selectionBackground": "#28364d",
+    "editorLineNumber.foreground": "#536178",
+    "sideBar.background": "#1b2433",
+    "sideBar.foreground": "#b5c1d5",
+    "statusBar.background": "#1b2433",
+    "statusBar.foreground": "#e5eefc",
+    "terminal.ansiBlack": "#28364d",
+    "terminal.ansiBlue": "#8ec5ff",
+    "terminal.ansiCyan": "#8be0e8",
+    "terminal.ansiGreen": "#a7dca0",
+    "terminal.ansiMagenta": "#d8b4fe",
+    "terminal.ansiRed": "#ffb4ab",
+    "terminal.ansiWhite": "#c7d2e3",
+    "terminal.ansiYellow": "#f5d28f"
+  },
+  "tokenColors": [
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": { "foreground": "#7e8da6" }
+    },
+    {
+      "scope": ["keyword", "storage", "storage.type"],
+      "settings": { "foreground": "#d8b4fe" }
+    },
+    {
+      "scope": ["string", "constant.other.symbol"],
+      "settings": { "foreground": "#a7dca0" }
+    }
+  ]
+}

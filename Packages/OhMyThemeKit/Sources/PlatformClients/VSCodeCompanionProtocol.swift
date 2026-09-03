@@ -244,28 +244,89 @@ public enum CompanionApplyTarget: String, Codable, Equatable, Sendable {
     case global
 }
 
+public enum VSCodeCompanionRequestError: Error, Equatable, Sendable {
+    case timeout
+    case disconnected
+    case staleRequest
+    case duplicateRequest
+    case unsupportedProtocol
+    case malformedAcknowledgement
+    case targetUnavailable
+    case notRunning
+}
+
+public struct VSCodeCompanionThemeRequest: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let themeName: String?
+    public let expectedSetting: String?
+    public let target: CompanionApplyTarget
+
+    public init(
+        protocolVersion: Int,
+        themeName: String?,
+        expectedSetting: String?,
+        target: CompanionApplyTarget
+    ) {
+        self.protocolVersion = protocolVersion
+        self.themeName = themeName
+        self.expectedSetting = expectedSetting
+        self.target = target
+    }
+}
+
+public struct CompanionThemeInspection: Codable, Equatable, Sendable {
+    public let configuredSetting: String?
+    public let effectiveSetting: String?
+    public let overrides: [CompanionOverride]
+
+    public init(
+        configuredSetting: String?,
+        effectiveSetting: String?,
+        overrides: [CompanionOverride]
+    ) {
+        self.configuredSetting = configuredSetting
+        self.effectiveSetting = effectiveSetting
+        self.overrides = overrides
+    }
+}
+
+public struct CompanionInspectThemeMessage: Equatable, Sendable {
+    public let protocolVersion: Int
+    public let id: UUID
+    public let sessionId: String
+
+    public init(protocolVersion: Int, id: UUID, sessionId: String) {
+        self.protocolVersion = protocolVersion
+        self.id = id
+        self.sessionId = sessionId
+    }
+}
+
 public struct CompanionApplyThemeMessage: Equatable, Sendable {
     public let protocolVersion: Int
     public let id: UUID
     public let sessionId: String
-    /// The name of the Theme Variant to apply (see `CONTEXT.md`).
-    /// For VS Code specifically, this is the value the app writes into
-    /// `workbench.colorTheme` — the string a user would see in
-    /// `Preferences: Color Theme`.
-    public let themeName: String
+    /// The value to write to `workbench.colorTheme`, or `nil` to remove the
+    /// global setting and return to VS Code's default.
+    public let themeName: String?
+    /// The global setting observed while preparing the request. The companion
+    /// refuses the write if the setting has changed since then.
+    public let expectedSetting: String?
     public let target: CompanionApplyTarget
 
     public init(
         protocolVersion: Int,
         id: UUID,
         sessionId: String,
-        themeName: String,
+        themeName: String?,
+        expectedSetting: String? = nil,
         target: CompanionApplyTarget
     ) {
         self.protocolVersion = protocolVersion
         self.id = id
         self.sessionId = sessionId
         self.themeName = themeName
+        self.expectedSetting = expectedSetting
         self.target = target
     }
 }
@@ -274,6 +335,7 @@ public enum CompanionApplyThemeStatus: String, Codable, Equatable, Sendable {
     case applied
     case overridden
     case unsupportedTheme = "unsupported_theme"
+    case conflicted
     case failed
 }
 
@@ -283,7 +345,7 @@ public enum CompanionOverrideScope: String, Codable, Equatable, Sendable {
     case remote
 }
 
-public struct CompanionOverride: Equatable, Sendable {
+public struct CompanionOverride: Codable, Equatable, Sendable {
     public let scope: CompanionOverrideScope
     public let folder: String?
     public let value: String
@@ -295,7 +357,7 @@ public struct CompanionOverride: Equatable, Sendable {
     }
 }
 
-public struct CompanionApplyFailure: Equatable, Sendable {
+public struct CompanionApplyFailure: Codable, Equatable, Sendable {
     public let code: String
     public let message: String
 
@@ -305,12 +367,36 @@ public struct CompanionApplyFailure: Equatable, Sendable {
     }
 }
 
-public struct CompanionApplyThemeAckMessage: Equatable, Sendable {
+public struct CompanionInspectThemeAckMessage: Equatable, Sendable {
+    public let protocolVersion: Int
+    public let id: UUID
+    public let configuredSetting: String?
+    public let effectiveSetting: String?
+    public let overrides: [CompanionOverride]
+
+    public init(
+        protocolVersion: Int,
+        id: UUID,
+        configuredSetting: String?,
+        effectiveSetting: String?,
+        overrides: [CompanionOverride]
+    ) {
+        self.protocolVersion = protocolVersion
+        self.id = id
+        self.configuredSetting = configuredSetting
+        self.effectiveSetting = effectiveSetting
+        self.overrides = overrides
+    }
+}
+
+public struct CompanionApplyThemeAckMessage: Codable, Equatable, Sendable {
     public let protocolVersion: Int
     public let id: UUID
     public let status: CompanionApplyThemeStatus
     public let effectiveSetting: String?
-    public let requestedSetting: String
+    public let requestedSetting: String?
+    public let previousSetting: String?
+    public let configuredSetting: String?
     public let overrides: [CompanionOverride]
     public let failure: CompanionApplyFailure?
 
@@ -319,7 +405,9 @@ public struct CompanionApplyThemeAckMessage: Equatable, Sendable {
         id: UUID,
         status: CompanionApplyThemeStatus,
         effectiveSetting: String?,
-        requestedSetting: String,
+        requestedSetting: String?,
+        previousSetting: String? = nil,
+        configuredSetting: String? = nil,
         overrides: [CompanionOverride],
         failure: CompanionApplyFailure?
     ) {
@@ -328,6 +416,8 @@ public struct CompanionApplyThemeAckMessage: Equatable, Sendable {
         self.status = status
         self.effectiveSetting = effectiveSetting
         self.requestedSetting = requestedSetting
+        self.previousSetting = previousSetting
+        self.configuredSetting = configuredSetting
         self.overrides = overrides
         self.failure = failure
     }
@@ -369,6 +459,8 @@ public enum CompanionMessage: Equatable, Sendable {
     case register(CompanionRegisterMessage)
     case registerAck(CompanionRegisterAckMessage)
     case registerRejected(CompanionRegisterRejectedMessage)
+    case inspectTheme(CompanionInspectThemeMessage)
+    case inspectThemeAck(CompanionInspectThemeAckMessage)
     case applyTheme(CompanionApplyThemeMessage)
     case applyThemeAck(CompanionApplyThemeAckMessage)
     case protocolError(CompanionProtocolErrorMessage)
@@ -378,6 +470,8 @@ public enum CompanionMessage: Equatable, Sendable {
         case .register(let m): return m.protocolVersion
         case .registerAck(let m): return m.protocolVersion
         case .registerRejected(let m): return m.protocolVersion
+        case .inspectTheme(let m): return m.protocolVersion
+        case .inspectThemeAck(let m): return m.protocolVersion
         case .applyTheme(let m): return m.protocolVersion
         case .applyThemeAck(let m): return m.protocolVersion
         case .protocolError(let m): return m.protocolVersion
@@ -389,6 +483,8 @@ public enum CompanionMessage: Equatable, Sendable {
         case .register(let m): return m.id
         case .registerAck(let m): return m.id
         case .registerRejected(let m): return m.id
+        case .inspectTheme(let m): return m.id
+        case .inspectThemeAck(let m): return m.id
         case .applyTheme(let m): return m.id
         case .applyThemeAck(let m): return m.id
         case .protocolError(let m): return m.id
@@ -442,7 +538,8 @@ public enum CompanionMessageCodec {
         // validate it before demanding a UUID.
         switch type {
         case "register", "register_ack", "register_rejected",
-            "apply_theme", "apply_theme_ack", "protocol_error":
+            "inspect_theme", "inspect_theme_ack", "apply_theme", "apply_theme_ack",
+            "protocol_error":
             break
         default:
             throw CompanionProtocolError.unsupportedType(type)
@@ -471,6 +568,18 @@ public enum CompanionMessageCodec {
                     protocolVersion: protocolVersion, id: id, reason: reason
                 )
             )
+        case "inspect_theme":
+            return .inspectTheme(
+                CompanionInspectThemeMessage(
+                    protocolVersion: protocolVersion,
+                    id: id,
+                    sessionId: try reader.requireString("sessionId")
+                )
+            )
+        case "inspect_theme_ack":
+            return .inspectThemeAck(
+                try decodeInspectAck(reader, protocolVersion: protocolVersion, id: id)
+            )
         case "apply_theme":
             let targetString = try reader.requireString("target")
             guard let target = CompanionApplyTarget(rawValue: targetString) else {
@@ -481,7 +590,8 @@ public enum CompanionMessageCodec {
                     protocolVersion: protocolVersion,
                     id: id,
                     sessionId: try reader.requireString("sessionId"),
-                    themeName: try reader.requireString("themeName"),
+                    themeName: try reader.requireNullableString("themeName"),
+                    expectedSetting: try reader.requireNullableString("expectedSetting"),
                     target: target
                 )
             )
@@ -556,13 +666,31 @@ public enum CompanionMessageCodec {
                 "id": m.id.uuidString,
                 "reason": m.reason.rawValue,
             ]
+        case .inspectTheme(let m):
+            return [
+                "protocolVersion": m.protocolVersion,
+                "type": "inspect_theme",
+                "id": m.id.uuidString,
+                "sessionId": m.sessionId,
+            ]
+        case .inspectThemeAck(let m):
+            var object: [String: Any] = [
+                "protocolVersion": m.protocolVersion,
+                "type": "inspect_theme_ack",
+                "id": m.id.uuidString,
+                "overrides": encodeOverrides(m.overrides),
+            ]
+            if let configured = m.configuredSetting { object["configuredSetting"] = configured }
+            if let effective = m.effectiveSetting { object["effectiveSetting"] = effective }
+            return object
         case .applyTheme(let m):
             return [
                 "protocolVersion": m.protocolVersion,
                 "type": "apply_theme",
                 "id": m.id.uuidString,
                 "sessionId": m.sessionId,
-                "themeName": m.themeName,
+                "themeName": m.themeName as Any? ?? NSNull(),
+                "expectedSetting": m.expectedSetting as Any? ?? NSNull(),
                 "target": m.target.rawValue,
             ]
         case .applyThemeAck(let m):
@@ -571,19 +699,12 @@ public enum CompanionMessageCodec {
                 "type": "apply_theme_ack",
                 "id": m.id.uuidString,
                 "status": m.status.rawValue,
-                "requestedSetting": m.requestedSetting,
-                "overrides": m.overrides.map { override -> [String: Any] in
-                    var out: [String: Any] = [
-                        "scope": override.scope.rawValue,
-                        "value": override.value,
-                    ]
-                    if let folder = override.folder { out["folder"] = folder }
-                    return out
-                },
+                "requestedSetting": m.requestedSetting as Any? ?? NSNull(),
+                "overrides": encodeOverrides(m.overrides),
             ]
-            if let effective = m.effectiveSetting {
-                object["effectiveSetting"] = effective
-            }
+            if let previous = m.previousSetting { object["previousSetting"] = previous }
+            if let configured = m.configuredSetting { object["configuredSetting"] = configured }
+            if let effective = m.effectiveSetting { object["effectiveSetting"] = effective }
             if let failure = m.failure {
                 object["failure"] = [
                     "code": failure.code,
@@ -637,6 +758,18 @@ public enum CompanionMessageCodec {
         )
     }
 
+    private static func decodeInspectAck(
+        _ reader: ObjectReader, protocolVersion: Int, id: UUID
+    ) throws -> CompanionInspectThemeAckMessage {
+        CompanionInspectThemeAckMessage(
+            protocolVersion: protocolVersion,
+            id: id,
+            configuredSetting: try reader.optionalNullableString("configuredSetting"),
+            effectiveSetting: try reader.optionalNullableString("effectiveSetting"),
+            overrides: try decodeOverrides(reader)
+        )
+    }
+
     private static func decodeApplyAck(
         _ reader: ObjectReader, protocolVersion: Int, id: UUID
     ) throws -> CompanionApplyThemeAckMessage {
@@ -644,38 +777,27 @@ public enum CompanionMessageCodec {
         guard let status = CompanionApplyThemeStatus(rawValue: statusString) else {
             throw CompanionProtocolError.invalidEnum(field: "status", value: statusString)
         }
-        let requestedSetting = try reader.requireString("requestedSetting")
-        let effectiveSetting = reader.optionalString("effectiveSetting")
-
-        var overrides: [CompanionOverride] = []
-        if let rawOverrides = reader.optionalArray("overrides") {
-            for entry in rawOverrides {
-                guard let entryObject = entry as? [String: Any] else {
-                    throw CompanionProtocolError.invalidField("overrides")
-                }
-                let entryReader = ObjectReader(entryObject)
-                let scopeString = try entryReader.requireString("scope")
-                guard let scope = CompanionOverrideScope(rawValue: scopeString) else {
-                    throw CompanionProtocolError.invalidEnum(field: "scope", value: scopeString)
-                }
-                overrides.append(
-                    CompanionOverride(
-                        scope: scope,
-                        folder: entryReader.optionalString("folder"),
-                        value: try entryReader.requireString("value")
-                    )
-                )
-            }
-        }
+        let requestedSetting = try reader.requireNullableString("requestedSetting")
+        let previousSetting = try reader.optionalNullableString("previousSetting")
+        let configuredSetting = try reader.optionalNullableString("configuredSetting")
+        let effectiveSetting = try reader.optionalNullableString("effectiveSetting")
+        let overrides = try decodeOverrides(reader)
 
         let failure: CompanionApplyFailure?
-        if let failureObject = reader.optionalObject("failure") {
+        if reader.contains("failure") {
+            let failureObject = try reader.requireObject("failure")
             failure = CompanionApplyFailure(
                 code: try failureObject.requireString("code"),
                 message: try failureObject.requireString("message")
             )
         } else {
             failure = nil
+        }
+        if status == .failed, failure == nil {
+            throw CompanionProtocolError.missingField("failure")
+        }
+        if status != .failed, failure != nil {
+            throw CompanionProtocolError.invalidField("failure")
         }
 
         return CompanionApplyThemeAckMessage(
@@ -684,9 +806,40 @@ public enum CompanionMessageCodec {
             status: status,
             effectiveSetting: effectiveSetting,
             requestedSetting: requestedSetting,
+            previousSetting: previousSetting,
+            configuredSetting: configuredSetting,
             overrides: overrides,
             failure: failure
         )
+    }
+
+    private static func decodeOverrides(_ reader: ObjectReader) throws -> [CompanionOverride] {
+        try reader.requireArray("overrides").map { entry in
+            guard let entryObject = entry as? [String: Any] else {
+                throw CompanionProtocolError.invalidField("overrides")
+            }
+            let entryReader = ObjectReader(entryObject)
+            let scopeString = try entryReader.requireString("scope")
+            guard let scope = CompanionOverrideScope(rawValue: scopeString) else {
+                throw CompanionProtocolError.invalidEnum(field: "scope", value: scopeString)
+            }
+            return CompanionOverride(
+                scope: scope,
+                folder: try entryReader.optionalNullableString("folder"),
+                value: try entryReader.requireString("value")
+            )
+        }
+    }
+
+    private static func encodeOverrides(_ overrides: [CompanionOverride]) -> [[String: Any]] {
+        overrides.map { override in
+            var object: [String: Any] = [
+                "scope": override.scope.rawValue,
+                "value": override.value,
+            ]
+            if let folder = override.folder { object["folder"] = folder }
+            return object
+        }
     }
 }
 
@@ -701,10 +854,25 @@ private struct ObjectReader {
 
     init(_ object: [String: Any]) { self.object = object }
 
+    func contains(_ key: String) -> Bool {
+        object[key] != nil
+    }
+
     func requireString(_ key: String) throws -> String {
         guard let raw = object[key] else {
             throw CompanionProtocolError.missingField(key)
         }
+        guard let value = raw as? String else {
+            throw CompanionProtocolError.invalidField(key)
+        }
+        return value
+    }
+
+    func requireNullableString(_ key: String) throws -> String? {
+        guard let raw = object[key] else {
+            throw CompanionProtocolError.missingField(key)
+        }
+        if raw is NSNull { return nil }
         guard let value = raw as? String else {
             throw CompanionProtocolError.invalidField(key)
         }
@@ -760,6 +928,25 @@ private struct ObjectReader {
 
     func optionalString(_ key: String) -> String? {
         object[key] as? String
+    }
+
+    func optionalNullableString(_ key: String) throws -> String? {
+        guard let raw = object[key] else { return nil }
+        if raw is NSNull { return nil }
+        guard let value = raw as? String else {
+            throw CompanionProtocolError.invalidField(key)
+        }
+        return value
+    }
+
+    func requireArray(_ key: String) throws -> [Any] {
+        guard let raw = object[key] else {
+            throw CompanionProtocolError.missingField(key)
+        }
+        guard let array = raw as? [Any] else {
+            throw CompanionProtocolError.invalidField(key)
+        }
+        return array
     }
 
     func optionalArray(_ key: String) -> [Any]? {

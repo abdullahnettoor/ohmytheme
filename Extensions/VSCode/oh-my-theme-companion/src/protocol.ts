@@ -20,6 +20,8 @@ export type CompanionMessageType =
   | "register"
   | "register_ack"
   | "register_rejected"
+  | "inspect_theme"
+  | "inspect_theme_ack"
   | "apply_theme"
   | "apply_theme_ack"
   | "protocol_error";
@@ -37,6 +39,7 @@ export type ApplyStatus =
   | "applied"
   | "overridden"
   | "unsupported_theme"
+  | "conflicted"
   | "failed";
 
 export type OverrideScope = "workspace" | "workspaceFolder" | "remote";
@@ -86,12 +89,20 @@ export interface RegisterRejectedMessage {
   reason: RegisterRejectionReason;
 }
 
+export interface InspectThemeMessage {
+  type: "inspect_theme";
+  protocolVersion: number;
+  id: string;
+  sessionId: string;
+}
+
 export interface ApplyThemeMessage {
   type: "apply_theme";
   protocolVersion: number;
   id: string;
   sessionId: string;
-  themeName: string;
+  themeName: string | null;
+  expectedSetting: string | null;
   target: ApplyTarget;
 }
 
@@ -106,13 +117,24 @@ export interface ApplyFailure {
   message: string;
 }
 
+export interface InspectThemeAckMessage {
+  type: "inspect_theme_ack";
+  protocolVersion: number;
+  id: string;
+  configuredSetting?: string | null;
+  effectiveSetting?: string | null;
+  overrides: OverrideEntry[];
+}
+
 export interface ApplyThemeAckMessage {
   type: "apply_theme_ack";
   protocolVersion: number;
   id: string;
   status: ApplyStatus;
-  requestedSetting: string;
-  effectiveSetting?: string;
+  requestedSetting: string | null;
+  previousSetting?: string | null;
+  configuredSetting?: string | null;
+  effectiveSetting?: string | null;
   overrides: OverrideEntry[];
   failure?: ApplyFailure;
 }
@@ -130,6 +152,8 @@ export type CompanionMessage =
   | RegisterMessage
   | RegisterAckMessage
   | RegisterRejectedMessage
+  | InspectThemeMessage
+  | InspectThemeAckMessage
   | ApplyThemeMessage
   | ApplyThemeAckMessage
   | ProtocolErrorMessage;
@@ -209,6 +233,7 @@ function requireField<T>(object: Record<string, unknown>, key: string, guard: (v
 }
 
 const isString = (v: unknown): v is string => typeof v === "string";
+const isNullableString = (v: unknown): v is string | null => v === null || isString(v);
 const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -216,6 +241,30 @@ const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((entry) => typeof entry === "string");
 const isStringRecord = (v: unknown): v is Record<string, string> =>
   isObject(v) && Object.values(v).every((entry) => typeof entry === "string");
+
+function requireEnum<T extends string>(
+  object: Record<string, unknown>,
+  key: string,
+  values: readonly T[],
+): T {
+  const value = requireField(object, key, isString);
+  if (!values.includes(value as T)) {
+    throw new ProtocolError("malformed_frame", `Field '${key}' has an unsupported value.`);
+  }
+  return value as T;
+}
+
+function optionalNullableString(
+  object: Record<string, unknown>,
+  key: string,
+): string | null | undefined {
+  const value = object[key];
+  if (value === undefined) return undefined;
+  if (!isNullableString(value)) {
+    throw new ProtocolError("malformed_frame", `Field '${key}' has an unexpected type.`);
+  }
+  return value;
+}
 
 function requireUUID(object: Record<string, unknown>, key: string): string {
   const raw = requireField(object, key, isString);
@@ -245,7 +294,16 @@ export function decodeMessage(body: Buffer): CompanionMessage {
   const type = requireField(raw, "type", isString) as CompanionMessageType;
 
   const isKnownType = (
-    ["register", "register_ack", "register_rejected", "apply_theme", "apply_theme_ack", "protocol_error"] as const
+    [
+      "register",
+      "register_ack",
+      "register_rejected",
+      "inspect_theme",
+      "inspect_theme_ack",
+      "apply_theme",
+      "apply_theme_ack",
+      "protocol_error",
+    ] as const
   ).includes(type as never);
   if (!isKnownType) {
     throw new ProtocolError("unsupported_type", `Message type '${type}' is not supported.`);
@@ -264,24 +322,46 @@ export function decodeMessage(body: Buffer): CompanionMessage {
         sessionId: requireField(raw, "sessionId", isString),
       };
     case "register_rejected": {
-      const reason = requireField(raw, "reason", isString) as RegisterRejectionReason;
+      const reason = requireEnum<RegisterRejectionReason>(raw, "reason", [
+        "unsupported_protocol",
+        "invalid_nonce",
+        "duplicate_registration",
+        "missing_capability",
+        "unauthenticated_peer",
+      ]);
       return { type, protocolVersion, id, reason };
     }
-    case "apply_theme": {
-      const target = requireField(raw, "target", isString) as ApplyTarget;
+    case "inspect_theme":
       return {
         type,
         protocolVersion,
         id,
         sessionId: requireField(raw, "sessionId", isString),
-        themeName: requireField(raw, "themeName", isString),
-        target,
       };
-    }
+    case "inspect_theme_ack":
+      return decodeInspectAck(raw, protocolVersion, id);
+    case "apply_theme":
+      return {
+        type,
+        protocolVersion,
+        id,
+        sessionId: requireField(raw, "sessionId", isString),
+        themeName: requireField(raw, "themeName", isNullableString),
+        expectedSetting: requireField(raw, "expectedSetting", isNullableString),
+        target: requireEnum<ApplyTarget>(raw, "target", ["global"]),
+      };
     case "apply_theme_ack":
       return decodeApplyAck(raw, protocolVersion, id);
     case "protocol_error": {
-      const code = requireField(raw, "code", isString) as ProtocolErrorCode;
+      const code = requireEnum<ProtocolErrorCode>(raw, "code", [
+        "malformed_frame",
+        "unsupported_type",
+        "unsupported_protocol_version",
+        "duplicate_request_id",
+        "unexpected_message",
+        "missing_required_field",
+        "not_registered",
+      ]);
       const requestId = raw.requestId;
       if (requestId !== undefined && !(isString(requestId) && UUID_PATTERN.test(requestId))) {
         throw new ProtocolError("malformed_frame", "Field 'requestId' is not a valid UUID.");
@@ -322,28 +402,39 @@ function decodeRegister(raw: Record<string, unknown>, protocolVersion: number, i
   };
 }
 
-function decodeApplyAck(raw: Record<string, unknown>, protocolVersion: number, id: string): ApplyThemeAckMessage {
-  const status = requireField(raw, "status", isString) as ApplyStatus;
-  const requestedSetting = requireField(raw, "requestedSetting", isString);
-  const effectiveSetting = isString(raw.effectiveSetting) ? raw.effectiveSetting : undefined;
+function decodeInspectAck(
+  raw: Record<string, unknown>,
+  protocolVersion: number,
+  id: string,
+): InspectThemeAckMessage {
+  const configuredSetting = optionalNullableString(raw, "configuredSetting");
+  const effectiveSetting = optionalNullableString(raw, "effectiveSetting");
+  return {
+    type: "inspect_theme_ack",
+    protocolVersion,
+    id,
+    ...(configuredSetting !== undefined ? { configuredSetting } : {}),
+    ...(effectiveSetting !== undefined ? { effectiveSetting } : {}),
+    overrides: decodeOverrides(raw),
+  };
+}
 
-  const overrides: OverrideEntry[] = [];
-  const overridesRaw = raw.overrides;
-  if (overridesRaw !== undefined) {
-    if (!Array.isArray(overridesRaw)) {
-      throw new ProtocolError("malformed_frame", "Field 'overrides' must be an array.");
-    }
-    for (const entry of overridesRaw) {
-      if (!isObject(entry)) {
-        throw new ProtocolError("malformed_frame", "Override entry must be an object.");
-      }
-      overrides.push({
-        scope: requireField(entry, "scope", isString) as OverrideScope,
-        folder: isString(entry.folder) ? entry.folder : undefined,
-        value: requireField(entry, "value", isString),
-      });
-    }
-  }
+function decodeApplyAck(
+  raw: Record<string, unknown>,
+  protocolVersion: number,
+  id: string,
+): ApplyThemeAckMessage {
+  const status = requireEnum<ApplyStatus>(raw, "status", [
+    "applied",
+    "overridden",
+    "unsupported_theme",
+    "conflicted",
+    "failed",
+  ]);
+  const requestedSetting = requireField(raw, "requestedSetting", isNullableString);
+  const previousSetting = optionalNullableString(raw, "previousSetting");
+  const configuredSetting = optionalNullableString(raw, "configuredSetting");
+  const effectiveSetting = optionalNullableString(raw, "effectiveSetting");
 
   const failureRaw = raw.failure;
   let failure: ApplyFailure | undefined;
@@ -356,6 +447,18 @@ function decodeApplyAck(raw: Record<string, unknown>, protocolVersion: number, i
       message: requireField(failureRaw, "message", isString),
     };
   }
+  if (status === "failed" && failure === undefined) {
+    throw new ProtocolError(
+      "missing_required_field",
+      "Required field 'failure' is missing for a failed apply acknowledgement.",
+    );
+  }
+  if (status !== "failed" && failure !== undefined) {
+    throw new ProtocolError(
+      "malformed_frame",
+      "Field 'failure' is only valid for a failed apply acknowledgement.",
+    );
+  }
 
   return {
     type: "apply_theme_ack",
@@ -363,8 +466,35 @@ function decodeApplyAck(raw: Record<string, unknown>, protocolVersion: number, i
     id,
     status,
     requestedSetting,
+    ...(previousSetting !== undefined ? { previousSetting } : {}),
+    ...(configuredSetting !== undefined ? { configuredSetting } : {}),
     ...(effectiveSetting !== undefined ? { effectiveSetting } : {}),
-    overrides,
+    overrides: decodeOverrides(raw),
     ...(failure !== undefined ? { failure } : {}),
   };
+}
+
+function decodeOverrides(raw: Record<string, unknown>): OverrideEntry[] {
+  const overridesRaw = raw.overrides;
+  if (overridesRaw === undefined) {
+    throw new ProtocolError("missing_required_field", "Required field 'overrides' is missing.");
+  }
+  if (!Array.isArray(overridesRaw)) {
+    throw new ProtocolError("malformed_frame", "Field 'overrides' must be an array.");
+  }
+
+  return overridesRaw.map((entry) => {
+    if (!isObject(entry)) {
+      throw new ProtocolError("malformed_frame", "Override entry must be an object.");
+    }
+    const folder = entry.folder;
+    if (folder !== undefined && !isString(folder)) {
+      throw new ProtocolError("malformed_frame", "Field 'folder' has an unexpected type.");
+    }
+    return {
+      scope: requireEnum<OverrideScope>(entry, "scope", ["workspace", "workspaceFolder", "remote"]),
+      ...(folder !== undefined ? { folder } : {}),
+      value: requireField(entry, "value", isString),
+    };
+  });
 }

@@ -59,6 +59,206 @@ public enum VSCodeConnectionAdapterError: Error, Equatable, Sendable, Capability
     }
 }
 
+public enum VSCodeThemeAdapterError: Error, Equatable, Sendable, CapabilityOutcomeError {
+    case notConnected
+    case malformedThemeArtifact
+    case malformedPlan
+    case requestFailed(VSCodeCompanionRequestError)
+    case unsupportedTheme(String)
+    case updateFailed(code: String, message: String)
+    case externalSettingChanged
+
+    public var capabilityConfigurationState: ConfigurationState {
+        switch self {
+        case .externalSettingChanged, .requestFailed(.staleRequest):
+            .conflicted
+        case .notConnected, .unsupportedTheme:
+            .unavailable
+        case .malformedThemeArtifact, .malformedPlan, .requestFailed, .updateFailed:
+            .failed
+        }
+    }
+
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+
+    public var capabilityOutcomeDetail: String {
+        switch self {
+        case .notConnected:
+            "The intended VS Code Target Instance is not connected."
+        case .malformedThemeArtifact:
+            "The prepared VS Code theme identity is missing or malformed."
+        case .malformedPlan:
+            "The VS Code theme plan or receipt is malformed or incompatible."
+        case .requestFailed(let error):
+            switch error {
+            case .timeout:
+                "The VS Code companion request timed out. The setting will be inspected before another mutation."
+            case .disconnected, .targetUnavailable, .notRunning:
+                "The intended VS Code companion disconnected before acknowledging the request."
+            case .staleRequest:
+                "VS Code rejected a stale theme request because its configured theme changed."
+            case .duplicateRequest:
+                "VS Code rejected a duplicate companion request identifier."
+            case .unsupportedProtocol:
+                "The VS Code companion rejected the request protocol version."
+            case .malformedAcknowledgement:
+                "The VS Code companion returned a malformed or mismatched acknowledgement."
+            }
+        case .unsupportedTheme(let name):
+            "VS Code does not have the requested theme installed: \(name)."
+        case .updateFailed(let code, let message):
+            "VS Code could not update its theme (\(code)): \(message)"
+        case .externalSettingChanged:
+            "VS Code's configured theme changed outside Oh My Theme; the update was refused."
+        }
+    }
+}
+
+public struct VSCodeTokenColor: Codable, Equatable, Sendable {
+    public let scopes: [String]
+    public let foreground: String
+
+    public init(scopes: [String], foreground: String) {
+        self.scopes = scopes
+        self.foreground = foreground
+    }
+}
+
+public struct VSCodeThemeArtifact: Codable, Equatable, Sendable {
+    public let themeName: String
+    public let uiTheme: String?
+    public let colors: [String: String]
+    public let tokenColors: [VSCodeTokenColor]
+
+    public init(
+        themeName: String,
+        uiTheme: String? = nil,
+        colors: [String: String] = [:],
+        tokenColors: [VSCodeTokenColor] = []
+    ) {
+        self.themeName = themeName
+        self.uiTheme = uiTheme
+        self.colors = colors
+        self.tokenColors = tokenColors
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case themeName
+        case uiTheme
+        case colors
+        case tokenColors
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            themeName: try container.decode(String.self, forKey: .themeName),
+            uiTheme: try container.decodeIfPresent(String.self, forKey: .uiTheme),
+            colors: try container.decodeIfPresent([String: String].self, forKey: .colors) ?? [:],
+            tokenColors: try container.decodeIfPresent([VSCodeTokenColor].self, forKey: .tokenColors) ?? []
+        )
+    }
+}
+
+public struct VSCodeThemeIdentity: Codable, Equatable, Sendable {
+    public let variantID: String
+    public let displayName: String
+    public let sourceType: ThemeSourceKind
+    public let sourceRevision: String
+    public let contentDigest: String
+
+    public init(
+        variantID: String,
+        displayName: String,
+        sourceType: ThemeSourceKind,
+        sourceRevision: String,
+        contentDigest: String
+    ) {
+        self.variantID = variantID
+        self.displayName = displayName
+        self.sourceType = sourceType
+        self.sourceRevision = sourceRevision
+        self.contentDigest = contentDigest
+    }
+}
+
+public struct VSCodeThemePlanPayload: Codable, Equatable, Sendable {
+    public let theme: VSCodeThemeIdentity
+    public let artifact: VSCodeThemeArtifact
+    public let request: VSCodeCompanionThemeRequest
+    public let expectation: VSCodeRegistrationExpectation
+    public let serverSessionID: String
+
+    public init(
+        theme: VSCodeThemeIdentity,
+        artifact: VSCodeThemeArtifact,
+        request: VSCodeCompanionThemeRequest,
+        expectation: VSCodeRegistrationExpectation,
+        serverSessionID: String
+    ) {
+        self.theme = theme
+        self.artifact = artifact
+        self.request = request
+        self.expectation = expectation
+        self.serverSessionID = serverSessionID
+    }
+}
+
+public struct VSCodeThemeReceipt: Codable, Equatable, Sendable {
+    public let request: VSCodeCompanionThemeRequest
+    public let acknowledgement: CompanionApplyThemeAckMessage?
+    public let recoveryInspection: CompanionThemeInspection?
+
+    public init(
+        request: VSCodeCompanionThemeRequest,
+        acknowledgement: CompanionApplyThemeAckMessage?,
+        recoveryInspection: CompanionThemeInspection? = nil
+    ) {
+        self.request = request
+        self.acknowledgement = acknowledgement
+        self.recoveryInspection = recoveryInspection
+    }
+}
+
+public struct VSCodeRollbackNotStarted: RollbackMutationNotStartedError, CapabilityOutcomeError,
+    Equatable, Sendable
+{
+    public let cause: VSCodeThemeAdapterError
+
+    public init(cause: VSCodeThemeAdapterError) {
+        self.cause = cause
+    }
+
+    public var capabilityConfigurationState: ConfigurationState {
+        cause.capabilityConfigurationState
+    }
+    public var capabilityActivationReach: ActivationReach {
+        cause.capabilityActivationReach
+    }
+    public var capabilityOutcomeDetail: String {
+        cause.capabilityOutcomeDetail
+    }
+}
+
+public struct VSCodeThemeRecoveryRequired: MutationRecoveryRequiredError, Equatable, Sendable {
+    public let targetInstanceID: TargetInstanceID
+    public let requestError: VSCodeCompanionRequestError
+
+    public init(
+        targetInstanceID: TargetInstanceID,
+        requestError: VSCodeCompanionRequestError
+    ) {
+        self.targetInstanceID = targetInstanceID
+        self.requestError = requestError
+    }
+
+    public var capabilityConfigurationState: ConfigurationState { .failed }
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+    public var capabilityOutcomeDetail: String {
+        "The VS Code companion request ended without a trustworthy acknowledgement. The configured theme must be reconciled before another mutation."
+    }
+}
+
 public struct VSCodeSetupRecoveryRequired: MutationRecoveryRequiredError, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
 
@@ -136,12 +336,14 @@ public struct VSCodeDisconnectPayload: Codable, Equatable, Sendable {
     }
 }
 
-/// Owns approval, pinned companion installation, authenticated registration
-/// matching, and safe setup recovery for one VS Code profile/window Target Instance.
-/// Theme apply is intentionally left to issue #20.
-public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter {
+/// Owns setup, authenticated registration matching, guarded theme updates,
+/// acknowledgement receipts, recovery, and Undo for one VS Code Target Instance.
+public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableApplyAdapter,
+    RecoverableRollbackAdapter
+{
     public let id = "vscode"
     public let version = "1.0.0"
+    public let payloadVersion = "1"
 
     public static let socketBehavior =
         "The companion connects outward to an app-owned per-user Unix-domain socket using a per-launch nonce; no TCP listener or custom URI carries theme changes."
@@ -179,6 +381,348 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter {
             let process = expectation.windowID ?? expectation.processID.map(String.init) ?? "unknown-window"
             return TargetInstanceID(
                 rawValue: "vscode:\(expectation.edition.rawValue):window:\(profile):\(process)"
+            )
+        }
+    }
+
+    // MARK: - Theme apply
+
+    public func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> AdapterPlan {
+        try await prepareApply(instance: instance, theme: theme, connectionBaseline: nil)
+    }
+
+    public func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme,
+        connectionBaseline: Data?
+    ) async throws -> AdapterPlan {
+        try validate(instance)
+        guard let connectionBaseline,
+            let baseline = try? JSONDecoder().decode(
+                VSCodeConnectionBaseline.self,
+                from: connectionBaseline
+            ),
+            baseline.installation.bundleURL == selectedBundleURL,
+            baseline.profileName == selectedProfileName,
+            baseline.extensionID == artifact.extensionID
+        else {
+            throw VSCodeThemeAdapterError.notConnected
+        }
+        guard let registration = await platform.registration(matching: expectedRegistration) else {
+            throw VSCodeThemeAdapterError.notConnected
+        }
+        let inspection: CompanionThemeInspection
+        do {
+            inspection = try await platform.inspectTheme(
+                serverSessionID: registration.serverSessionID,
+                matching: expectedRegistration
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            throw VSCodeThemeAdapterError.requestFailed(error)
+        }
+        let themeArtifact: VSCodeThemeArtifact
+        if let upstreamArtifact = theme.upstreamArtifact {
+            guard let pinned = try? JSONDecoder().decode(
+                VSCodeThemeArtifact.self,
+                from: upstreamArtifact
+            ), !pinned.themeName.isEmpty else {
+                throw VSCodeThemeAdapterError.malformedThemeArtifact
+            }
+            themeArtifact = pinned
+        } else {
+            themeArtifact = try compileGeneratedTheme(theme)
+        }
+        let themeName = themeArtifact.themeName
+        let identity = VSCodeThemeIdentity(
+            variantID: theme.variantID,
+            displayName: themeName,
+            sourceType: theme.sourceType,
+            sourceRevision: theme.sourceRevision,
+            contentDigest: theme.contentDigest
+        )
+        let request = VSCodeCompanionThemeRequest(
+            protocolVersion: CompanionProtocol.currentVersion,
+            themeName: themeName,
+            expectedSetting: inspection.configuredSetting,
+            target: .global
+        )
+        let payload = VSCodeThemePlanPayload(
+            theme: identity,
+            artifact: themeArtifact,
+            request: request,
+            expectation: expectedRegistration,
+            serverSessionID: registration.serverSessionID
+        )
+        let payloadData = try encode(payload)
+        return AdapterPlan(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            adapterVersion: version,
+            capabilityID: "colorTheme",
+            payload: AdapterPayloadEnvelope(
+                adapterID: id,
+                adapterVersion: version,
+                payloadVersion: payloadVersion,
+                payload: payloadData
+            ),
+            intendedChangeDigest: digest(of: payloadData),
+            capturedPreChangeState: try encode(inspection),
+            staleStateToken: digest(of: try encode(inspection)),
+            expectedSideEffects: [
+                "Update workbench.colorTheme in the selected VS Code profile through the pinned companion.",
+                identityDescription(expectedRegistration),
+            ],
+            sourceType: theme.sourceType,
+            sourceRevision: theme.sourceRevision,
+            activationReach: .currentInstances
+        )
+    }
+
+    public func revalidateApply(plan: AdapterPlan) async throws {
+        let payload = try themePayload(from: plan)
+        let current: CompanionThemeInspection
+        do {
+            current = try await platform.inspectTheme(
+                serverSessionID: payload.serverSessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            throw VSCodeThemeAdapterError.requestFailed(error)
+        }
+        guard current.configuredSetting == payload.request.expectedSetting else {
+            throw WriteBoundaryConflict(
+                targetInstanceID: plan.targetInstanceID,
+                detail: "VS Code's configured theme changed after the preview was prepared."
+            )
+        }
+    }
+
+    public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
+        try await revalidateApply(plan: plan)
+        let payload = try themePayload(from: plan)
+        let outcome: CompanionApplyOutcome
+        do {
+            outcome = try await platform.applyTheme(
+                payload.request,
+                serverSessionID: payload.serverSessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            switch error {
+            case .timeout, .disconnected, .duplicateRequest, .malformedAcknowledgement,
+                .targetUnavailable, .notRunning:
+                throw VSCodeThemeRecoveryRequired(
+                    targetInstanceID: plan.targetInstanceID,
+                    requestError: error
+                )
+            case .staleRequest, .unsupportedProtocol:
+                throw VSCodeThemeAdapterError.requestFailed(error)
+            }
+        }
+        guard outcome.sessionID == payload.serverSessionID else {
+            throw VSCodeThemeRecoveryRequired(
+                targetInstanceID: plan.targetInstanceID,
+                requestError: .malformedAcknowledgement
+            )
+        }
+        do {
+            return try receipt(
+                for: payload.request,
+                acknowledgement: outcome.acknowledgement
+            )
+        } catch VSCodeThemeAdapterError.requestFailed(.malformedAcknowledgement) {
+            throw VSCodeThemeRecoveryRequired(
+                targetInstanceID: plan.targetInstanceID,
+                requestError: .malformedAcknowledgement
+            )
+        } catch VSCodeThemeAdapterError.updateFailed {
+            // VS Code may throw or fail verification after changing the setting.
+            // Inspection must classify the external state before this operation ends.
+            throw VSCodeThemeRecoveryRequired(
+                targetInstanceID: plan.targetInstanceID,
+                requestError: .malformedAcknowledgement
+            )
+        }
+    }
+
+    public func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification {
+        let payload = try themePayload(from: plan)
+        let before = try decodeInspection(plan.capturedPreChangeState)
+        let recoverySessionID = try await registeredSessionID(for: payload.expectation)
+        let current: CompanionThemeInspection
+        do {
+            current = try await platform.inspectTheme(
+                serverSessionID: recoverySessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            throw VSCodeThemeAdapterError.requestFailed(error)
+        }
+        if current.configuredSetting == payload.request.themeName {
+            return .intendedAfterChange
+        }
+        if current.configuredSetting == before.configuredSetting {
+            return .beforeChange
+        }
+        return .conflicting
+    }
+
+    public func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt {
+        let payload = try themePayload(from: plan)
+        let before = try decodeInspection(plan.capturedPreChangeState)
+        let recoverySessionID = try await registeredSessionID(for: payload.expectation)
+        let current: CompanionThemeInspection
+        do {
+            current = try await platform.inspectTheme(
+                serverSessionID: recoverySessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            throw VSCodeThemeAdapterError.requestFailed(error)
+        }
+        guard current.configuredSetting == payload.request.themeName else {
+            throw VSCodeThemeAdapterError.externalSettingChanged
+        }
+        return AdapterReceipt(
+            configurationState: before.configuredSetting == current.configuredSetting
+                ? .unchanged : .updated,
+            runningInstanceReach: current.effectiveSetting == payload.request.themeName
+                ? .currentInstances : .unavailable,
+            detail: current.effectiveSetting == payload.request.themeName
+                ? "Recovered the acknowledged VS Code theme state by inspection."
+                : overrideDetail(current.overrides),
+            rollbackData: try encode(
+                VSCodeThemeReceipt(
+                    request: payload.request,
+                    acknowledgement: nil,
+                    recoveryInspection: current
+                )
+            )
+        )
+    }
+
+    public func rollbackApply(plan: AdapterPlan, receipt: AdapterReceipt) async throws {
+        _ = try await rollbackApplyWithReceipt(plan: plan, receipt: receipt)
+    }
+
+    public func recoverRollbackReceipt(
+        plan: AdapterPlan,
+        originalReceipt: AdapterReceipt
+    ) async throws -> AdapterReceipt {
+        let payload = try themePayload(from: plan)
+        let before = try decodeInspection(plan.capturedPreChangeState)
+        _ = try validateOriginalReceipt(originalReceipt, for: payload)
+        let recoverySessionID = try await registeredSessionID(for: payload.expectation)
+        let current: CompanionThemeInspection
+        do {
+            current = try await platform.inspectTheme(
+                serverSessionID: recoverySessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            throw VSCodeThemeAdapterError.requestFailed(error)
+        }
+        guard current.configuredSetting == before.configuredSetting else {
+            throw VSCodeThemeAdapterError.externalSettingChanged
+        }
+        let undoRequest = VSCodeCompanionThemeRequest(
+            protocolVersion: payload.request.protocolVersion,
+            themeName: before.configuredSetting,
+            expectedSetting: payload.request.themeName,
+            target: payload.request.target
+        )
+        let active = before.configuredSetting == nil
+            ? current.overrides.isEmpty
+            : current.effectiveSetting == before.configuredSetting
+        return AdapterReceipt(
+            configurationState: .updated,
+            runningInstanceReach: active ? .currentInstances : .unavailable,
+            detail: active
+                ? "Recovered the completed VS Code Undo by inspection."
+                : overrideDetail(current.overrides),
+            rollbackData: try encode(
+                VSCodeThemeReceipt(
+                    request: undoRequest,
+                    acknowledgement: nil,
+                    recoveryInspection: current
+                )
+            )
+        )
+    }
+
+    public func rollbackApplyWithReceipt(
+        plan: AdapterPlan,
+        receipt: AdapterReceipt
+    ) async throws -> AdapterReceipt {
+        let payload = try themePayload(from: plan)
+        let before = try decodeInspection(plan.capturedPreChangeState)
+        _ = try validateOriginalReceipt(receipt, for: payload)
+        let undoSessionID: String
+        do {
+            undoSessionID = try await registeredSessionID(for: payload.expectation)
+        } catch let error as VSCodeThemeAdapterError {
+            throw VSCodeRollbackNotStarted(cause: error)
+        }
+        let current: CompanionThemeInspection
+        do {
+            current = try await platform.inspectTheme(
+                serverSessionID: undoSessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            throw VSCodeRollbackNotStarted(cause: .requestFailed(error))
+        }
+        guard current.configuredSetting == payload.request.themeName else {
+            throw VSCodeThemeAdapterError.externalSettingChanged
+        }
+        let undoRequest = VSCodeCompanionThemeRequest(
+            protocolVersion: payload.request.protocolVersion,
+            themeName: before.configuredSetting,
+            expectedSetting: payload.request.themeName,
+            target: payload.request.target
+        )
+        let outcome: CompanionApplyOutcome
+        do {
+            outcome = try await platform.applyTheme(
+                undoRequest,
+                serverSessionID: undoSessionID,
+                matching: payload.expectation
+            )
+        } catch let error as VSCodeCompanionRequestError {
+            switch error {
+            case .timeout, .disconnected, .duplicateRequest, .malformedAcknowledgement,
+                .targetUnavailable, .notRunning:
+                throw VSCodeThemeRecoveryRequired(
+                    targetInstanceID: plan.targetInstanceID,
+                    requestError: error
+                )
+            case .staleRequest, .unsupportedProtocol:
+                throw VSCodeThemeAdapterError.requestFailed(error)
+            }
+        }
+        guard outcome.sessionID == undoSessionID else {
+            throw VSCodeThemeRecoveryRequired(
+                targetInstanceID: plan.targetInstanceID,
+                requestError: .malformedAcknowledgement
+            )
+        }
+        do {
+            return try self.receipt(
+                for: undoRequest,
+                acknowledgement: outcome.acknowledgement
+            )
+        } catch VSCodeThemeAdapterError.requestFailed(.malformedAcknowledgement) {
+            throw VSCodeThemeRecoveryRequired(
+                targetInstanceID: plan.targetInstanceID,
+                requestError: .malformedAcknowledgement
+            )
+        } catch VSCodeThemeAdapterError.updateFailed {
+            throw VSCodeThemeRecoveryRequired(
+                targetInstanceID: plan.targetInstanceID,
+                requestError: .malformedAcknowledgement
             )
         }
     }
@@ -512,6 +1056,210 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter {
     }
 
     // MARK: - Helpers
+
+    private func validateOriginalReceipt(
+        _ receipt: AdapterReceipt,
+        for payload: VSCodeThemePlanPayload
+    ) throws -> VSCodeThemeReceipt {
+        guard let rollbackData = receipt.rollbackData,
+            let details = try? JSONDecoder().decode(
+                VSCodeThemeReceipt.self,
+                from: rollbackData
+            ),
+            details.request == payload.request
+        else {
+            throw VSCodeThemeAdapterError.malformedPlan
+        }
+        if let acknowledgement = details.acknowledgement {
+            guard acknowledgement.protocolVersion == payload.request.protocolVersion,
+                acknowledgement.requestedSetting == payload.request.themeName,
+                acknowledgement.configuredSetting == payload.request.themeName
+            else {
+                throw VSCodeThemeAdapterError.malformedPlan
+            }
+        } else if let inspection = details.recoveryInspection {
+            guard inspection.configuredSetting == payload.request.themeName else {
+                throw VSCodeThemeAdapterError.malformedPlan
+            }
+        } else {
+            throw VSCodeThemeAdapterError.malformedPlan
+        }
+        return details
+    }
+
+    private func registeredSessionID(
+        for expectation: VSCodeRegistrationExpectation
+    ) async throws -> String {
+        guard let registration = await platform.registration(matching: expectation) else {
+            throw VSCodeThemeAdapterError.notConnected
+        }
+        return registration.serverSessionID
+    }
+
+    private func themePayload(from plan: AdapterPlan) throws -> VSCodeThemePlanPayload {
+        guard plan.adapterID == id,
+            plan.adapterVersion == version,
+            plan.payload.adapterID == id,
+            plan.payload.adapterVersion == version,
+            plan.payload.payloadVersion == payloadVersion,
+            plan.targetInstanceID == Self.targetInstanceID(for: expectedRegistration),
+            let payload = try? JSONDecoder().decode(
+                VSCodeThemePlanPayload.self,
+                from: plan.payload.payload
+            ),
+            payload.expectation == expectedRegistration,
+            payload.request.protocolVersion == CompanionProtocol.currentVersion,
+            payload.request.target == .global,
+            payload.request.themeName == payload.theme.displayName,
+            payload.artifact.themeName == payload.request.themeName,
+            plan.sourceType == payload.theme.sourceType,
+            plan.sourceRevision == payload.theme.sourceRevision
+        else {
+            throw VSCodeThemeAdapterError.malformedPlan
+        }
+        return payload
+    }
+
+    private func compileGeneratedTheme(_ theme: PreparedTheme) throws -> VSCodeThemeArtifact {
+        let packID = theme.variantID.split(separator: "/").first.map(String.init) ?? "oh-my-theme"
+        let packName = packID.split(separator: "-")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+        let name = "\(packName) \(theme.variant.displayName)"
+        let roles = theme.variant.roles
+        func color(_ role: SemanticRole) throws -> String {
+            guard let value = roles[role]?.rawValue else {
+                throw VSCodeThemeAdapterError.malformedThemeArtifact
+            }
+            return value
+        }
+        return try VSCodeThemeArtifact(
+            themeName: name,
+            uiTheme: theme.variant.appearance == .dark ? "vs-dark" : "vs",
+            colors: [
+                "activityBar.background": color(.canvas),
+                "activityBar.foreground": color(.primaryText),
+                "editor.background": color(.canvas),
+                "editor.foreground": color(.primaryText),
+                "editor.selectionBackground": color(.selection),
+                "editorLineNumber.foreground": color(.overlay),
+                "sideBar.background": color(.surface),
+                "sideBar.foreground": color(.secondaryText),
+                "statusBar.background": color(.surface),
+                "statusBar.foreground": color(.primaryText),
+                "terminal.ansiBlack": color(.ansiBlack),
+                "terminal.ansiBlue": color(.ansiBlue),
+                "terminal.ansiCyan": color(.ansiCyan),
+                "terminal.ansiGreen": color(.ansiGreen),
+                "terminal.ansiMagenta": color(.ansiMagenta),
+                "terminal.ansiRed": color(.ansiRed),
+                "terminal.ansiWhite": color(.ansiWhite),
+                "terminal.ansiYellow": color(.ansiYellow),
+            ],
+            tokenColors: [
+                VSCodeTokenColor(
+                    scopes: ["comment", "punctuation.definition.comment"],
+                    foreground: color(.syntaxComment)
+                ),
+                VSCodeTokenColor(
+                    scopes: ["keyword", "storage", "storage.type"],
+                    foreground: color(.syntaxKeyword)
+                ),
+                VSCodeTokenColor(
+                    scopes: ["string", "constant.other.symbol"],
+                    foreground: color(.syntaxString)
+                ),
+            ]
+        )
+    }
+
+    private func decodeInspection(_ data: Data?) throws -> CompanionThemeInspection {
+        guard let data,
+            let inspection = try? JSONDecoder().decode(CompanionThemeInspection.self, from: data)
+        else {
+            throw VSCodeThemeAdapterError.malformedPlan
+        }
+        return inspection
+    }
+
+    private func receipt(
+        for request: VSCodeCompanionThemeRequest,
+        acknowledgement: CompanionApplyThemeAckMessage
+    ) throws -> AdapterReceipt {
+        guard acknowledgement.protocolVersion == request.protocolVersion,
+            acknowledgement.requestedSetting == request.themeName
+        else {
+            throw VSCodeThemeAdapterError.requestFailed(.malformedAcknowledgement)
+        }
+        let state: ConfigurationState
+        let reach: ActivationReach
+        let detail: String
+        switch acknowledgement.status {
+        case .applied:
+            guard acknowledgement.configuredSetting == request.themeName,
+                acknowledgement.previousSetting == request.expectedSetting,
+                request.themeName == nil || acknowledgement.effectiveSetting == request.themeName
+            else {
+                throw VSCodeThemeAdapterError.requestFailed(.malformedAcknowledgement)
+            }
+            state = acknowledgement.previousSetting == request.themeName ? .unchanged : .updated
+            reach = .currentInstances
+            detail = "VS Code applied \(displaySetting(request.themeName)) in the intended profile/window."
+        case .overridden:
+            guard acknowledgement.configuredSetting == request.themeName,
+                acknowledgement.previousSetting == request.expectedSetting,
+                !acknowledgement.overrides.isEmpty
+            else {
+                throw VSCodeThemeAdapterError.requestFailed(.malformedAcknowledgement)
+            }
+            state = acknowledgement.previousSetting == request.themeName ? .unchanged : .updated
+            reach = .unavailable
+            detail = overrideDetail(acknowledgement.overrides)
+        case .conflicted:
+            throw VSCodeThemeAdapterError.externalSettingChanged
+        case .unsupportedTheme:
+            throw VSCodeThemeAdapterError.unsupportedTheme(
+                request.themeName ?? "the default theme"
+            )
+        case .failed:
+            guard let failure = acknowledgement.failure else {
+                throw VSCodeThemeAdapterError.requestFailed(.malformedAcknowledgement)
+            }
+            throw VSCodeThemeAdapterError.updateFailed(
+                code: failure.code,
+                message: failure.message
+            )
+        }
+        return AdapterReceipt(
+            configurationState: state,
+            runningInstanceReach: reach,
+            detail: detail,
+            rollbackData: try encode(
+                VSCodeThemeReceipt(
+                    request: request,
+                    acknowledgement: acknowledgement
+                )
+            )
+        )
+    }
+
+    private func overrideDetail(_ overrides: [CompanionOverride]) -> String {
+        guard !overrides.isEmpty else {
+            return "VS Code stored the requested profile theme, but it is not active in the intended window."
+        }
+        let scopes = overrides.map { override in
+            switch override.scope {
+            case .workspace: "workspace"
+            case .workspaceFolder: "workspace folder"
+            case .remote: "remote window"
+            }
+        }.joined(separator: ", ")
+        return "VS Code stored the requested profile theme, but the current \(scopes) setting overrides it."
+    }
+
+    private func displaySetting(_ setting: String?) -> String {
+        setting ?? "the default color theme"
+    }
 
     private func validate(_ instance: ConnectedTargetInstance) throws {
         guard instance.adapterID == id,

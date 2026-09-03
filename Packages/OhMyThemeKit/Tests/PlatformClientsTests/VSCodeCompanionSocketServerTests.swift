@@ -24,7 +24,8 @@ struct VSCodeCompanionSocketServerTests {
             launchID: String = UUID().uuidString,
             launchNonce: String = UUID().uuidString,
             expectedPeerEUID: uid_t = geteuid(),
-            registerTimeout: TimeInterval = 5
+            registerTimeout: TimeInterval = 5,
+            requestTimeout: TimeInterval = 5
         ) throws {
             // Keep the root path short: `sun_path` is capped at 104 bytes.
             let short = "omt-\(UUID().uuidString.prefix(8))"
@@ -42,6 +43,7 @@ struct VSCodeCompanionSocketServerTests {
                     launchID: launchID,
                     launchNonce: launchNonce,
                     registerTimeout: registerTimeout,
+                    requestTimeout: requestTimeout,
                     expectedPeerEUID: expectedPeerEUID
                 )
             )
@@ -56,7 +58,7 @@ struct VSCodeCompanionSocketServerTests {
     /// Simple synchronous test client: opens the Unix-domain socket,
     /// speaks the framed protocol, and closes.
     final class TestClient {
-        let fd: Int32
+        private var fd: Int32
         private var decoder = CompanionFrameDecoder()
 
         init(socketPath: String) throws {
@@ -99,7 +101,14 @@ struct VSCodeCompanionSocketServerTests {
             self.fd = fd
         }
 
-        deinit { Darwin.close(fd) }
+        deinit { close() }
+
+        func close() {
+            guard fd >= 0 else { return }
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+            fd = -1
+        }
 
         func send(_ message: CompanionMessage) throws {
             let body = try CompanionMessageCodec.encodeBody(message)
@@ -406,6 +415,214 @@ struct VSCodeCompanionSocketServerTests {
 
     // MARK: - Reconnects
 
+    @Test("Requests route to the exact registered server session")
+    func requestsRouteToExactSession() async throws {
+        let fixture = try Fixture(launchNonce: "route-nonce")
+        try fixture.server.start()
+        defer { fixture.server.stop() }
+
+        let first = try TestClient(socketPath: fixture.paths.socketFile.path)
+        let firstAck = try register(
+            first,
+            nonce: "route-nonce",
+            profileID: "profile-1",
+            windowID: "window-1"
+        )
+        let second = try TestClient(socketPath: fixture.paths.socketFile.path)
+        let secondAck = try register(
+            second,
+            nonce: "route-nonce",
+            profileID: "profile-2",
+            windowID: "window-2"
+        )
+
+        let server = fixture.server
+        let selectedSessionID = secondAck.sessionId
+        let task = Task {
+            try await server.inspectTheme(serverSessionID: selectedSessionID)
+        }
+        guard case .inspectTheme(let request) = try second.receive() else {
+            Issue.record("expected inspect_theme on the selected session")
+            return
+        }
+        #expect(try first.receive(timeout: 0.1) == nil)
+        #expect(firstAck.sessionId != secondAck.sessionId)
+
+        try second.send(
+            .inspectThemeAck(
+                .init(
+                    protocolVersion: 1,
+                    id: request.id,
+                    configuredSetting: "Mocha",
+                    effectiveSetting: "Solarized Dark",
+                    overrides: [.init(scope: .workspace, folder: nil, value: "Solarized Dark")]
+                )
+            )
+        )
+        let inspection = try await task.value
+        #expect(inspection.configuredSetting == "Mocha")
+        #expect(inspection.effectiveSetting == "Solarized Dark")
+    }
+
+    @Test("An unanswered request fails at the configured timeout")
+    func requestTimesOut() async throws {
+        let fixture = try Fixture(launchNonce: "timeout-nonce", requestTimeout: 0.05)
+        try fixture.server.start()
+        defer { fixture.server.stop() }
+        let client = try TestClient(socketPath: fixture.paths.socketFile.path)
+        let ack = try register(client, nonce: "timeout-nonce")
+        let server = fixture.server
+        let sessionID = ack.sessionId
+
+        let task = Task {
+            try await server.inspectTheme(serverSessionID: sessionID)
+        }
+        guard case .inspectTheme(let request) = try client.receive() else {
+            Issue.record("expected inspect_theme")
+            return
+        }
+
+        do {
+            _ = try await task.value
+            Issue.record("expected timeout")
+        } catch let error as VSCodeCompanionRequestError {
+            #expect(error == .timeout)
+        }
+
+        try client.send(
+            .inspectThemeAck(
+                .init(
+                    protocolVersion: 1,
+                    id: request.id,
+                    configuredSetting: "late",
+                    effectiveSetting: "late",
+                    overrides: []
+                )
+            )
+        )
+        guard case .protocolError(let error) = try client.receive() else {
+            Issue.record("expected stale acknowledgement protocol error")
+            return
+        }
+        #expect(error.code == .unexpectedMessage)
+    }
+
+    @Test("Closing a target connection fails its pending request as disconnected")
+    func connectionCloseFailsPendingRequest() async throws {
+        let fixture = try Fixture(launchNonce: "disconnect-nonce")
+        try fixture.server.start()
+        defer { fixture.server.stop() }
+        let client = try TestClient(socketPath: fixture.paths.socketFile.path)
+        let ack = try register(client, nonce: "disconnect-nonce")
+        let server = fixture.server
+        let sessionID = ack.sessionId
+
+        let task = Task {
+            try await server.inspectTheme(serverSessionID: sessionID)
+        }
+        guard case .inspectTheme = try client.receive() else {
+            Issue.record("expected inspect_theme")
+            return
+        }
+        client.close()
+
+        do {
+            _ = try await task.value
+            Issue.record("expected disconnect")
+        } catch let error as VSCodeCompanionRequestError {
+            #expect(error == .disconnected)
+        }
+    }
+
+    @Test("A correlated peer protocol error reaches the apply caller")
+    func correlatedProtocolErrorFailsApply() async throws {
+        let fixture = try Fixture(launchNonce: "error-nonce")
+        try fixture.server.start()
+        defer { fixture.server.stop() }
+        let client = try TestClient(socketPath: fixture.paths.socketFile.path)
+        let ack = try register(client, nonce: "error-nonce")
+        let request = VSCodeCompanionThemeRequest(
+            protocolVersion: 1,
+            themeName: "Mocha",
+            expectedSetting: "Default Dark+",
+            target: .global
+        )
+        let server = fixture.server
+        let sessionID = ack.sessionId
+
+        let task = Task {
+            try await server.applyTheme(request, serverSessionID: sessionID)
+        }
+        guard case .applyTheme(let wireRequest) = try client.receive() else {
+            Issue.record("expected apply_theme")
+            return
+        }
+        try client.send(
+            .protocolError(
+                .init(
+                    protocolVersion: 1,
+                    id: UUID(),
+                    requestId: wireRequest.id,
+                    code: .duplicateRequestID,
+                    message: "duplicate"
+                )
+            )
+        )
+
+        do {
+            _ = try await task.value
+            Issue.record("expected duplicate request failure")
+        } catch let error as VSCodeCompanionRequestError {
+            #expect(error == .duplicateRequest)
+        }
+    }
+
+    @Test("A semantically mismatched apply acknowledgement is malformed")
+    func mismatchedApplyAcknowledgementIsMalformed() async throws {
+        let fixture = try Fixture(launchNonce: "mismatch-nonce")
+        try fixture.server.start()
+        defer { fixture.server.stop() }
+        let client = try TestClient(socketPath: fixture.paths.socketFile.path)
+        let ack = try register(client, nonce: "mismatch-nonce")
+        let request = VSCodeCompanionThemeRequest(
+            protocolVersion: 1,
+            themeName: "Mocha",
+            expectedSetting: "Default Dark+",
+            target: .global
+        )
+        let server = fixture.server
+        let sessionID = ack.sessionId
+
+        let task = Task {
+            try await server.applyTheme(request, serverSessionID: sessionID)
+        }
+        guard case .applyTheme(let wireRequest) = try client.receive() else {
+            Issue.record("expected apply_theme")
+            return
+        }
+        try client.send(
+            .applyThemeAck(
+                .init(
+                    protocolVersion: 1,
+                    id: wireRequest.id,
+                    status: .applied,
+                    effectiveSetting: "Other",
+                    requestedSetting: "Other",
+                    configuredSetting: "Other",
+                    overrides: [],
+                    failure: nil
+                )
+            )
+        )
+
+        do {
+            _ = try await task.value
+            Issue.record("expected malformed acknowledgement")
+        } catch let error as VSCodeCompanionRequestError {
+            #expect(error == .malformedAcknowledgement)
+        }
+    }
+
     @Test("A client can disconnect and reconnect within one launch")
     func reconnectWithinLaunch() throws {
         let fixture = try Fixture(launchNonce: "n-1")
@@ -437,5 +654,43 @@ struct VSCodeCompanionSocketServerTests {
                 return
             }
         }
+    }
+
+    private func register(
+        _ client: TestClient,
+        nonce: String,
+        profileID: String = "profile",
+        windowID: String = "window"
+    ) throws -> CompanionRegisterAckMessage {
+        try client.send(
+            .register(
+                CompanionRegisterMessage(
+                    protocolVersion: 1,
+                    id: UUID(),
+                    launchNonce: nonce,
+                    extensionVersion: "0.1.0",
+                    vscode: CompanionVSCodeIdentity(
+                        edition: "vscode",
+                        version: "1.95.2",
+                        profileName: "Default",
+                        profileId: profileID,
+                        machineId: "machine",
+                        sessionId: windowID,
+                        processId: 42,
+                        windowId: windowID
+                    ),
+                    capabilities: ["colorTheme"],
+                    currentSettings: ["workbench.colorTheme": "Default Dark+"]
+                )
+            )
+        )
+        guard case .registerAck(let acknowledgement) = try client.receive() else {
+            throw TestClientError.missingRegisterAcknowledgement
+        }
+        return acknowledgement
+    }
+
+    private enum TestClientError: Error {
+        case missingRegisterAcknowledgement
     }
 }

@@ -249,6 +249,7 @@ describe("companion client", function () {
       id: applyID,
       sessionId: "s-1",
       themeName: "Mocha",
+      expectedSetting: null,
       target: "global",
     });
 
@@ -293,15 +294,14 @@ describe("companion client", function () {
 
     let handlerCalls = 0;
     client.onMessage((message, reply) => {
-      if (message.type !== "apply_theme") return;
+      if (message.type !== "inspect_theme") return;
       handlerCalls += 1;
       reply({
-        type: "apply_theme_ack",
+        type: "inspect_theme_ack",
         protocolVersion: 1,
         id: message.id,
-        status: "applied",
-        requestedSetting: message.themeName,
-        effectiveSetting: message.themeName,
+        configuredSetting: "Mocha",
+        effectiveSetting: "Mocha",
         overrides: [],
       });
     });
@@ -319,14 +319,12 @@ describe("companion client", function () {
     });
     await connectPromise;
 
-    const applyID = randomUUID();
+    const requestID = randomUUID();
     const request: CompanionMessage = {
-      type: "apply_theme",
+      type: "inspect_theme",
       protocolVersion: 1,
-      id: applyID,
+      id: requestID,
       sessionId: "s-1",
-      themeName: "Mocha",
-      target: "global",
     };
     server.send(request);
     // Wait for the first ack.
@@ -344,7 +342,7 @@ describe("companion client", function () {
     assert.strictEqual(replay.type, "protocol_error");
     if (replay.type === "protocol_error") {
       assert.strictEqual(replay.code, "duplicate_request_id");
-      assert.strictEqual(replay.requestId, applyID);
+      assert.strictEqual(replay.requestId, requestID);
     }
     assert.strictEqual(handlerCalls, 1);
 
@@ -377,7 +375,7 @@ describe("companion client", function () {
 
     let handlerCalls = 0;
     client.onMessage((message) => {
-      if (message.type === "apply_theme") handlerCalls += 1;
+      if (message.type === "inspect_theme") handlerCalls += 1;
     });
 
     const connectPromise = client.connect();
@@ -394,12 +392,10 @@ describe("companion client", function () {
     await connectPromise;
 
     server.send({
-      type: "apply_theme",
+      type: "inspect_theme",
       protocolVersion: 2, // differs from negotiated 1
       id: randomUUID(),
       sessionId: "s-1",
-      themeName: "Mocha",
-      target: "global",
     });
 
     // Wait for the protocol_error reply.

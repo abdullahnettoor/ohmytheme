@@ -137,6 +137,39 @@ identifier the app assigns to this connection.
 
 The server closes the connection after sending `register_rejected`.
 
+### `inspect_theme` (app → extension)
+
+```json
+{
+  "protocolVersion": 1,
+  "type": "inspect_theme",
+  "id": "…",
+  "sessionId": "…"
+}
+```
+
+The app uses inspection during preparation and recovery. The request is read-only
+and addresses the exact registered server session selected for the Target Instance.
+
+### `inspect_theme_ack` (extension → app)
+
+```json
+{
+  "protocolVersion": 1,
+  "type": "inspect_theme_ack",
+  "id": "…",
+  "configuredSetting": "Default Dark+",
+  "effectiveSetting": "Some Workspace Theme",
+  "overrides": [
+    { "scope": "workspace", "value": "Some Workspace Theme" }
+  ]
+}
+```
+
+`configuredSetting` is the profile-level global value. It may be absent when the
+profile inherits VS Code's default. `effectiveSetting` is the value active in the
+current extension instance after narrower scopes have been resolved.
+
 ### `apply_theme` (app → extension)
 
 ```json
@@ -146,14 +179,17 @@ The server closes the connection after sending `register_rejected`.
   "id": "…",
   "sessionId": "…",
   "themeName": "Catppuccin Mocha",
+  "expectedSetting": "Default Dark+",
   "target": "global"
 }
 ```
 
-The extension MUST apply the theme through
-`WorkspaceConfiguration.update` in the requested target and then verify
-the effective setting before acknowledging. Only the `global` target is
-supported in this proof.
+The extension compares the current profile-level setting with `expectedSetting`
+immediately before mutation. A mismatch returns `conflicted` without writing. On a
+match, the extension applies through `WorkspaceConfiguration.update`, then verifies
+both the configured global value and the effective setting before acknowledging.
+Only the `global` target is supported. `themeName: null` removes the global setting;
+Undo uses this when the setting did not exist before Apply.
 
 ### `apply_theme_ack` (extension → app)
 
@@ -162,11 +198,13 @@ supported in this proof.
   "protocolVersion": 1,
   "type": "apply_theme_ack",
   "id": "…",
-  "status": "applied" | "overridden" | "unsupported_theme" | "failed",
-  "effectiveSetting": "Catppuccin Mocha",
+  "status": "applied" | "overridden" | "unsupported_theme" | "conflicted" | "failed",
+  "previousSetting": "Default Dark+",
+  "configuredSetting": "Catppuccin Mocha",
+  "effectiveSetting": "Some Workspace Theme",
   "requestedSetting": "Catppuccin Mocha",
   "overrides": [
-    { "scope": "workspace", "value": "Some Other Theme" },
+    { "scope": "workspace", "value": "Some Workspace Theme" },
     { "scope": "workspaceFolder", "folder": "…", "value": "…" }
   ],
   "failure": {
@@ -176,9 +214,11 @@ supported in this proof.
 }
 ```
 
-`id` copies the request `id`. `overrides` is present when the global
-setting was applied but a workspace, workspace-folder, or remote scope
-overrides it. `failure` is present only when `status` is `failed`.
+`id` copies the request `id`. `previousSetting` is the value that matched the
+request's guard. `configuredSetting` is the value read back at global scope after
+the update. `overrides` records workspace, workspace-folder, or remote values that
+prevent the requested profile setting from being active in this extension instance.
+`failure` is present only when `status` is `failed`.
 
 ### `protocol_error` (either side)
 
@@ -233,9 +273,9 @@ the identifier of the offending message so the sender can correlate.
    bounded timeout (five seconds). A connection that does not register
    in time is closed.
 4. Server replies `register_ack` or `register_rejected`.
-5. Server may send zero or more `apply_theme` requests. The extension
-   replies with `apply_theme_ack` for each and never initiates an
-   `apply_theme` itself.
+5. Server may send zero or more `inspect_theme` and `apply_theme` requests.
+   The extension replies with the matching acknowledgement for each and never
+   initiates either request itself.
 6. Either side may close the connection cleanly. A closed connection
    discards its request-id history; the next connection starts fresh.
 7. While the extension remains active, it retries the rendezvous periodically.
@@ -247,5 +287,6 @@ the identifier of the offending message so the sender can correlate.
 - Reading and writing settings other than `workbench.colorTheme`.
 - Applying themes at workspace, folder, or remote scope.
 - Distributing the extension outside a locally installed `.vsix`.
-- Reconnect state coordination across launches (the launch nonce
-  intentionally prevents cross-launch reuse).
+- Replaying an unacknowledged wire request across launches. The launch nonce
+  prevents cross-launch reuse; the app reconciles durable intent through a fresh
+  registration and read-only `inspect_theme` request.

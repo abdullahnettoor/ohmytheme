@@ -21,9 +21,8 @@ import { ThemeService } from "../../../themeService";
  * the extension:
  *
  *  - registers with its VS Code identity and current settings;
- *  - accepts an `apply_theme` request;
- *  - answers with an ack whose `effectiveSetting` matches what VS
- *    Code actually has after the update.
+ *  - accepts inspect and guarded `apply_theme` requests;
+ *  - acknowledges a guarded Undo and restores the configured global value.
  *
  * This is the acceptance-criteria "extension-host test in a real
  * supported VS Code host".
@@ -63,7 +62,7 @@ function makeStubServer(socketPath: string) {
 }
 
 describe("Companion extension host tests", () => {
-  it("registers and applies a theme through WorkspaceConfiguration", async function () {
+  it("inspects, applies, and performs a guarded Undo", async function () {
     this.timeout(20_000);
     const testRoot =
       process.env.OMT_TEST_ROOT ?? (await fs.mkdtemp(path.join(os.tmpdir(), "omt-host-")));
@@ -91,6 +90,7 @@ describe("Companion extension host tests", () => {
     await fs.writeFile(rendezvousPath, JSON.stringify(rendezvous), { mode: 0o600 });
 
     const service = new ThemeService();
+    const originalConfiguredSetting = service.inspect().configuredSetting ?? null;
     // Kick off connect without awaiting: it can only complete once the
     // stub responds with register_ack.
     const clientPromise = connectPromise(rendezvousPath, service);
@@ -115,11 +115,28 @@ describe("Companion extension host tests", () => {
 
     const client = await clientPromise;
     try {
+      const inspectID = randomUUID();
+      stub.send({
+        type: "inspect_theme",
+        protocolVersion: 1,
+        id: inspectID,
+        sessionId: "s-1",
+      });
+      while (stub.state.received.length < 2) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const inspectAck = stub.state.received[1];
+      assert.strictEqual(inspectAck.type, "inspect_theme_ack");
+      if (inspectAck.type !== "inspect_theme_ack") return;
+      assert.strictEqual(inspectAck.id, inspectID);
+      assert.strictEqual(
+        inspectAck.configuredSetting ?? null,
+        originalConfiguredSetting,
+      );
 
-      // Pick a theme that is guaranteed to be installed in this
-      // VS Code test host. Enumerate contributed themes; fall back
-      // to `Default Dark+` if the enumeration is empty.
-      const themeName = pickInstalledTheme() ?? "Default Dark+";
+      const themeName = pickInstalledTheme(originalConfiguredSetting);
+      assert.ok(themeName, "the VS Code test host must provide an alternate installed theme");
+
       const applyID = randomUUID();
       stub.send({
         type: "apply_theme",
@@ -127,30 +144,84 @@ describe("Companion extension host tests", () => {
         id: applyID,
         sessionId: "s-1",
         themeName,
+        expectedSetting: originalConfiguredSetting,
         target: "global",
       });
 
-      // Wait for the ack.
-      while (stub.state.received.length < 2) {
+      while (stub.state.received.length < 3) {
         await new Promise((r) => setTimeout(r, 20));
       }
-      const ack = stub.state.received[1];
-      assert.strictEqual(ack.type, "apply_theme_ack");
-      if (ack.type === "apply_theme_ack") {
-        assert.strictEqual(ack.id, applyID);
-        // The extension must copy the request id verbatim.
-        assert.ok(
-          ["applied", "overridden"].includes(ack.status),
-          `unexpected status ${ack.status}: ${JSON.stringify(ack)}`,
-        );
-        // The effective setting the extension reports must equal
-        // what VS Code itself now has.
-        const currentTheme = vscode.workspace
-          .getConfiguration()
-          .get<string>("workbench.colorTheme");
-        assert.strictEqual(ack.effectiveSetting, currentTheme);
+      const applyAck = stub.state.received[2];
+      assert.strictEqual(applyAck.type, "apply_theme_ack");
+      if (applyAck.type !== "apply_theme_ack") return;
+      assert.strictEqual(applyAck.id, applyID);
+      assert.ok(
+        ["applied", "overridden"].includes(applyAck.status),
+        `unexpected apply status ${applyAck.status}: ${JSON.stringify(applyAck)}`,
+      );
+      assert.strictEqual(applyAck.previousSetting ?? null, originalConfiguredSetting);
+      assert.strictEqual(applyAck.configuredSetting, themeName);
+      assert.strictEqual(
+        applyAck.effectiveSetting,
+        vscode.workspace.getConfiguration().get<string>("workbench.colorTheme"),
+      );
+
+      const conflictedUndoID = randomUUID();
+      stub.send({
+        type: "apply_theme",
+        protocolVersion: 1,
+        id: conflictedUndoID,
+        sessionId: "s-1",
+        themeName: originalConfiguredSetting,
+        expectedSetting: "A stale expected theme",
+        target: "global",
+      });
+      while (stub.state.received.length < 4) {
+        await new Promise((r) => setTimeout(r, 20));
       }
+      const conflictedUndoAck = stub.state.received[3];
+      assert.strictEqual(conflictedUndoAck.type, "apply_theme_ack");
+      if (conflictedUndoAck.type !== "apply_theme_ack") return;
+      assert.strictEqual(conflictedUndoAck.status, "conflicted");
+      assert.strictEqual(service.inspect().configuredSetting, themeName);
+
+      const undoID = randomUUID();
+      stub.send({
+        type: "apply_theme",
+        protocolVersion: 1,
+        id: undoID,
+        sessionId: "s-1",
+        themeName: originalConfiguredSetting,
+        expectedSetting: themeName,
+        target: "global",
+      });
+
+      while (stub.state.received.length < 5) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const undoAck = stub.state.received[4];
+      assert.strictEqual(undoAck.type, "apply_theme_ack");
+      if (undoAck.type !== "apply_theme_ack") return;
+      assert.strictEqual(undoAck.id, undoID);
+      assert.ok(
+        ["applied", "overridden"].includes(undoAck.status),
+        `unexpected Undo status ${undoAck.status}: ${JSON.stringify(undoAck)}`,
+      );
+      assert.strictEqual(undoAck.previousSetting, themeName);
+      assert.strictEqual(
+        undoAck.configuredSetting ?? null,
+        originalConfiguredSetting,
+      );
+      assert.strictEqual(
+        service.inspect().configuredSetting ?? null,
+        originalConfiguredSetting,
+      );
     } finally {
+      await vscode.workspace.getConfiguration().update(
+        "workbench.colorTheme",
+        originalConfiguredSetting ?? undefined,
+        vscode.ConfigurationTarget.Global,
+      );
       client.disconnect();
       await stub.close();
     }
@@ -163,13 +234,19 @@ function connectPromise(rendezvousPath: string, service: ThemeService) {
 }
 
 /** Returns the label of a theme contributed by any loaded extension. */
-function pickInstalledTheme(): string | undefined {
+function pickInstalledTheme(excluding: string | null): string | undefined {
   for (const extension of vscode.extensions.all) {
     const themes = (extension.packageJSON as { contributes?: { themes?: Array<{ label?: string }> } })
       ?.contributes?.themes;
     if (!Array.isArray(themes)) continue;
     for (const theme of themes) {
-      if (typeof theme?.label === "string" && theme.label.length > 0) return theme.label;
+      if (
+        typeof theme?.label === "string" &&
+        theme.label.length > 0 &&
+        theme.label !== excluding
+      ) {
+        return theme.label;
+      }
     }
   }
   return undefined;

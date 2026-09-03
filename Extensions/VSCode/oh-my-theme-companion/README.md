@@ -4,8 +4,10 @@ A local VS Code companion for the [Oh My Theme](https://github.com/abdullahnetto
 macOS app. When the app applies a Theme Variant to a Connected Target
 Instance, it asks this extension to change `workbench.colorTheme`
 through VS Code's supported configuration API, then reads back the
-effective setting and reports any workspace, folder, or remote
-overrides.
+configured and effective settings and reports any workspace, folder, or
+remote overrides. Updates compare the current profile setting with the
+value prepared by the app, so Undo and ordinary switches stop on external
+changes instead of overwriting them.
 
 The companion communicates with the app through a per-user
 Unix-domain socket. The wire protocol is documented in

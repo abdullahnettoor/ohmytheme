@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { CompanionClient, defaultRendezvousPath, readRendezvous } from "./client";
 import { ThemeService } from "./themeService";
-import { ApplyThemeMessage, CompanionMessage } from "./protocol";
+import { CompanionMessage } from "./protocol";
 
 const EXTENSION_VERSION = "0.1.0";
 
@@ -15,8 +15,8 @@ let extensionActive = false;
  *
  * Reads the rendezvous file the app publishes, connects to the
  * per-user Unix-domain socket, registers, and dispatches incoming
- * `apply_theme` requests to `ThemeService`. If the rendezvous file is
- * absent (the app is not running) the extension stays dormant.
+ * theme inspection and apply requests to `ThemeService`. If the rendezvous
+ * file is absent (the app is not running) the extension stays dormant.
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   extensionActive = true;
@@ -67,9 +67,8 @@ export function deactivate(): void {
 }
 
 /**
- * Read the rendezvous, open the socket, register, and wire an
- * apply_theme handler. Exported for tests that want to inject a
- * custom rendezvous path.
+ * Read the rendezvous, open the socket, register, and wire the theme request
+ * handler. Exported for tests that want to inject a custom rendezvous path.
  */
 export async function connect(
   rendezvousPath: string,
@@ -93,9 +92,21 @@ export async function connect(
 
 function makeHandler(service: ThemeService): (message: CompanionMessage, reply: (m: CompanionMessage) => void) => Promise<void> {
   return async (message, reply) => {
-    if (message.type !== "apply_theme") return;
-    const ack = await service.apply(message as ApplyThemeMessage);
-    reply(ack);
+    switch (message.type) {
+      case "inspect_theme":
+        reply({
+          type: "inspect_theme_ack",
+          protocolVersion: message.protocolVersion,
+          id: message.id,
+          ...service.inspect(),
+        });
+        return;
+      case "apply_theme":
+        reply(await service.apply(message));
+        return;
+      default:
+        return;
+    }
   };
 }
 
