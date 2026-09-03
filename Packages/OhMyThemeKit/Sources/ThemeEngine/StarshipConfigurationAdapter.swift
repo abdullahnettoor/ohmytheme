@@ -61,16 +61,6 @@ public struct StarshipConfigurationLocator: Sendable {
         return [homeConfig, xdg]
     }
 
-    public func resolved(using fileManager: FileManager = .default) -> URL? {
-        // Prefer XDG if exists, else home config
-        for candidate in candidates.reversed() {
-            if fileManager.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
-    }
-
     public var defaultURL: URL {
         xdgConfigHome.appendingPathComponent("starship.toml")
     }
@@ -81,6 +71,7 @@ public struct StarshipConfigurationLocator: Sendable {
 public enum StarshipAdapterError: Error, Equatable, Sendable {
     case configurationUnavailable(StarshipConfigurationStatus)
     case managedByNix(URL)
+    case linkedSourceApprovalRequired(URL)
     case malformedConfiguration(String)
     case ambiguousConfiguration(String)
     case malformedPlan
@@ -147,25 +138,22 @@ private struct StarshipThemeState: Codable {
 
 // MARK: - Adapter
 
-public actor StarshipConfigurationAdapter: WritableThemeAdapter {
+public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     public let id = "starship"
     public let version = "1"
     public let payloadVersion = "1"
 
     private let managedFiles: ManagedFiles
-    private let fileManager: FileManager
     private let locator: StarshipConfigurationLocator
     private let configuredConfigurationURL: URL?
 
     public init(
         managedFiles: ManagedFiles = ManagedFiles(),
-        fileManager: FileManager = .default,
         homeDirectory: URL = URL(fileURLWithPath: NSHomeDirectory()),
         xdgConfigHome: URL? = nil,
         configurationURL: URL? = nil
     ) {
         self.managedFiles = managedFiles
-        self.fileManager = fileManager
         self.locator = StarshipConfigurationLocator(homeDirectory: homeDirectory, xdgConfigHome: xdgConfigHome)
         self.configuredConfigurationURL = configurationURL?.standardizedFileURL
     }
@@ -173,12 +161,12 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
     // MARK: Discovery
 
     public func discover() async throws -> StarshipDiscoveryReport {
-        let candidates = locator.candidates
-        let resolved = configuredConfigurationURL ?? locator.resolved(using: fileManager)
+        let candidates = try managedFiles.existingURLs(in: locator.candidates)
+        let resolved = configuredConfigurationURL ?? candidates.last
 
         guard let resolved else {
             return StarshipDiscoveryReport(
-                configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                configurationCandidates: candidates,
                 resolvedConfigurationURL: nil,
                 configurationStatus: .missing
             )
@@ -189,16 +177,16 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
             inspection = try managedFiles.inspect(at: resolved)
         } catch {
             return StarshipDiscoveryReport(
-                configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                configurationCandidates: candidates,
                 resolvedConfigurationURL: resolved,
                 configurationStatus: .unsupported,
-                detail: String(describing: error)
+                detail: safeDiscoveryDetail(for: error)
             )
         }
 
         if case .managedByNix = inspection.ownership {
             return StarshipDiscoveryReport(
-                configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                configurationCandidates: candidates,
                 resolvedConfigurationURL: resolved,
                 configurationStatus: .unsupported,
                 ownership: inspection.ownership,
@@ -208,7 +196,7 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
 
         if !inspection.snapshot.exists {
             return StarshipDiscoveryReport(
-                configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                configurationCandidates: candidates,
                 resolvedConfigurationURL: resolved,
                 configurationStatus: .missing,
                 ownership: inspection.ownership,
@@ -225,42 +213,42 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
                 switch error {
                 case .malformedConfiguration:
                     return StarshipDiscoveryReport(
-                        configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                        configurationCandidates: candidates,
                         resolvedConfigurationURL: resolved,
                         configurationStatus: .malformed,
                         ownership: inspection.ownership,
-                        detail: String(describing: error)
+                        detail: safeDiscoveryDetail(for: error)
                     )
                 case .ambiguousConfiguration:
                     return StarshipDiscoveryReport(
-                        configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                        configurationCandidates: candidates,
                         resolvedConfigurationURL: resolved,
                         configurationStatus: .ambiguous,
                         ownership: inspection.ownership,
-                        detail: String(describing: error)
+                        detail: safeDiscoveryDetail(for: error)
                     )
                 default:
                     return StarshipDiscoveryReport(
-                        configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                        configurationCandidates: candidates,
                         resolvedConfigurationURL: resolved,
                         configurationStatus: .unsupported,
                         ownership: inspection.ownership,
-                        detail: String(describing: error)
+                        detail: safeDiscoveryDetail(for: error)
                     )
                 }
             } catch {
                 return StarshipDiscoveryReport(
-                    configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+                    configurationCandidates: candidates,
                     resolvedConfigurationURL: resolved,
                     configurationStatus: .malformed,
                     ownership: inspection.ownership,
-                    detail: String(describing: error)
+                    detail: safeDiscoveryDetail(for: error)
                 )
             }
         }
 
         return StarshipDiscoveryReport(
-            configurationCandidates: candidates.filter { fileManager.fileExists(atPath: $0.path) },
+            configurationCandidates: candidates,
             resolvedConfigurationURL: resolved,
             configurationStatus: .supported,
             ownership: inspection.ownership
@@ -269,10 +257,13 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
 
     // MARK: Connection
 
-    public func prepareConnection(instance: ConnectedTargetInstance, approveLinkedSource: Bool = false) async throws -> ConnectionPlan {
+    public func prepareConnection(instance: ConnectedTargetInstance, approveLinkedSource: Bool = false) async throws
+        -> ConnectionPlan
+    {
         let report = try await discover()
         // For Starship, we don't require installation validation; just file ownership
-        let requestedURL = (configuredConfigurationURL ?? report.resolvedConfigurationURL ?? locator.defaultURL).standardizedFileURL
+        let requestedURL = (configuredConfigurationURL ?? report.resolvedConfigurationURL ?? locator.defaultURL)
+            .standardizedFileURL
         let inspection = try managedFiles.inspect(at: requestedURL)
         if case .managedByNix = inspection.ownership {
             throw StarshipAdapterError.managedByNix(inspection.resolvedURL)
@@ -309,9 +300,16 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
             capturedPreChangeState: try encode(baseline),
             intendedChangeDigest: digest(of: inspection.snapshot.bytes ?? Data()),
             staleStateToken: inspection.snapshot.staleStateToken,
-            expectedSideEffects: ["Starship: configuration managed for theme palettes", "Starship: next prompt activation"],
+            expectedSideEffects: [
+                "Starship: configuration managed for theme palettes", "Starship: next prompt activation",
+            ],
             requiredPermissions: ["Read the Starship configuration"],
-            userActions: requiresApproval ? [UserAction(title: "Approve dotfiles source", detail: "Oh My Theme will read \(isLinked?.path ?? "the linked source").")] : [],
+            userActions: requiresApproval
+                ? [
+                    UserAction(
+                        title: "Approve dotfiles source",
+                        detail: "Oh My Theme will read \(isLinked?.path ?? "the linked source").")
+                ] : [],
             opaquePayload: try encode(StarshipConnectionPayload(details: details, filePlan: nil)),
             requiresApproval: requiresApproval
         )
@@ -324,9 +322,9 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
         try await revalidateConnection(plan: plan)
         // No file mutation on connect for Starship; just mark connected
         return ConnectionReceipt(
-            configurationState: .updated,
-            runningInstanceReach: .currentInstances,
-            detail: "Starship connected; theme will appear at next prompt after apply"
+            configurationState: .unchanged,
+            runningInstanceReach: .newProcessesOnly,
+            detail: "Starship connected; an applied theme will appear at the next prompt"
         )
     }
 
@@ -345,65 +343,30 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
         let baseline = try decode(StarshipConnectionBaseline.self, from: plan.capturedPreChangeState)
         let payload = try connectionPayload(from: plan)
         let current = try managedFiles.inspect(at: payload.details.resolvedConfigURL)
-        if current == baseline.inspection {
-            return .beforeChange
-        }
-        // For Starship connect, intended after is same as before (no mutation), so beforeChange is the only stable
-        // If file matches expected after (which is same), treat as intendedAfterChange if digest matches
-        if current.snapshot.digest == baseline.inspection.snapshot.digest {
-            return .intendedAfterChange
-        }
-        return .conflicting
+        return current == baseline.inspection ? .beforeChange : .conflicting
     }
 
     public func restoreConnection(instance: ConnectedTargetInstance, baseline: Data) async throws -> ConnectionReceipt {
         let saved = try decode(StarshipConnectionBaseline.self, from: baseline)
         let current = try managedFiles.inspect(at: saved.inspection.requestedURL)
-        guard current.resolvedURL == saved.inspection.resolvedURL,
-              current.snapshot.metadata == saved.inspection.snapshot.metadata
-        else {
+        guard current == saved.inspection else {
             throw StarshipAdapterError.restorationConflict
         }
-        // For Starship, restore means rollback to baseline bytes if we had changed
-        // Check if current matches expected managed state or baseline
-        // Since connect didn't mutate, restore should verify current is either baseline or already restored
-        if current == saved.inspection {
-            return ConnectionReceipt(configurationState: .unchanged, runningInstanceReach: .currentInstances, detail: "Starship already at baseline")
-        }
-        // If current was changed by apply, we need to restore baseline bytes guarded
-        // Use ManagedFiles rollback via receipt-like logic
-        guard current.snapshot.bytes != saved.inspection.snapshot.bytes else {
-            throw StarshipAdapterError.restorationConflict
-        }
-        // Perform guarded restore: only if current matches the last applied state? For proof, we check stale token
-        // Simplified: restore baseline bytes via managedFiles
-        let plan = try managedFiles.prepare(at: saved.inspection.requestedURL, replacingWith: saved.inspection.snapshot.bytes ?? Data(), approveLinkedSource: true)
-        // But prepare will check line endings; if baseline was missing, bytes is nil -> we should remove file
-        if saved.inspection.snapshot.exists {
-            let receipt = try managedFiles.apply(plan)
-            _ = receipt
-        } else {
-            // File didn't exist at baseline, remove current if exists and matches
-            let currentInspection = try managedFiles.inspect(at: saved.inspection.requestedURL)
-            let receipt = ManagedFileReceipt(planID: plan.id, before: saved.inspection, after: currentInspection, changed: true)
-            try managedFiles.rollback(receipt)
-        }
-        return ConnectionReceipt(configurationState: .updated, runningInstanceReach: .currentInstances, detail: "Starship restored to baseline; next prompt will reflect baseline")
+        return ConnectionReceipt(
+            configurationState: .unchanged,
+            runningInstanceReach: .currentInstances,
+            detail: "Starship is already at its connection baseline"
+        )
     }
 
     // MARK: Disconnect
 
-    public func prepareDisconnect(instance: ConnectedTargetInstance, baseline: StoredConnectionBaseline, baselineData: Data) async throws -> DisconnectPlan {
+    public func prepareDisconnect(
+        instance: ConnectedTargetInstance, baseline: StoredConnectionBaseline, baselineData: Data
+    ) async throws -> DisconnectPlan {
         let saved = try decode(StarshipConnectionBaseline.self, from: baselineData)
         let current = try managedFiles.inspect(at: saved.inspection.requestedURL)
-        guard current == saved.inspection || current.snapshot.digest == saved.inspection.snapshot.digest else {
-            // If current differs from baseline, it means apply changed it; still allow disconnect but need to revalidate
-            // For disconnect we require current is either baseline or a valid managed state that we can restore
-            // Check if current is managed by us (contains our palette table)
-            if let bytes = current.snapshot.bytes {
-                try StarshipPaletteTransformer.validate(bytes)
-            }
-            // Still proceed, but if malformed, throw
+        guard current == saved.inspection else {
             throw StarshipAdapterError.restorationConflict
         }
         let details = StarshipConnectionDetails(
@@ -427,28 +390,14 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
         let saved = try decode(StarshipConnectionBaseline.self, from: baseline)
         let payload = try disconnectPayload(from: plan)
         let current = try managedFiles.inspect(at: payload.fileAfter.requestedURL)
-        guard current == payload.fileAfter else {
-            throw StarshipAdapterError.staleState
+        guard current == payload.fileAfter, current == saved.inspection else {
+            throw StarshipAdapterError.restorationConflict
         }
-        // Restore baseline
-        if saved.inspection.snapshot.exists {
-            guard let bytes = saved.inspection.snapshot.bytes, let metadata = saved.inspection.snapshot.metadata else {
-                throw StarshipAdapterError.restorationConflict
-            }
-            let receipt = ManagedFileReceipt(
-                planID: UUID(),
-                before: saved.inspection,
-                after: current,
-                changed: true
-            )
-            // Use managedFiles rollback via replace with metadata
-            try managedFiles.rollback(receipt)
-            _ = bytes; _ = metadata
-        } else {
-            // Baseline was missing, remove file
-            try FileManager.default.removeItem(at: current.resolvedURL)
-        }
-        return AdapterReceipt(configurationState: .updated, runningInstanceReach: .currentInstances, detail: "Starship disconnected; next prompt will reflect prior configuration")
+        return AdapterReceipt(
+            configurationState: .unchanged,
+            runningInstanceReach: .currentInstances,
+            detail: "Starship disconnected without changing its configuration"
+        )
     }
 
     public func revalidateDisconnect(plan: DisconnectPlan) async throws {
@@ -468,13 +417,16 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
     // MARK: Theme Apply
 
     public func prepareApply(instance: ConnectedTargetInstance, theme: PreparedTheme) async throws -> AdapterPlan {
-        let requestedURL = (configuredConfigurationURL ?? locator.resolved(using: fileManager) ?? locator.defaultURL).standardizedFileURL
+        let discoveredURL = try managedFiles.existingURLs(in: locator.candidates).last
+        let requestedURL = (configuredConfigurationURL ?? discoveredURL ?? locator.defaultURL).standardizedFileURL
         let before = try managedFiles.inspect(at: requestedURL)
         if case .managedByNix = before.ownership {
             throw StarshipAdapterError.managedByNix(before.resolvedURL)
         }
+        if let linkedSource = linkedSourceURL(from: before.ownership) {
+            throw StarshipAdapterError.linkedSourceApprovalRequired(linkedSource)
+        }
         let existingBytes = before.snapshot.bytes ?? Data()
-        let existingText = String(decoding: existingBytes, as: UTF8.self)
         // Reject malformed/ambiguous before preparing
         if before.snapshot.exists {
             do {
@@ -483,49 +435,17 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
                 throw err
             }
         }
-        // Check for ambiguous due to existingButNotConnected? For Starship, apply doesn't require prior connect, but we still validate ownership
-        let isLinked = linkedSourceURL(from: before.ownership) != nil
-        if isLinked {
-            // For linked source, we still allow but require inspection - the managedFiles prepare will handle approval
-        }
-
-        let intendedBytes: Data
-        if let upstream = theme.upstreamArtifact, !upstream.isEmpty {
-            // Upstream artifact is assumed to be TOML palette entries; we still merge via transformer
-            // For proof, we treat upstream as already formatted palette table entries string
-            // Attempt to parse upstream as entries and apply
-            let upstreamText = String(decoding: upstream, as: UTF8.self)
-            // If upstream looks like full starship.toml (contains [palettes...]), use transformer with custom entries derived from upstream
-            // Simplified: if upstream contains "palettes.", treat it as already transformed bytes? Then we just use transformer with generated entries but mark source as upstream
-            // For test determinism, if upstream exists, use its bytes directly as intended palette entries via simple replacement:
-            // We'll decode upstream as Data and try to validate it as TOML fragment, but easiest: just apply transformer using upstream's palette name if present
-            // For now, fallback to generated transformer but preserve upstream detail for payload
-            intendedBytes = try StarshipPaletteTransformer.applyTheme(to: existingBytes, variant: theme.variant)
-            // To ensure we don't just ignore upstream, we will use upstream bytes as the intended file if upstream contains "palette"
-            // Actually we will override: if upstream contains "palette", assume it's already the full intended file content
-            if upstreamText.contains("palette") && upstreamText.contains("[palettes.") {
-                // Use upstream as intendedBytes after ensuring it contains our owned palette?
-                // Validate upstream fragment
-                try StarshipPaletteTransformer.validate(upstream)
-                // Merge upstream's owned table into current file by extracting owned table from upstream and applying
-                // Simplified: if upstream is full file, use it directly after validation and line ending handling
-                // But then unrelated content from existing would be lost, violating format preservation.
-                // So we still apply transformer using variant's entries, but we keep upstream for payload metadata
-                _ = upstream
-            }
-        } else {
-            intendedBytes = try StarshipPaletteTransformer.applyTheme(to: existingBytes, variant: theme.variant)
-        }
-
-        // Handle line ending preservation
-        let finalIntended = applyLineEnding(intendedBytes, matching: before.snapshot.lineEnding)
+        let finalIntended = try StarshipPaletteTransformer.applyTheme(
+            to: existingBytes,
+            variant: theme.variant
+        )
 
         let filePlan: ManagedFilePlan
         if before.snapshot.lineEnding == .none || before.snapshot.lineEnding == .mixed {
             // Allow creation from empty/missing or mixed line endings
-            filePlan = try managedFiles.prepareForConnection(at: requestedURL, replacingWith: finalIntended, approveLinkedSource: true)
+            filePlan = try managedFiles.prepareForConnection(at: requestedURL, replacingWith: finalIntended)
         } else {
-            filePlan = try managedFiles.prepare(at: requestedURL, replacingWith: finalIntended, approveLinkedSource: true)
+            filePlan = try managedFiles.prepare(at: requestedURL, replacingWith: finalIntended)
         }
 
         let details = StarshipConnectionDetails(
@@ -541,15 +461,19 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
             adapterID: id,
             adapterVersion: version,
             capabilityID: "theme",
-            payload: AdapterPayloadEnvelope(adapterID: id, adapterVersion: version, payloadVersion: payloadVersion, payload: finalIntended),
+            payload: AdapterPayloadEnvelope(
+                adapterID: id, adapterVersion: version, payloadVersion: payloadVersion, payload: finalIntended),
             intendedChangeDigest: filePlan.intendedDigest,
             capturedPreChangeState: try encode(state),
             staleStateToken: before.snapshot.staleStateToken,
-            expectedSideEffects: ["Starship: palette \(StarshipPaletteTransformer.ownedPaletteName) updated", "Starship: next prompt will reflect theme"],
+            expectedSideEffects: [
+                "Starship: palette \(StarshipPaletteTransformer.ownedPaletteName) updated",
+                "Starship: next prompt will reflect theme",
+            ],
             requiredPermissions: ["Write the Starship configuration"],
             sourceType: theme.sourceType,
             sourceRevision: theme.sourceRevision,
-            activationReach: .currentInstances,
+            activationReach: .newProcessesOnly,
             setupNeeds: [],
             conflicts: []
         )
@@ -564,18 +488,24 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
         // Validate intended bytes before writing
         do {
             try StarshipPaletteTransformer.validate(state.filePlan.intendedBytes)
+        } catch let error as StarshipAdapterError {
+            throw error
         } catch {
-            throw StarshipAdapterError.malformedConfiguration(String(describing: error))
+            throw StarshipAdapterError.malformedConfiguration(
+                "the prepared Starship configuration is invalid"
+            )
         }
         let receipt: ManagedFileReceipt
         do {
-            receipt = try managedFiles.apply(state.filePlan)
+            receipt = try managedFiles.apply(state.filePlan, recoveryMarker: true)
         } catch {
-            throw StarshipAdapterError.filesystemFailure(String(describing: error))
+            throw StarshipAdapterError.filesystemFailure(
+                "the prepared Starship configuration could not be written safely"
+            )
         }
         return AdapterReceipt(
             configurationState: receipt.changed ? .updated : .unchanged,
-            runningInstanceReach: .currentInstances,
+            runningInstanceReach: .newProcessesOnly,
             detail: receipt.changed
                 ? "Starship theme updated; next prompt will use \(StarshipPaletteTransformer.ownedPaletteName) palette (existing prompt not redrawn)"
                 : "Starship theme already selected; next prompt will use \(StarshipPaletteTransformer.ownedPaletteName) palette (existing prompt not redrawn)",
@@ -586,20 +516,40 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
     public func revalidateApply(plan: AdapterPlan) async throws {
         let state = try themeState(from: plan)
         guard plan.adapterID == id,
-              plan.adapterVersion == version,
-              plan.payload.adapterID == id,
-              plan.payload.adapterVersion == version,
-              plan.payload.payloadVersion == payloadVersion,
-              plan.payload.payload == state.filePlan.intendedBytes
+            plan.adapterVersion == version,
+            plan.payload.adapterID == id,
+            plan.payload.adapterVersion == version,
+            plan.payload.payloadVersion == payloadVersion,
+            plan.payload.payload == state.filePlan.intendedBytes
         else {
             throw StarshipAdapterError.malformedPlan
         }
         let current = try managedFiles.inspect(at: state.before.requestedURL)
         guard current.resolvedURL == state.before.resolvedURL,
-              current.snapshot.staleStateToken == state.before.snapshot.staleStateToken
+            current.snapshot.staleStateToken == state.before.snapshot.staleStateToken
         else {
             throw StarshipAdapterError.staleState
         }
+    }
+
+    public func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt {
+        let state = try themeState(from: plan)
+        let current = try managedFiles.inspect(at: state.before.requestedURL)
+        guard managedFiles.matchesMarkedApplication(current, of: state.filePlan) else {
+            throw StarshipAdapterError.restorationConflict
+        }
+        let managedReceipt = ManagedFileReceipt(
+            planID: state.filePlan.id,
+            before: state.filePlan.inspection,
+            after: current,
+            changed: current != state.filePlan.inspection
+        )
+        return AdapterReceipt(
+            configurationState: managedReceipt.changed ? .updated : .unchanged,
+            runningInstanceReach: .newProcessesOnly,
+            detail: "Starship theme apply recovered; the next prompt will use the selected palette",
+            rollbackData: try encode(managedReceipt)
+        )
     }
 
     public func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification {
@@ -608,7 +558,7 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
         if current == state.before {
             return .beforeChange
         }
-        if current.snapshot.digest == state.filePlan.intendedDigest && current.resolvedURL == state.filePlan.resolvedURL {
+        if managedFiles.matchesMarkedApplication(current, of: state.filePlan) {
             return .intendedAfterChange
         }
         return .conflicting
@@ -621,15 +571,17 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
             throw StarshipAdapterError.restorationConflict
         }
         guard let data = receipt.rollbackData,
-              let managedReceipt = try? decode(ManagedFileReceipt.self, from: data),
-              managedReceipt.planID == state.filePlan.id
+            let managedReceipt = try? decode(ManagedFileReceipt.self, from: data),
+            managedReceipt.planID == state.filePlan.id
         else {
             throw StarshipAdapterError.restorationConflict
         }
         do {
             try managedFiles.rollback(managedReceipt)
         } catch {
-            throw StarshipAdapterError.filesystemFailure(String(describing: error))
+            throw StarshipAdapterError.filesystemFailure(
+                "the Starship configuration no longer matches its apply receipt"
+            )
         }
     }
 
@@ -650,21 +602,21 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
         return try decode(StarshipDisconnectPayload.self, from: data)
     }
 
+    private func safeDiscoveryDetail(for error: Error) -> String {
+        switch error {
+        case StarshipAdapterError.malformedConfiguration(let detail),
+            StarshipAdapterError.ambiguousConfiguration(let detail):
+            return detail
+        case is ManagedFileError:
+            return "The Starship configuration could not be inspected safely."
+        default:
+            return "The Starship configuration could not be read."
+        }
+    }
+
     private func linkedSourceURL(from ownership: ManagedFileOwnership) -> URL? {
         guard case .linkedUserOwned(let path) = ownership else { return nil }
         return URL(fileURLWithPath: path)
-    }
-
-    private func applyLineEnding(_ bytes: Data, matching lineEnding: ManagedFileLineEnding) -> Data {
-        guard lineEnding != .lf, lineEnding != .none else { return bytes }
-        let text = String(decoding: bytes, as: UTF8.self)
-        let separator: String
-        switch lineEnding {
-        case .crlf: separator = "\r\n"
-        case .cr: separator = "\r"
-        case .lf, .none, .mixed: separator = "\n"
-        }
-        return Data(text.replacingOccurrences(of: "\n", with: separator).utf8)
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> Data {
@@ -682,14 +634,18 @@ public actor StarshipConfigurationAdapter: WritableThemeAdapter {
 
 extension ConnectionPlan {
     public var starshipDetails: StarshipConnectionDetails? {
-        guard let opaquePayload, let payload = try? JSONDecoder().decode(StarshipConnectionPayload.self, from: opaquePayload) else { return nil }
+        guard let opaquePayload,
+            let payload = try? JSONDecoder().decode(StarshipConnectionPayload.self, from: opaquePayload)
+        else { return nil }
         return payload.details
     }
 }
 
 extension DisconnectPlan {
     public var starshipDetails: StarshipConnectionDetails? {
-        guard let opaquePayload, let payload = try? JSONDecoder().decode(StarshipDisconnectPayload.self, from: opaquePayload) else { return nil }
+        guard let opaquePayload,
+            let payload = try? JSONDecoder().decode(StarshipDisconnectPayload.self, from: opaquePayload)
+        else { return nil }
         return payload.details
     }
 }

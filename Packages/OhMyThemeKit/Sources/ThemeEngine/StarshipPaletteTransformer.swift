@@ -7,394 +7,709 @@ public enum StarshipPaletteTransformer {
     public static let topLevelPaletteKey = "palette"
 
     public static func paletteEntries(for variant: ThemeVariant) -> [String: String] {
-        // Map semantic roles to palette keys (hyphens -> underscores for TOML safety)
-        var entries: [String: String] = [:]
-        for (role, color) in variant.roles {
-            let key = role.rawValue.replacingOccurrences(of: "-", with: "_")
-            entries[key] = color.rawValue
-        }
-        return entries
+        Dictionary(
+            uniqueKeysWithValues: variant.roles.map { role, color in
+                (role.rawValue.replacingOccurrences(of: "-", with: "_"), color.rawValue)
+            }
+        )
     }
 
     public static func validate(_ bytes: Data) throws {
-        let text = String(decoding: bytes, as: UTF8.self)
-        // TOML is UTF-8 text; if bytes contain non-UTF8, decoding will lossily replace, but we treat as malformed if contains null?
-        if bytes.contains(0) {
-            throw StarshipAdapterError.malformedConfiguration("contains null byte")
-        }
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-
-        var currentTable: String? = nil
-        var ownedTableCount = 0
-        var topLevelPaletteCount = 0
-
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") {
-                continue
-            }
-            if trimmed.hasPrefix("[") {
-                // Table header
-                guard let header = parseTableHeader(trimmed) else {
-                    throw StarshipAdapterError.malformedConfiguration("invalid table header: \(line)")
-                }
-                currentTable = header
-                if header == ownedPaletteTable {
-                    ownedTableCount += 1
-                    if ownedTableCount > 1 {
-                        throw StarshipAdapterError.ambiguousConfiguration("multiple \(ownedPaletteTable) tables")
-                    }
-                }
-                continue
-            }
-            if line.contains("=") {
-                // Key = value
-                guard let eqIndex = line.firstIndex(of: "=") else {
-                    throw StarshipAdapterError.malformedConfiguration("missing = in line: \(line)")
-                }
-                let keyPart = String(line[..<eqIndex]).trimmingCharacters(in: .whitespaces)
-                let valuePartRaw = String(line[line.index(after: eqIndex)...])
-                // Extract value before comment (outside quotes)
-                let valueBeforeComment = stripTrailingComment(from: valuePartRaw)
-                let valueTrimmed = valueBeforeComment.trimmingCharacters(in: .whitespaces)
-                if keyPart.isEmpty || valueTrimmed.isEmpty {
-                    throw StarshipAdapterError.malformedConfiguration("invalid key/value: \(line)")
-                }
-                // Basic key validation: must not contain brackets or unexpected chars
-                if keyPart.contains("[") || keyPart.contains("]") {
-                    throw StarshipAdapterError.malformedConfiguration("invalid key: \(keyPart)")
-                }
-                // Quote balance check for string values
-                if !isValueBalanced(valueTrimmed) {
-                    throw StarshipAdapterError.malformedConfiguration("unbalanced quotes: \(line)")
-                }
-                // Count top-level palette keys (only when not inside a table)
-                if currentTable == nil && keyPart == topLevelPaletteKey {
-                    topLevelPaletteCount += 1
-                    if topLevelPaletteCount > 1 {
-                        throw StarshipAdapterError.ambiguousConfiguration("multiple top-level palette assignments")
-                    }
-                }
-                continue
-            }
-            // Line with no = and not comment/table is malformed
-            throw StarshipAdapterError.malformedConfiguration("invalid line: \(line)")
-        }
+        _ = try StarshipTOMLDocument(bytes: bytes)
     }
 
     public static func applyTheme(to bytes: Data, variant: ThemeVariant) throws -> Data {
-        let entries = paletteEntries(for: variant)
-        return try applyTheme(to: bytes, paletteName: ownedPaletteName, entries: entries, topLevelPalette: ownedPaletteName)
+        try applyTheme(
+            to: bytes,
+            paletteName: ownedPaletteName,
+            entries: paletteEntries(for: variant),
+            topLevelPalette: ownedPaletteName
+        )
     }
 
-    public static func applyTheme(to bytes: Data, paletteName: String, entries: [String: String], topLevelPalette: String) throws -> Data {
-        try validate(bytes)
-        let text = String(decoding: bytes, as: UTF8.self)
-        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        var lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    public static func applyTheme(
+        to bytes: Data,
+        paletteName: String,
+        entries: [String: String],
+        topLevelPalette: String
+    ) throws -> Data {
+        guard paletteName == ownedPaletteName, topLevelPalette == ownedPaletteName else {
+            throw StarshipAdapterError.ambiguousConfiguration("unsupported managed palette identity")
+        }
+        var document = try StarshipTOMLDocument(bytes: bytes)
+        try document.selectPalette(topLevelPalette)
+        document = try StarshipTOMLDocument(bytes: document.renderedData)
+        try document.replaceOwnedPalette(entries: entries)
+        return document.renderedData
+    }
+}
 
-        // Determine if original ended with newline
-        let endsWithNewline = normalized.hasSuffix("\n")
+private struct StarshipTOMLDocument {
+    private struct Line: Equatable {
+        var content: String
+        var terminator: String
+    }
 
-        // Track table boundaries to find insertion points
-        var currentTable: String? = nil
-        var tableHeaderIndices: [Int] = []
-        var ownedTableHeaderIndex: Int? = nil
-        var ownedTableEndIndex: Int? = nil // exclusive
-        var topLevelPaletteIndices: [Int] = []
+    private struct Assignment {
+        let tablePath: [String]
+        let keyPath: [String]
+        let startLine: Int
+        let endLine: Int
+        let valueStartColumn: Int?
+        let valueEndColumn: Int?
+    }
 
-        for (idx, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+    private struct Table {
+        let path: [String]
+        let line: Int
+        let isArray: Bool
+    }
+
+    private var lines: [Line]
+    private var assignments: [Assignment]
+    private var tables: [Table]
+    private let preferredTerminator: String
+
+    init(bytes: Data) throws {
+        guard let text = String(data: bytes, encoding: .utf8), !bytes.contains(0) else {
+            throw StarshipAdapterError.malformedConfiguration("configuration is not valid UTF-8")
+        }
+        lines = Self.splitLines(text)
+        preferredTerminator = lines.lazy.map(\.terminator).first(where: { !$0.isEmpty }) ?? "\n"
+        assignments = []
+        tables = []
+        try parse()
+    }
+
+    var renderedData: Data {
+        Data(lines.map { $0.content + $0.terminator }.joined().utf8)
+    }
+
+    mutating func selectPalette(_ name: String) throws {
+        let matches = assignments.filter { $0.tablePath.isEmpty && $0.keyPath == ["palette"] }
+        guard matches.count <= 1 else {
+            throw StarshipAdapterError.ambiguousConfiguration("multiple top-level palette assignments")
+        }
+        if let assignment = matches.first {
+            guard assignment.startLine == assignment.endLine,
+                let start = assignment.valueStartColumn,
+                let end = assignment.valueEndColumn
+            else {
+                throw StarshipAdapterError.ambiguousConfiguration(
+                    "the top-level palette assignment must be a single-line value"
+                )
+            }
+            replaceValue(on: assignment.startLine, from: start, to: end, with: Self.quoted(name))
+            return
+        }
+
+        let insertion = tables.first?.line ?? lines.count
+        insertTopLevelPalette(Self.quoted(name), at: insertion)
+    }
+
+    mutating func replaceOwnedPalette(entries: [String: String]) throws {
+        let path = ["palettes", StarshipPaletteTransformer.ownedPaletteName]
+        let ownedTables = tables.filter { $0.path == path }
+        guard ownedTables.count <= 1 else {
+            throw StarshipAdapterError.ambiguousConfiguration(
+                "multiple \(StarshipPaletteTransformer.ownedPaletteTable) tables"
+            )
+        }
+        guard let table = ownedTables.first else {
+            appendOwnedPalette(entries: entries)
+            return
+        }
+
+        let nextTableLine = tables.lazy.map(\.line).first(where: { $0 > table.line }) ?? lines.count
+        let tableAssignments = assignments.filter {
+            $0.tablePath == path && $0.startLine > table.line && $0.startLine < nextTableLine
+        }
+        let assignmentByStart = Dictionary(uniqueKeysWithValues: tableAssignments.map { ($0.startLine, $0) })
+        var found: Set<String> = []
+        var body: [Line] = []
+        var lineIndex = table.line + 1
+
+        while lineIndex < nextTableLine {
+            guard let assignment = assignmentByStart[lineIndex] else {
+                body.append(lines[lineIndex])
+                lineIndex += 1
                 continue
             }
-            if trimmed.hasPrefix("[") {
-                if let header = parseTableHeader(trimmed) {
-                    // record all table headers
-                    tableHeaderIndices.append(idx)
-                    if currentTable == ownedPaletteTable && ownedTableHeaderIndex != nil && ownedTableEndIndex == nil {
-                        ownedTableEndIndex = idx
-                    }
-                    currentTable = header
-                    if header == ownedPaletteTable {
-                        ownedTableHeaderIndex = idx
-                        // reset end, will be set when next table found or EOF
-                        ownedTableEndIndex = nil
-                    }
-                }
-                continue
-            }
-            if line.contains("=") {
-                let keyPart = line.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces) ?? ""
-                if currentTable == nil && keyPart == topLevelPaletteKey {
-                    topLevelPaletteIndices.append(idx)
-                }
-            }
-        }
-        if let headerIdx = ownedTableHeaderIndex, ownedTableEndIndex == nil {
-            ownedTableEndIndex = lines.count
-        }
-
-        // Build new lines mutable
-        var newLines = lines
-
-        // Handle top-level palette key
-        let paletteLine = "palette = \"\(topLevelPalette)\""
-        if let idx = topLevelPaletteIndices.first {
-            let original = newLines[idx]
-            newLines[idx] = replaceValuePreservingFormat(originalLine: original, newValue: "\"\(topLevelPalette)\"")
-        } else {
-            // Insert before first table header if exists, otherwise at end
-            if let firstTableIdx = tableHeaderIndices.first {
-                // Insert before first table, ensure separation
-                let insertIdx = firstTableIdx
-                // Ensure there's an empty line before insertion if needed? Preserve formatting by inserting palette line and an empty line separator if previous line not empty
-                newLines.insert(paletteLine, at: insertIdx)
-                // Adjust indices for owned table if it was after insertion
-                if let headerIdx = ownedTableHeaderIndex, headerIdx >= insertIdx {
-                    ownedTableHeaderIndex = headerIdx + 1
-                    if let end = ownedTableEndIndex {
-                        ownedTableEndIndex = end + 1
-                    }
-                }
-                tableHeaderIndices = tableHeaderIndices.map { $0 >= insertIdx ? $0 + 1 : $0 }
-            } else {
-                // No tables, append
-                if !newLines.isEmpty && !newLines.last!.isEmpty {
-                    newLines.append("")
-                }
-                // If file was empty and had one empty element from split, handle
-                if newLines.count == 1 && newLines[0].isEmpty && bytes.isEmpty {
-                    newLines = [paletteLine]
+            let key = assignment.keyPath.count == 1 ? assignment.keyPath[0] : nil
+            if let key, let color = entries[key] {
+                found.insert(key)
+                if assignment.startLine == assignment.endLine,
+                    let start = assignment.valueStartColumn,
+                    let end = assignment.valueEndColumn
+                {
+                    var line = lines[assignment.startLine]
+                    line.content = Self.replacingCharacters(
+                        in: line.content,
+                        from: start,
+                        to: end,
+                        with: Self.quoted(color)
+                    )
+                    body.append(line)
                 } else {
-                    if newLines.last?.isEmpty == true {
-                        // insert before final empty if endsWithNewline logic? Simplified: just before last empty
-                        // For split with trailing newline, last element is empty. Append before it.
-                        newLines.insert(paletteLine, at: newLines.count - 1)
-                        if newLines.last?.isEmpty == false {
-                            newLines.append("")
-                        }
-                    } else {
-                        newLines.append(paletteLine)
-                    }
+                    body.append(
+                        Line(
+                            content: "\(Self.renderKey(key)) = \(Self.quoted(color))",
+                            terminator: lines[assignment.endLine].terminator.isEmpty
+                                ? preferredTerminator
+                                : lines[assignment.endLine].terminator
+                        )
+                    )
                 }
             }
+            lineIndex = assignment.endLine + 1
         }
 
-        // Recompute indices after palette insertion for table handling if file was empty case already handled
-        // For simplicity, if we inserted palette line, we already adjusted. Now handle palette table
-        // Need to re-evaluate if owned table exists
-        // For table replacement/insertion, operate on current newLines
-        // Find again owned table header in newLines (to handle inserted palette)
-        var finalOwnedHeaderIdx: Int? = nil
-        var finalOwnedEndIdx: Int? = nil
-        var finalTableIndices: [Int] = []
-        var curTable: String? = nil
-        var tempOwnedStart: Int? = nil
-        for (idx, line) in newLines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let missing = entries.keys.filter { !found.contains($0) }.sorted()
+        if !missing.isEmpty {
+            let insertion = body.endIndex
+            let generated = missing.map {
+                Line(
+                    content: "\(Self.renderKey($0)) = \(Self.quoted(entries[$0] ?? ""))",
+                    terminator: preferredTerminator)
+            }
+            body.insert(contentsOf: generated, at: insertion)
+        }
+        lines.replaceSubrange((table.line + 1)..<nextTableLine, with: body)
+    }
+
+    private mutating func parse() throws {
+        var tablePath: [String] = []
+        var tableScope = ""
+        var seenTables: Set<[String]> = []
+        var arrayTableCounts: [[String]: Int] = [:]
+        var seenKeys: Set<String> = []
+        var lineIndex = 0
+
+        while lineIndex < lines.count {
+            let content = lines[lineIndex].content
+            let trimmed = content.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                lineIndex += 1
+                continue
+            }
             if trimmed.hasPrefix("[") {
-                if let header = parseTableHeader(trimmed) {
-                    finalTableIndices.append(idx)
-                    if curTable == ownedPaletteTable, let start = tempOwnedStart {
-                        finalOwnedEndIdx = idx
+                let parsed = try Self.parseTableHeader(trimmed, line: lineIndex)
+                tablePath = parsed.path
+                if parsed.isArray {
+                    guard parsed.path != ["palettes", StarshipPaletteTransformer.ownedPaletteName],
+                        !seenTables.contains(parsed.path)
+                    else {
+                        throw StarshipAdapterError.ambiguousConfiguration(
+                            "the managed palette must be one standard TOML table"
+                        )
                     }
-                    curTable = header
-                    if header == ownedPaletteTable {
-                        finalOwnedHeaderIdx = idx
-                        tempOwnedStart = idx
-                        finalOwnedEndIdx = nil
+                    let occurrence = (arrayTableCounts[parsed.path] ?? 0) + 1
+                    arrayTableCounts[parsed.path] = occurrence
+                    tableScope = parsed.path.joined(separator: "\u{1F}") + "#\(occurrence)"
+                } else {
+                    guard arrayTableCounts[parsed.path] == nil, seenTables.insert(parsed.path).inserted else {
+                        throw StarshipAdapterError.ambiguousConfiguration(
+                            parsed.path == ["palettes", StarshipPaletteTransformer.ownedPaletteName]
+                                ? "multiple \(StarshipPaletteTransformer.ownedPaletteTable) tables"
+                                : "duplicate TOML table at line \(lineIndex + 1)"
+                        )
                     }
+                    tableScope = parsed.path.joined(separator: "\u{1F}")
                 }
+                tables.append(Table(path: parsed.path, line: lineIndex, isArray: parsed.isArray))
+                lineIndex += 1
+                continue
             }
+
+            let assignment = try parseAssignment(startingAt: lineIndex, tablePath: tablePath)
+            let identity = tableScope + "\u{1E}" + assignment.keyPath.joined(separator: "\u{1F}")
+            if !seenKeys.insert(identity).inserted {
+                if tablePath.isEmpty && assignment.keyPath == ["palette"] {
+                    throw StarshipAdapterError.ambiguousConfiguration("multiple top-level palette assignments")
+                }
+                throw StarshipAdapterError.malformedConfiguration(
+                    "duplicate TOML key at line \(lineIndex + 1)"
+                )
+            }
+            assignments.append(assignment)
+            lineIndex = assignment.endLine + 1
         }
-        if let start = tempOwnedStart, finalOwnedEndIdx == nil {
-            finalOwnedEndIdx = newLines.count
+    }
+
+    private func parseAssignment(startingAt startLine: Int, tablePath: [String]) throws -> Assignment {
+        let content = lines[startLine].content
+        guard let equalsColumn = Self.firstUnquotedEquals(in: content) else {
+            throw StarshipAdapterError.malformedConfiguration("invalid TOML statement at line \(startLine + 1)")
+        }
+        let equalsIndex = content.index(content.startIndex, offsetBy: equalsColumn)
+        let keySource = String(content[..<equalsIndex]).trimmingCharacters(in: .whitespaces)
+        let keyPath = try Self.parseKeyPath(keySource, line: startLine)
+        let valueColumn = equalsColumn + 1
+        let source = Self.valueSource(lines: lines, startLine: startLine, startColumn: valueColumn)
+        let parsedValue = try Self.parseValue(source.text, line: startLine)
+        let endLine = startLine + parsedValue.consumedNewlines
+        guard endLine < lines.count else {
+            throw StarshipAdapterError.malformedConfiguration("unterminated TOML value at line \(startLine + 1)")
         }
 
-        let sortedEntries = entries.sorted { $0.key < $1.key }
-        let entryLines = sortedEntries.map { "\($0.key) = \"\($0.value)\"" }
-
-        if let headerIdx = finalOwnedHeaderIdx, let endIdx = finalOwnedEndIdx {
-            // Replace body between headerIdx+1 ..< endIdx with entryLines
-            let headerLine = newLines[headerIdx]
-            var replacement: [String] = [headerLine]
-            replacement.append(contentsOf: entryLines)
-            // Replace range
-            newLines.replaceSubrange((headerIdx)...(endIdx - 1), with: replacement)
+        let range: (Int?, Int?)
+        if endLine == startLine {
+            let valueStart = valueColumn + parsedValue.leadingWhitespace
+            let valueEnd = valueColumn + parsedValue.valueEnd
+            range = (valueStart, valueEnd)
         } else {
-            // Insert new table at end
-            // Ensure separation with empty line if needed
-            if !newLines.isEmpty {
-                // If last line is not empty, add empty separator
-                if newLines.last?.trimmingCharacters(in: .whitespaces).isEmpty == false {
-                    newLines.append("")
-                } else if newLines.count >= 2 && newLines[newLines.count - 2].trimmingCharacters(in: .whitespaces).isEmpty == false {
-                    // already has empty
-                }
+            range = (nil, nil)
+        }
+        return Assignment(
+            tablePath: tablePath,
+            keyPath: keyPath,
+            startLine: startLine,
+            endLine: endLine,
+            valueStartColumn: range.0,
+            valueEndColumn: range.1
+        )
+    }
+
+    private mutating func replaceValue(on line: Int, from start: Int, to end: Int, with value: String) {
+        lines[line].content = Self.replacingCharacters(
+            in: lines[line].content,
+            from: start,
+            to: end,
+            with: value
+        )
+    }
+
+    private mutating func insertTopLevelPalette(_ value: String, at index: Int) {
+        let palette = Line(content: "palette = \(value)", terminator: preferredTerminator)
+        if index < lines.count {
+            var inserted = [palette]
+            if index == 0 || !lines[index - 1].content.trimmingCharacters(in: .whitespaces).isEmpty {
+                inserted.append(Line(content: "", terminator: preferredTerminator))
             }
-            // Remove trailing empty that came from split if needed to avoid double
-            // We'll just ensure we have header and entries at end
-            // If file ends with empty string element due to trailing newline, insert before it
-            if newLines.last?.isEmpty == true {
-                // Insert before last empty
-                let insertPos = newLines.count - 1
-                newLines.insert("[\(ownedPaletteTable)]", at: insertPos)
-                for (offset, entry) in entryLines.enumerated() {
-                    newLines.insert(entry, at: insertPos + 1 + offset)
+            lines.insert(contentsOf: inserted, at: index)
+            return
+        }
+        appendBlock([palette])
+    }
+
+    private mutating func appendOwnedPalette(entries: [String: String]) {
+        var block = [
+            Line(
+                content: "[\(StarshipPaletteTransformer.ownedPaletteTable)]",
+                terminator: preferredTerminator
+            )
+        ]
+        block.append(
+            contentsOf: entries.keys.sorted().map {
+                Line(
+                    content: "\(Self.renderKey($0)) = \(Self.quoted(entries[$0] ?? ""))",
+                    terminator: preferredTerminator)
+            }
+        )
+        appendBlock(block)
+    }
+
+    private mutating func appendBlock(_ block: [Line]) {
+        if lines.count == 1, lines[0].content.isEmpty, lines[0].terminator.isEmpty {
+            lines = block
+            return
+        }
+        if let last = lines.indices.last, lines[last].terminator.isEmpty {
+            lines[last].terminator = preferredTerminator
+        }
+        if let last = lines.last, !last.content.trimmingCharacters(in: .whitespaces).isEmpty {
+            lines.append(Line(content: "", terminator: preferredTerminator))
+        }
+        lines.append(contentsOf: block)
+    }
+
+    private static func splitLines(_ text: String) -> [Line] {
+        guard !text.isEmpty else { return [Line(content: "", terminator: "")] }
+        let scalars = text.unicodeScalars
+        var result: [Line] = []
+        var start = scalars.startIndex
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            if scalars[index].value == 10 {
+                result.append(Line(content: String(scalars[start..<index]), terminator: "\n"))
+                index = scalars.index(after: index)
+                start = index
+            } else if scalars[index].value == 13 {
+                let next = scalars.index(after: index)
+                if next < scalars.endIndex, scalars[next].value == 10 {
+                    result.append(Line(content: String(scalars[start..<index]), terminator: "\r\n"))
+                    index = scalars.index(after: next)
+                } else {
+                    result.append(Line(content: String(scalars[start..<index]), terminator: "\r"))
+                    index = next
                 }
+                start = index
             } else {
-                newLines.append("[\(ownedPaletteTable)]")
-                newLines.append(contentsOf: entryLines)
+                index = scalars.index(after: index)
+            }
+        }
+        if start < scalars.endIndex {
+            result.append(Line(content: String(scalars[start...]), terminator: ""))
+        }
+        return result
+    }
+
+    private static func parseTableHeader(
+        _ source: String,
+        line: Int
+    ) throws -> (path: [String], isArray: Bool) {
+        let arrayTable = source.hasPrefix("[[")
+        let openingCount = arrayTable ? 2 : 1
+        let closing = arrayTable ? "]]" : "]"
+        guard source.count > openingCount,
+            let closingRange = source.range(of: closing, options: .backwards),
+            source.distance(from: source.startIndex, to: closingRange.lowerBound) >= openingCount
+        else {
+            throw StarshipAdapterError.malformedConfiguration("invalid TOML table at line \(line + 1)")
+        }
+        let after = source[closingRange.upperBound...].trimmingCharacters(in: .whitespaces)
+        guard after.isEmpty || after.hasPrefix("#") else {
+            throw StarshipAdapterError.malformedConfiguration("invalid TOML table at line \(line + 1)")
+        }
+        let keyStart = source.index(source.startIndex, offsetBy: openingCount)
+        let keySource = String(source[keyStart..<closingRange.lowerBound])
+        let path = try parseKeyPath(keySource, line: line)
+        guard !path.isEmpty else {
+            throw StarshipAdapterError.malformedConfiguration("invalid TOML table at line \(line + 1)")
+        }
+        return (path, arrayTable)
+    }
+
+    private static func parseKeyPath(_ source: String, line: Int) throws -> [String] {
+        var components: [String] = []
+        var index = source.startIndex
+
+        func skipWhitespace(_ index: inout String.Index) {
+            while index < source.endIndex, source[index].isWhitespace {
+                index = source.index(after: index)
             }
         }
 
-        // Reconstruct text with LF, handle trailing newline based on original
-        var result = newLines.joined(separator: "\n")
-        // The split/join logic already handles trailing newline via empty last element.
-        // Ensure result ends with newline if original did
-        if endsWithNewline && !result.hasSuffix("\n") {
-            result += "\n"
+        skipWhitespace(&index)
+        while index < source.endIndex {
+            let component: String
+            if source[index] == "\"" || source[index] == "'" {
+                let quote = source[index]
+                index = source.index(after: index)
+                var value = ""
+                var escaped = false
+                var closed = false
+                while index < source.endIndex {
+                    let character = source[index]
+                    index = source.index(after: index)
+                    if quote == "\"", escaped {
+                        value.append(character)
+                        escaped = false
+                    } else if quote == "\"", character == "\\" {
+                        escaped = true
+                    } else if character == quote {
+                        closed = true
+                        break
+                    } else {
+                        value.append(character)
+                    }
+                }
+                guard closed, !value.isEmpty else {
+                    throw StarshipAdapterError.malformedConfiguration("invalid TOML key at line \(line + 1)")
+                }
+                component = value
+            } else {
+                let start = index
+                while index < source.endIndex,
+                    source[index].isLetter || source[index].isNumber || source[index] == "_" || source[index] == "-"
+                {
+                    index = source.index(after: index)
+                }
+                guard start != index else {
+                    throw StarshipAdapterError.malformedConfiguration("invalid TOML key at line \(line + 1)")
+                }
+                component = String(source[start..<index])
+            }
+            components.append(component)
+            skipWhitespace(&index)
+            guard index < source.endIndex else { break }
+            guard source[index] == "." else {
+                throw StarshipAdapterError.malformedConfiguration("invalid TOML key at line \(line + 1)")
+            }
+            index = source.index(after: index)
+            skipWhitespace(&index)
+            guard index < source.endIndex else {
+                throw StarshipAdapterError.malformedConfiguration("invalid TOML key at line \(line + 1)")
+            }
         }
-        if !endsWithNewline && result.hasSuffix("\n") && !bytes.isEmpty {
-            // If original didn't end with newline but we added one via logic, keep as is? For now ensure we don't add extra.
-            // This is edge; we will keep result as joined which may have added newline if we inserted table.
-            // It's okay to end with newline for TOML; preserve original's ending if we can.
-        }
-        // If original was empty, ensure result ends with newline
-        if bytes.isEmpty && !result.hasSuffix("\n") {
-            result += "\n"
-        }
-
-        return Data(result.utf8)
+        return components
     }
 
-    // MARK: - Helpers
-
-    private static func parseTableHeader(_ trimmed: String) -> String? {
-        // Matches [header] with optional trailing comment
-        // Use regex: ^\[([^\]]+)\]\s*(?:#.*)?$
-        guard trimmed.hasPrefix("[") else { return nil }
-        guard let closeIdx = trimmed.firstIndex(of: "]") else { return nil }
-        let headerContent = String(trimmed[trimmed.index(after: trimmed.startIndex)..<closeIdx]).trimmingCharacters(in: .whitespaces)
-        let trailing = String(trimmed[trimmed.index(after: closeIdx)...]).trimmingCharacters(in: .whitespaces)
-        if !trailing.isEmpty && !trailing.hasPrefix("#") {
-            return nil
-        }
-        if headerContent.isEmpty { return nil }
-        return headerContent
-    }
-
-    private static func stripTrailingComment(from valuePart: String) -> String {
-        // TOML comments start with # outside quotes. Simplified: find # not inside quotes.
-        var inSingle = false
-        var inDouble = false
+    private static func firstUnquotedEquals(in source: String) -> Int? {
+        var quote: Character?
         var escaped = false
-        for (idx, ch) in valuePart.enumerated() {
+        for (offset, character) in source.enumerated() {
             if escaped {
                 escaped = false
                 continue
             }
-            if ch == "\\" && inDouble {
+            if quote == "\"", character == "\\" {
                 escaped = true
-                continue
-            }
-            if ch == "'" && !inDouble {
-                inSingle.toggle()
-            } else if ch == "\"" && !inSingle {
-                inDouble.toggle()
-            } else if ch == "#" && !inSingle && !inDouble {
-                let strIdx = valuePart.index(valuePart.startIndex, offsetBy: idx)
-                return String(valuePart[..<strIdx])
+            } else if character == "\"" || character == "'" {
+                if quote == character {
+                    quote = nil
+                } else if quote == nil {
+                    quote = character
+                }
+            } else if character == "=", quote == nil {
+                return offset
+            } else if character == "#", quote == nil {
+                return nil
             }
         }
-        return valuePart
+        return nil
     }
 
-    private static func isValueBalanced(_ value: String) -> Bool {
-        var inSingle = false
-        var inDouble = false
-        var escaped = false
-        for ch in value {
-            if escaped {
-                escaped = false
-                continue
-            }
-            if ch == "\\" && inDouble {
-                escaped = true
-                continue
-            }
-            if ch == "'" && !inDouble {
-                inSingle.toggle()
-            } else if ch == "\"" && !inSingle {
-                inDouble.toggle()
+    private static func valueSource(lines: [Line], startLine: Int, startColumn: Int) -> (text: String, lineCount: Int) {
+        let first = lines[startLine].content
+        let firstStart = first.index(first.startIndex, offsetBy: startColumn)
+        var result = String(first[firstStart...])
+        if startLine + 1 < lines.count {
+            for line in lines[(startLine + 1)...] {
+                result += "\n" + line.content
             }
         }
-        return !inSingle && !inDouble
+        return (result, lines.count - startLine)
     }
 
-    private static func replaceValuePreservingFormat(originalLine: String, newValue: String) -> String {
-        // Preserve leading whitespace, key, spacing around =, and trailing comment
-        guard let eqIdx = originalLine.firstIndex(of: "=") else {
-            return "palette = \(newValue)"
+    private static func parseValue(
+        _ source: String,
+        line: Int
+    ) throws -> (consumedNewlines: Int, leadingWhitespace: Int, valueEnd: Int) {
+        let leading = source.prefix { $0 == " " || $0 == "\t" }.count
+        let start = source.index(source.startIndex, offsetBy: leading)
+        guard start < source.endIndex else {
+            throw StarshipAdapterError.malformedConfiguration("missing TOML value at line \(line + 1)")
         }
-        let beforeEq = String(originalLine[..<eqIdx])
-        // Extract key part for palette, but we just keep beforeEq as is up to =
-        let afterEqRaw = String(originalLine[originalLine.index(after: eqIdx)...])
-        // Find comment outside quotes in afterEqRaw
-        var comment = ""
-        var valuePart = afterEqRaw
-        // Detect comment
-        var inSingle = false
-        var inDouble = false
+        let remainder = source[start...]
+        let consumedCharacters: Int
+        switch remainder.first {
+        case "\"":
+            consumedCharacters = try consumeString(remainder, quote: "\"", line: line)
+        case "'":
+            consumedCharacters = try consumeString(remainder, quote: "'", line: line)
+        case "[":
+            consumedCharacters = try consumeComposite(remainder, opening: "[", closing: "]", line: line)
+        case "{":
+            consumedCharacters = try consumeComposite(remainder, opening: "{", closing: "}", line: line)
+        default:
+            consumedCharacters = try consumeScalar(remainder, line: line)
+        }
+        let consumedEnd = source.index(start, offsetBy: consumedCharacters)
+        let consumedPrefix = source[..<consumedEnd]
+        let newlines = consumedPrefix.filter { $0 == "\n" }.count
+        let lineTailStart =
+            source[..<consumedEnd].lastIndex(of: "\n").map { source.index(after: $0) } ?? source.startIndex
+        let endOnLastLine = source.distance(from: lineTailStart, to: consumedEnd)
+        let valueEnd = newlines == 0 ? leading + consumedCharacters : endOnLastLine
+
+        let restOfLineEnd = source[consumedEnd...].firstIndex(of: "\n") ?? source.endIndex
+        let trailing = source[consumedEnd..<restOfLineEnd].trimmingCharacters(in: .whitespaces)
+        guard trailing.isEmpty || trailing.hasPrefix("#") else {
+            throw StarshipAdapterError.malformedConfiguration("invalid TOML value at line \(line + newlines + 1)")
+        }
+        return (newlines, leading, valueEnd)
+    }
+
+    private static func consumeString(
+        _ source: Substring,
+        quote: Character,
+        line: Int
+    ) throws -> Int {
+        let triple = source.hasPrefix(String(repeating: String(quote), count: 3))
+        let delimiterLength = triple ? 3 : 1
+        var index = source.index(source.startIndex, offsetBy: delimiterLength)
         var escaped = false
-        var commentStartIdx: String.Index? = nil
-        for (offset, ch) in afterEqRaw.enumerated() {
-            let idx = afterEqRaw.index(afterEqRaw.startIndex, offsetBy: offset)
-            if escaped {
-                escaped = false
-                continue
+        while index < source.endIndex {
+            if triple, source[index...].hasPrefix(String(repeating: String(quote), count: 3)) {
+                return source.distance(from: source.startIndex, to: index) + 3
             }
-            if ch == "\\" && inDouble {
-                escaped = true
-                continue
-            }
-            if ch == "'" && !inDouble {
-                inSingle.toggle()
-            } else if ch == "\"" && !inSingle {
-                inDouble.toggle()
-            } else if ch == "#" && !inSingle && !inDouble {
-                commentStartIdx = idx
+            let character = source[index]
+            if !triple, character == "\n" {
                 break
             }
+            if quote == "\"" {
+                if escaped {
+                    guard "btnfr\"\\uU".contains(character) || (triple && character == "\n") else {
+                        throw StarshipAdapterError.malformedConfiguration(
+                            "invalid TOML escape at line \(line + 1)"
+                        )
+                    }
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if !triple, character == quote {
+                    return source.distance(from: source.startIndex, to: index) + 1
+                }
+            } else if !triple, character == quote {
+                return source.distance(from: source.startIndex, to: index) + 1
+            }
+            index = source.index(after: index)
         }
-        if let cIdx = commentStartIdx {
-            comment = String(afterEqRaw[cIdx...])
-            valuePart = String(afterEqRaw[..<cIdx])
+        throw StarshipAdapterError.malformedConfiguration("unterminated TOML string at line \(line + 1)")
+    }
+
+    private static func consumeComposite(
+        _ source: Substring,
+        opening: Character,
+        closing: Character,
+        line: Int
+    ) throws -> Int {
+        var stack: [Character] = [opening]
+        var index = source.index(after: source.startIndex)
+        var quote: Character?
+        var tripleQuote = false
+        var escaped = false
+        var inComment = false
+        var bareToken = ""
+
+        func validateBareToken() throws {
+            let token = bareToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            bareToken = ""
+            guard !token.isEmpty else { return }
+            if let equals = token.firstIndex(of: "=") {
+                let key = String(token[..<equals]).trimmingCharacters(in: .whitespaces)
+                _ = try parseKeyPath(key, line: line)
+                let value = String(token[token.index(after: equals)...])
+                    .trimmingCharacters(in: .whitespaces)
+                guard value.isEmpty || isValidScalar(value) else {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "invalid TOML value at line \(line + 1)"
+                    )
+                }
+            } else if !isValidScalar(token) {
+                throw StarshipAdapterError.malformedConfiguration(
+                    "invalid TOML value at line \(line + 1)"
+                )
+            }
         }
-        // Preserve spacing before value: capture leading spaces in valuePart up to first non-space
-        let trimmedValue = valuePart.trimmingCharacters(in: .whitespaces)
-        // Determine spacing between = and value
-        let eqToValueSpacing: String
-        if let firstNonSpace = valuePart.firstIndex(where: { !$0.isWhitespace }) {
-            eqToValueSpacing = String(valuePart[..<firstNonSpace])
-        } else {
-            eqToValueSpacing = " "
+
+        while index < source.endIndex {
+            let character = source[index]
+            if inComment {
+                if character == "\n" { inComment = false }
+                index = source.index(after: index)
+                continue
+            }
+            if let activeQuote = quote {
+                if tripleQuote,
+                    source[index...].hasPrefix(String(repeating: String(activeQuote), count: 3))
+                {
+                    quote = nil
+                    tripleQuote = false
+                    index = source.index(index, offsetBy: 3)
+                    continue
+                }
+                if activeQuote == "\"", escaped {
+                    escaped = false
+                } else if activeQuote == "\"", character == "\\" {
+                    escaped = true
+                } else if !tripleQuote, character == activeQuote {
+                    quote = nil
+                } else if !tripleQuote, character == "\n" {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "unterminated TOML string at line \(line + 1)"
+                    )
+                }
+                index = source.index(after: index)
+                continue
+            }
+            if character == "#" {
+                try validateBareToken()
+                inComment = true
+            } else if character == "\"" || character == "'" {
+                try validateBareToken()
+                quote = character
+                tripleQuote = source[index...].hasPrefix(String(repeating: String(character), count: 3))
+                index = source.index(index, offsetBy: tripleQuote ? 3 : 1)
+                continue
+            } else if character == "[" || character == "{" {
+                try validateBareToken()
+                stack.append(character)
+            } else if character == "]" || character == "}" {
+                try validateBareToken()
+                let expectedOpening: Character = character == "]" ? "[" : "{"
+                guard stack.last == expectedOpening else {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "unbalanced TOML value at line \(line + 1)"
+                    )
+                }
+                stack.removeLast()
+                if stack.isEmpty {
+                    return source.distance(from: source.startIndex, to: index) + 1
+                }
+            } else if character == "," {
+                try validateBareToken()
+            } else {
+                bareToken.append(character)
+            }
+            index = source.index(after: index)
         }
-        // Determine spacing before comment (valuePart trailing spaces)
-        let trailingSpaces: String
-        if !comment.isEmpty {
-            // valuePart may have trailing spaces before comment; they are in valuePart's suffix
-            // For simplicity, ensure one space before comment if comment exists
-            trailingSpaces = " "
-        } else {
-            trailingSpaces = ""
+        _ = closing
+        throw StarshipAdapterError.malformedConfiguration("unterminated TOML value at line \(line + 1)")
+    }
+
+    private static func consumeScalar(_ source: Substring, line: Int) throws -> Int {
+        let end = source.firstIndex(where: { $0 == "#" || $0 == "\n" }) ?? source.endIndex
+        let raw = String(source[..<end])
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard isValidScalar(trimmed) else {
+            throw StarshipAdapterError.malformedConfiguration("invalid TOML value at line \(line + 1)")
         }
-        // Reconstruct: beforeEq includes up to =, so do beforeEq + spacing + newValue + trailingSpaces + comment
-        // beforeEq already contains key and spaces up to =, but we need to ensure we have "=" from originalLine
-        // beforeEq is substring before "=", so we need to add "="
-        let prefix = beforeEq + "="
-        return prefix + eqToValueSpacing + newValue + trailingSpaces + comment
+        let trailing = raw.reversed().prefix { $0 == " " || $0 == "\t" }.count
+        return raw.count - trailing
+    }
+
+    private static func isValidScalar(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        if ["true", "false", "inf", "+inf", "-inf", "nan", "+nan", "-nan"].contains(value) {
+            return true
+        }
+        let patterns = [
+            #"^[+-]?(0|[1-9](?:_?\d)*)$"#,
+            #"^[+-]?0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*$"#,
+            #"^[+-]?0o[0-7](?:_?[0-7])*$"#,
+            #"^[+-]?0b[01](?:_?[01])*$"#,
+            #"^[+-]?(?:\d(?:_?\d)*)?\.\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?$"#,
+            #"^[+-]?\d(?:_?\d)*[eE][+-]?\d(?:_?\d)*$"#,
+            #"^\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})?)?$"#,
+            #"^\d{2}:\d{2}:\d{2}(?:\.\d+)?$"#,
+        ]
+        return patterns.contains { value.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    private static func replacingCharacters(
+        in source: String,
+        from start: Int,
+        to end: Int,
+        with replacement: String
+    ) -> String {
+        let startIndex = source.index(source.startIndex, offsetBy: start)
+        let endIndex = source.index(source.startIndex, offsetBy: end)
+        return String(source[..<startIndex]) + replacement + String(source[endIndex...])
+    }
+
+    private static func renderKey(_ key: String) -> String {
+        key.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+            ? key
+            : quoted(key)
+    }
+
+    private static func quoted(_ value: String) -> String {
+        let escaped =
+            value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 }

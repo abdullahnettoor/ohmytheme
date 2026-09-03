@@ -202,6 +202,10 @@ public final class ManagedFiles: @unchecked Sendable {
         self.interruptionPoint = interruptionPoint
     }
 
+    public func existingURLs(in candidates: [URL]) throws -> [URL] {
+        try candidates.filter { try inspect(at: $0).snapshot.exists }
+    }
+
     public func inspect(at url: URL) throws -> ManagedFileInspection {
         let requestedURL = url.standardizedFileURL
         let resolvedURL = requestedURL.resolvingSymlinksInPath().standardizedFileURL
@@ -347,6 +351,33 @@ public final class ManagedFiles: @unchecked Sendable {
             return false
         }
         return marker == Self.recoveryMarker(for: plan.id, identity: identity)
+    }
+
+    public func matchesMarkedApplication(
+        _ inspection: ManagedFileInspection,
+        of plan: ManagedFilePlan
+    ) -> Bool {
+        guard hasRecoveryMarker(for: plan, in: inspection),
+            inspection.snapshot.digest == plan.intendedDigest,
+            let currentMetadata = inspection.snapshot.metadata
+        else {
+            return false
+        }
+        let beforeMetadata = plan.inspection.snapshot.metadata ?? Self.defaultMetadata
+        var currentAttributes = currentMetadata.extendedAttributes
+        var beforeAttributes = beforeMetadata.extendedAttributes
+        currentAttributes.removeValue(forKey: Self.recoveryMarkerAttribute)
+        beforeAttributes.removeValue(forKey: Self.recoveryMarkerAttribute)
+        if beforeAttributes["com.apple.provenance"] == nil {
+            currentAttributes.removeValue(forKey: "com.apple.provenance")
+        }
+        return currentMetadata.permissions == beforeMetadata.permissions
+            && currentMetadata.ownerID == beforeMetadata.ownerID
+            && currentMetadata.groupID == beforeMetadata.groupID
+            && currentMetadata.flags == beforeMetadata.flags
+            && currentAttributes == beforeAttributes
+            && currentMetadata.accessControlList == beforeMetadata.accessControlList
+            && currentMetadata.lineEnding == Self.lineEnding(of: plan.intendedBytes)
     }
 
     public func rollback(_ receipt: ManagedFileReceipt) throws {

@@ -14,17 +14,17 @@ struct StarshipAdapterTests {
     @Test("Transformer preserves comments, unrelated keys, and existing palettes")
     func preservesUnrelatedContent() throws {
         let original = """
-        # My starship config
-        format = "$directory$character"  # keep this
+            # My starship config
+            format = "$directory$character"  # keep this
 
-        [character]
-        success_symbol = "[➜](bold green)"
+            [character]
+            success_symbol = "[➜](bold green)"
 
-        [palettes.catppuccin_mocha]
-        background = "#1e1e2e"
+            [palettes.catppuccin_mocha]
+            background = "#1e1e2e"
 
-        # End comment
-        """
+            # End comment
+            """
 
         let variant = Fixtures.pack.variants[0]
         let transformed = try StarshipPaletteTransformer.applyTheme(to: Data(original.utf8), variant: variant)
@@ -52,15 +52,15 @@ struct StarshipAdapterTests {
     @Test("Transformer handles existing owned palette table and replaces its body")
     func replacesOwnedPaletteBody() throws {
         let original = """
-        palette = "oh_my_theme"  # keep comment
+            palette = "oh_my_theme"  # keep comment
 
-        [palettes.oh_my_theme]
-        old_key = "#000000"
-        another = "#111111"
+            [palettes.oh_my_theme]
+            old_key = "#000000"
+            another = "#111111"
 
-        [git_branch]
-        symbol = "🌱 "
-        """
+            [git_branch]
+            symbol = "🌱 "
+            """
         let variant = Fixtures.pack.variants[0]
         let transformed = try StarshipPaletteTransformer.applyTheme(to: Data(original.utf8), variant: variant)
         let result = String(decoding: transformed, as: UTF8.self)
@@ -90,21 +90,42 @@ struct StarshipAdapterTests {
         #expect(result.hasPrefix("  palette"))
     }
 
+    @Test("Transformer preserves mixed line endings and comments inside its owned table")
+    func preservesMixedLineEndingsAndOwnedComments() throws {
+        let original = Data(
+            "palette = \"old\"\r\nformat = \"x\"\r# keep unrelated\n\r\n[palettes.oh_my_theme]\r\n# keep managed note\rold_key = \"#000000\"\n\r\n[character]\r\nsuccess_symbol = \"ok\"\r"
+                .utf8
+        )
+
+        try StarshipPaletteTransformer.validate(original)
+        let transformed = try StarshipPaletteTransformer.applyTheme(
+            to: original,
+            variant: Fixtures.pack.variants[0]
+        )
+        let result = try #require(String(data: transformed, encoding: .utf8))
+
+        #expect(result.contains("format = \"x\"\r# keep unrelated\n\r\n"))
+        #expect(result.contains("[palettes.oh_my_theme]\r\n# keep managed note\r"))
+        #expect(result.contains("[character]\r\nsuccess_symbol = \"ok\"\r"))
+        #expect(!result.contains("old_key"))
+    }
+
     @Test("Transformer handles representative fixtures with comments, existing palette, and unrelated settings")
     func representativeFixture() throws {
         let original = """
-        # Starship configuration with comments
-          # indented comment
+            # Starship configuration with comments
+              # indented comment
 
-        format = "custom"
+            format = "custom"
 
-        [palettes.existing]
-        a = "#000000"
+            [palettes.existing]
+            a = "#000000"
 
-        [directory]
-        truncation_length = 3
-        """
-        let transformed = try StarshipPaletteTransformer.applyTheme(to: Data(original.utf8), variant: Fixtures.pack.variants[0])
+            [directory]
+            truncation_length = 3
+            """
+        let transformed = try StarshipPaletteTransformer.applyTheme(
+            to: Data(original.utf8), variant: Fixtures.pack.variants[0])
         let result = String(decoding: transformed, as: UTF8.self)
         #expect(result.contains("# Starship configuration with comments"))
         #expect(result.contains("# indented comment"))
@@ -138,25 +159,60 @@ struct StarshipAdapterTests {
         }
     }
 
+    @Test("Validation rejects invalid TOML values and invalid UTF-8 while accepting multiline strings")
+    func validatesTOMLSyntax() throws {
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("format = ???\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data([0x66, 0x6F, 0x80]))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("settings = { color = ??? }\n".utf8))
+        }
+
+        let multiline = Data("description = \"\"\"first line\nsecond line\"\"\"\n".utf8)
+        try StarshipPaletteTransformer.validate(multiline)
+        let arraysOfTables = Data(
+            "[[battery.display]]\nthreshold = 10\n[[battery.display]]\nthreshold = 20\n".utf8
+        )
+        try StarshipPaletteTransformer.validate(arraysOfTables)
+    }
+
     @Test("Validation rejects ambiguous duplicate owned palette table")
     func rejectsAmbiguousTable() throws {
         let ambiguous = """
-        [palettes.oh_my_theme]
-        a = "#111111"
-        [palettes.oh_my_theme]
-        b = "#222222"
-        """
+            [palettes.oh_my_theme]
+            a = "#111111"
+            [palettes.oh_my_theme]
+            b = "#222222"
+            """
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data(ambiguous.utf8))
+        }
+    }
+
+    @Test("Validation canonicalizes quoted managed keys and tables when detecting ambiguity")
+    func rejectsQuotedOwnershipAliases() throws {
+        let duplicateTable = Data(
+            "[palettes.oh_my_theme]\na = \"#111111\"\n[palettes.\"oh_my_theme\"]\nb = \"#222222\"\n".utf8
+        )
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(duplicateTable)
+        }
+
+        let duplicateKey = Data("palette = \"a\"\n\"palette\" = \"b\"\n".utf8)
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(duplicateKey)
         }
     }
 
     @Test("Validation rejects ambiguous duplicate top-level palette keys")
     func rejectsAmbiguousPaletteKey() throws {
         let ambiguous = """
-        palette = "a"
-        palette = "b"
-        """
+            palette = "a"
+            palette = "b"
+            """
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data(ambiguous.utf8))
         }
@@ -174,12 +230,24 @@ struct StarshipAdapterTests {
         #expect(try Data(contentsOf: fixture.configURL) == before)
     }
 
+    @Test("Adapter prepareApply refuses an unapproved linked configuration")
+    func adapterRejectsUnapprovedLinkedSource() async throws {
+        let fixture = try Fixture(linked: true)
+        let adapter = fixture.adapter()
+        let before = try Data(contentsOf: fixture.sourceURL)
+
+        await #expect(throws: StarshipAdapterError.self) {
+            _ = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        }
+        #expect(try Data(contentsOf: fixture.sourceURL) == before)
+    }
+
     @Test("Adapter prepareApply rejects ambiguous file without writing")
     func adapterRejectsAmbiguousWithoutWriting() async throws {
         let ambiguous = """
-        palette = "a"
-        palette = "b"
-        """
+            palette = "a"
+            palette = "b"
+            """
         let fixture = try Fixture(existingContents: ambiguous)
         let adapter = fixture.adapter()
         let before = try Data(contentsOf: fixture.configURL)
@@ -195,9 +263,9 @@ struct StarshipAdapterTests {
     @Test("Adapter can restore exact prior bytes when managed state hasn't changed")
     func restoresExactBytes() async throws {
         let original = """
-        # Original file
-        format = "test"
-        """
+            # Original file
+            format = "test"
+            """
         let fixture = try Fixture(existingContents: original)
         let adapter = fixture.adapter()
         let beforeBytes = try Data(contentsOf: fixture.configURL)
@@ -220,6 +288,102 @@ struct StarshipAdapterTests {
         #expect(afterInspection.snapshot.metadata?.permissions == beforeInspection.snapshot.metadata?.permissions)
     }
 
+    @Test("Prepared Starship plans survive serialization with exact intended bytes")
+    func preparedPlanSurvivesSerialization() async throws {
+        let fixture = try Fixture(existingContents: "format = \"test\"\n")
+        let adapter = fixture.adapter()
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+
+        let restored = try JSONDecoder().decode(
+            AdapterPlan.self,
+            from: JSONEncoder().encode(plan)
+        )
+
+        #expect(restored == plan)
+        #expect(restored.payload.payload == plan.payload.payload)
+    }
+
+    @Test("Repeated apply is a no-op and keeps the managed file identity")
+    func repeatedApplyDoesNotReplaceFile() async throws {
+        let fixture = try Fixture(existingContents: "format = \"test\"\n")
+        let adapter = fixture.adapter()
+        let firstPlan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        _ = try await adapter.apply(firstPlan)
+        let beforeRepeat = try fixture.managedFiles.inspect(at: fixture.configURL)
+
+        let repeatedPlan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        let repeatedReceipt = try await adapter.apply(repeatedPlan)
+        let afterRepeat = try fixture.managedFiles.inspect(at: fixture.configURL)
+
+        #expect(repeatedReceipt.configurationState == .unchanged)
+        #expect(afterRepeat.snapshot.identity == beforeRepeat.snapshot.identity)
+        #expect(afterRepeat.snapshot.bytes == beforeRepeat.snapshot.bytes)
+    }
+
+    @Test("Apply refuses a stale plan before replacing external state")
+    func applyRefusesStalePlan() async throws {
+        let fixture = try Fixture(existingContents: "format = \"before\"\n")
+        let adapter = fixture.adapter()
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        let external = Data("format = \"external\"\n".utf8)
+        try external.write(to: fixture.configURL)
+
+        await #expect(throws: StarshipAdapterError.self) {
+            _ = try await adapter.apply(plan)
+        }
+        #expect(try Data(contentsOf: fixture.configURL) == external)
+    }
+
+    @Test("Interrupted apply reconstructs a guarded receipt for Undo")
+    func interruptedApplyRecoversReceipt() async throws {
+        let original = Data("format = \"before\"\n".utf8)
+        let fixture = try Fixture(existingContents: String(decoding: original, as: UTF8.self))
+        let adapter = fixture.adapter()
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        _ = try await adapter.apply(plan)
+
+        let recovered = try await adapter.recoverApplyReceipt(plan: plan)
+        try await adapter.rollbackApply(plan: plan, receipt: recovered)
+
+        #expect(try Data(contentsOf: fixture.configURL) == original)
+    }
+
+    @Test("Recovery classifies before, intended, and conflicting states")
+    func recoveryClassifiesAllStates() async throws {
+        let fixture = try Fixture(existingContents: "format = \"before\"\n")
+        let adapter = fixture.adapter()
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+
+        #expect(try await adapter.classifyApply(plan: plan) == .beforeChange)
+        _ = try await adapter.apply(plan)
+        #expect(try await adapter.classifyApply(plan: plan) == .intendedAfterChange)
+        try Data("format = \"external\"\n".utf8).write(to: fixture.configURL)
+        #expect(try await adapter.classifyApply(plan: plan) == .conflicting)
+    }
+
+    @Test("Recovery rejects a same-content external replacement")
+    func recoveryRejectsSameContentReplacement() async throws {
+        let fixture = try Fixture(existingContents: "format = \"before\"\n")
+        let adapter = fixture.adapter()
+        let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        _ = try await adapter.apply(plan)
+        let appliedBytes = try Data(contentsOf: fixture.configURL)
+        let replacement = fixture.directory.appendingPathComponent("replacement.toml")
+        try appliedBytes.write(to: replacement)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: replacement.path
+        )
+        _ = try FileManager.default.replaceItemAt(fixture.configURL, withItemAt: replacement)
+
+        let classification = try await adapter.classifyApply(plan: plan)
+        #expect(classification == .conflicting)
+        await #expect(throws: StarshipAdapterError.self) {
+            _ = try await adapter.recoverApplyReceipt(plan: plan)
+        }
+        #expect(try Data(contentsOf: fixture.configURL) == appliedBytes)
+    }
+
     @Test("Rollback refuses to overwrite external edit")
     func rollbackRefusesExternalEdit() async throws {
         let fixture = try Fixture(existingContents: "# original\n")
@@ -234,6 +398,23 @@ struct StarshipAdapterTests {
             try await adapter.rollbackApply(plan: plan, receipt: receipt)
         }
         #expect(try String(contentsOf: fixture.configURL, encoding: .utf8) == "# external edit\n")
+    }
+
+    @Test("Connection restore refuses any state that differs from its baseline")
+    func connectionRestoreRefusesExternalState() async throws {
+        let fixture = try Fixture(existingContents: "format = \"before\"\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        try Data("format = \"external\"\n".utf8).write(to: fixture.configURL)
+        let external = try Data(contentsOf: fixture.configURL)
+
+        await #expect(throws: StarshipAdapterError.self) {
+            _ = try await adapter.restoreConnection(
+                instance: fixture.instance,
+                baseline: connection.capturedPreChangeState
+            )
+        }
+        #expect(try Data(contentsOf: fixture.configURL) == external)
     }
 
     @Test("ManagedFiles rollback restores exact bytes including malformed-opaque bytes")
@@ -255,13 +436,13 @@ struct StarshipAdapterTests {
         let adapter = fixture.adapter()
         let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
 
-        #expect(plan.activationReach == .currentInstances)
+        #expect(plan.activationReach == .newProcessesOnly)
         #expect(plan.expectedSideEffects.contains { $0.contains("next prompt") })
         // Detail on apply should mention next prompt and not redraw
         let receipt = try await adapter.apply(plan)
         #expect(receipt.detail?.contains("next prompt") == true)
         #expect(receipt.detail?.contains("existing prompt not redrawn") == true)
-        #expect(receipt.runningInstanceReach == .currentInstances)
+        #expect(receipt.runningInstanceReach == .newProcessesOnly)
     }
 
     @Test("Apply does not claim to redraw existing prompt")
@@ -271,7 +452,9 @@ struct StarshipAdapterTests {
         let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
         let receipt = try await adapter.apply(plan)
         // Ensure detail explicitly says next prompt, not current
-        #expect(!(receipt.detail?.lowercased().contains("redraw") ?? false) || receipt.detail?.contains("not redrawn") == true)
+        #expect(
+            !(receipt.detail?.lowercased().contains("redraw") ?? false)
+                || receipt.detail?.contains("not redrawn") == true)
     }
 
     // MARK: - No general-purpose config manager or shell execution (AC5)
@@ -300,7 +483,7 @@ struct StarshipAdapterTests {
 
     @Test("Discovery reports missing config without writing")
     func discoveryMissing() async throws {
-        let fixture = try Fixture(existingContents: nil) // missing
+        let fixture = try Fixture(existingContents: nil)  // missing
         let adapter = fixture.adapter(missing: true)
         let report = try await adapter.discover()
         #expect(report.configurationStatus == .missing)
@@ -326,6 +509,18 @@ struct StarshipAdapterTests {
         #expect(ambiguousReport.configurationStatus == .ambiguous)
     }
 
+    @Test("Discovery errors do not expose configuration contents")
+    func discoveryErrorsDoNotExposeContents() async throws {
+        let secret = "do-not-report-this-value"
+        let fixture = try Fixture(existingContents: "private_key = ??? # \(secret)\n")
+
+        let report = try await fixture.adapter().discover()
+
+        #expect(report.configurationStatus == .malformed)
+        #expect(report.detail?.contains(secret) == false)
+        #expect(report.detail?.contains("private_key") == false)
+    }
+
     @Test("Discovery reports linked and Nix-managed")
     func discoveryLinkedAndNix() async throws {
         let linkedFixture = try Fixture(linked: true)
@@ -342,15 +537,21 @@ struct StarshipAdapterTests {
     @Test("Durable apply via ThemeEngine preserves format and can undo")
     func durableApplyAndUndo() async throws {
         let fixture = try Fixture(existingContents: "# before\nformat = \"x\"\n")
-        let store = try PersistenceStore(databaseURL: fixture.directory.appendingPathComponent("state.sqlite"), contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true))
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true))
         let adapter = fixture.adapter()
         let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let before = try String(contentsOf: fixture.configURL, encoding: .utf8)
-        let preview = try await engine.prepare(themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
+        let preview = try await engine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID,
+            workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
+        let report = try await engine.applyDurable(
+            previewID: preview.id,
+            workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
         #expect(report.outcomes[0].configurationState == .updated)
-        #expect(report.outcomes[0].runningInstanceReach == .currentInstances)
+        #expect(report.outcomes[0].runningInstanceReach == .newProcessesOnly)
         let after = try String(contentsOf: fixture.configURL, encoding: .utf8)
         #expect(after.contains("# before"))
         #expect(after.contains("format = \"x\""))
@@ -361,6 +562,61 @@ struct StarshipAdapterTests {
         #expect(try String(contentsOf: fixture.configURL, encoding: .utf8) == before)
     }
 
+    @Test("Durable interrupted apply recovers a receipt that Undo can use")
+    func durableInterruptedApplyRecoversForUndo() async throws {
+        let fixture = try Fixture(existingContents: "format = \"before\"\n")
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [fixture.instance]
+        )
+        let adapter = fixture.adapter()
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: workspace)
+        let preview = try await engine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID,
+            workspace: workspace
+        )
+        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let appliedRecord = try #require(
+            try store.journalLoadRecords(operationID: apply.operationID).first
+        )
+        try store.journalTransitionState(operationID: apply.operationID, to: .applying)
+        try store.journalSaveRecord(
+            JournaledRecord(
+                operationID: appliedRecord.operationID,
+                targetInstanceID: appliedRecord.targetInstanceID,
+                ordinal: appliedRecord.ordinal,
+                adapterID: appliedRecord.adapterID,
+                adapterVersion: appliedRecord.adapterVersion,
+                capabilityID: appliedRecord.capabilityID,
+                phase: .applying,
+                intendedChangeDigest: appliedRecord.intendedChangeDigest,
+                staleStateToken: appliedRecord.staleStateToken,
+                planDigest: appliedRecord.planDigest,
+                receiptJSON: nil,
+                detail: nil
+            )
+        )
+
+        let relaunched = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [fixture.adapter()],
+            persistence: store
+        )
+        try await relaunched.reconcileInterruptedOperations()
+        let reconciled = try store.journalLoadRecords(operationID: apply.operationID)
+        let undo = try await relaunched.undoLast(workspace: workspace)
+
+        #expect(reconciled[0].phase == .applied)
+        #expect(undo.outcomes[0].configurationState == .updated)
+        #expect(try Data(contentsOf: fixture.configURL) == Data("format = \"before\"\n".utf8))
+    }
+
     // MARK: - Fixtures
 
     struct Fixture {
@@ -368,10 +624,12 @@ struct StarshipAdapterTests {
         let configURL: URL
         let sourceURL: URL
         let managedFiles: ManagedFiles
-        let instance = ConnectedTargetInstance(id: TargetInstanceID(rawValue: "starship.default"), displayName: "Starship, Default", adapterID: "starship")
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "starship.default"), displayName: "Starship, Default", adapterID: "starship")
 
         init(existingContents: String?) throws {
-            directory = FileManager.default.temporaryDirectory.appendingPathComponent("oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
+            directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let configDir = directory.appendingPathComponent("config", isDirectory: true)
             try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -385,7 +643,8 @@ struct StarshipAdapterTests {
         }
 
         init(existingContents: String, linked: Bool = false, nixManaged: Bool = false) throws {
-            directory = FileManager.default.temporaryDirectory.appendingPathComponent("oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
+            directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let configDir = directory.appendingPathComponent("config", isDirectory: true)
             try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -398,7 +657,8 @@ struct StarshipAdapterTests {
                 configURL = link
             } else if nixManaged {
                 let nixRoot = directory.appendingPathComponent("nix/store/abc/starship.toml")
-                try FileManager.default.createDirectory(at: nixRoot.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(
+                    at: nixRoot.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try Data(existingContents.utf8).write(to: nixRoot)
                 let link = configDir.appendingPathComponent("starship.toml")
                 if FileManager.default.fileExists(atPath: link.path) {
@@ -414,7 +674,8 @@ struct StarshipAdapterTests {
         }
 
         init(linked: Bool) throws {
-            directory = FileManager.default.temporaryDirectory.appendingPathComponent("oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
+            directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let configDir = directory.appendingPathComponent("config", isDirectory: true)
             try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
@@ -427,13 +688,15 @@ struct StarshipAdapterTests {
         }
 
         init(nixManaged: Bool) throws {
-            directory = FileManager.default.temporaryDirectory.appendingPathComponent("oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
+            directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "oh-my-theme-starship-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let configDir = directory.appendingPathComponent("config", isDirectory: true)
             try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
             sourceURL = URL(fileURLWithPath: "/nix/store/abc/starship.toml")
             let nixFile = directory.appendingPathComponent("nix/store/abc/starship.toml")
-            try FileManager.default.createDirectory(at: nixFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: nixFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("format = \"x\"\n".utf8).write(to: nixFile)
             let link = configDir.appendingPathComponent("starship.toml")
             try FileManager.default.createSymbolicLink(at: link, withDestinationURL: nixFile)
@@ -447,13 +710,22 @@ struct StarshipAdapterTests {
             if missing {
                 let missingDir = directory.appendingPathComponent("missing", isDirectory: true)
                 let missingURL = missingDir.appendingPathComponent("starship.toml")
-                return StarshipConfigurationAdapter(managedFiles: managedFiles, homeDirectory: directory, xdgConfigHome: directory.appendingPathComponent("config"), configurationURL: missingURL)
+                return StarshipConfigurationAdapter(
+                    managedFiles: managedFiles, homeDirectory: directory,
+                    xdgConfigHome: directory.appendingPathComponent("config"), configurationURL: missingURL)
             }
-            return StarshipConfigurationAdapter(managedFiles: managedFiles, homeDirectory: directory, xdgConfigHome: directory.appendingPathComponent("config"), configurationURL: url)
+            return StarshipConfigurationAdapter(
+                managedFiles: managedFiles, homeDirectory: directory,
+                xdgConfigHome: directory.appendingPathComponent("config"), configurationURL: url)
         }
 
         func theme() -> PreparedTheme {
-            PreparedTheme(variantID: Fixtures.pack.variants[0].qualifiedID, variant: Fixtures.pack.variants[0], sourceType: .generated, sourceRevision: Fixtures.pack.source.revision, attribution: Fixtures.pack.source.attribution, themeSchemaVersion: Fixtures.pack.schemaVersion, contentDigest: Fixtures.pack.variants[0].contentDigest, compilerVersion: "theme-compiler-1", upstreamArtifact: nil)
+            PreparedTheme(
+                variantID: Fixtures.pack.variants[0].qualifiedID, variant: Fixtures.pack.variants[0],
+                sourceType: .generated, sourceRevision: Fixtures.pack.source.revision,
+                attribution: Fixtures.pack.source.attribution, themeSchemaVersion: Fixtures.pack.schemaVersion,
+                contentDigest: Fixtures.pack.variants[0].contentDigest, compilerVersion: "theme-compiler-1",
+                upstreamArtifact: nil)
         }
     }
 }
