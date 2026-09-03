@@ -1,29 +1,39 @@
 import AppKit
 import Foundation
 
-struct WallpaperDisplay: Equatable, Hashable, Sendable {
-    let id: UInt32
+public struct WallpaperDisplay: Codable, Equatable, Hashable, Sendable {
+    public let id: UInt32
+
+    public init(id: UInt32) {
+        self.id = id
+    }
 }
 
-struct WallpaperPlacement: Equatable {
-    let scaling: Int?
-    let allowsClipping: Bool?
-    let fillColorArchive: Data?
+public struct WallpaperPlacement: Codable, Equatable, Sendable {
+    public let scaling: Int?
+    public let allowsClipping: Bool?
+    public let fillColorArchive: Data?
 
-    init(scaling: Int? = nil, allowsClipping: Bool? = nil, fillColorArchive: Data? = nil) {
+    public init(scaling: Int? = nil, allowsClipping: Bool? = nil, fillColorArchive: Data? = nil) {
         self.scaling = scaling
         self.allowsClipping = allowsClipping
         self.fillColorArchive = fillColorArchive
     }
 }
 
-struct WallpaperSnapshot: Equatable {
-    let display: WallpaperDisplay
-    let imageURL: URL
-    let placement: WallpaperPlacement
+public struct WallpaperSnapshot: Codable, Equatable, Sendable {
+    public let display: WallpaperDisplay
+    public let imageURL: URL
+    public let placement: WallpaperPlacement
+
+    public init(display: WallpaperDisplay, imageURL: URL, placement: WallpaperPlacement) {
+        self.display = display
+        self.imageURL = imageURL
+        self.placement = placement
+    }
 }
 
-enum WallpaperCapabilityError: Error, Equatable {
+public enum WallpaperCapabilityError: Error, Equatable, Sendable {
     case noConnectedDisplays
     case noSelectedDisplays
     case unknownDisplays([UInt32])
@@ -35,7 +45,7 @@ enum WallpaperCapabilityError: Error, Equatable {
     case restoreFailed(UInt32, String)
 }
 
-protocol WallpaperPlatform {
+public protocol WallpaperPlatform {
     func connectedDisplays() -> [WallpaperDisplay]
     func snapshot(for display: WallpaperDisplay) throws -> WallpaperSnapshot
     func setImage(
@@ -45,9 +55,14 @@ protocol WallpaperPlatform {
     ) throws
 }
 
-struct WallpaperApplyReceipt: Equatable {
-    let priorSnapshots: [WallpaperSnapshot]
-    let appliedSnapshots: [WallpaperSnapshot]
+public struct WallpaperApplyReceipt: Equatable {
+    public let priorSnapshots: [WallpaperSnapshot]
+    public let appliedSnapshots: [WallpaperSnapshot]
+
+    public init(priorSnapshots: [WallpaperSnapshot], appliedSnapshots: [WallpaperSnapshot]) {
+        self.priorSnapshots = priorSnapshots
+        self.appliedSnapshots = appliedSnapshots
+    }
 }
 
 struct WallpaperCapabilityProof {
@@ -157,20 +172,20 @@ struct WallpaperCapabilityProof {
     }
 }
 
-struct SystemWallpaperPlatform: WallpaperPlatform {
+public struct SystemWallpaperPlatform: WallpaperPlatform {
     private let workspace: NSWorkspace
 
-    init(workspace: NSWorkspace = .shared) {
+    public init(workspace: NSWorkspace = .shared) {
         self.workspace = workspace
     }
 
-    func connectedDisplays() -> [WallpaperDisplay] {
+    public func connectedDisplays() -> [WallpaperDisplay] {
         NSScreen.screens.compactMap { screen in
             displayID(for: screen).map(WallpaperDisplay.init(id:))
         }
     }
 
-    func snapshot(for display: WallpaperDisplay) throws -> WallpaperSnapshot {
+    public func snapshot(for display: WallpaperDisplay) throws -> WallpaperSnapshot {
         guard let screen = screen(for: display) else {
             throw WallpaperCapabilityError.displayUnavailable(display.id)
         }
@@ -186,7 +201,7 @@ struct SystemWallpaperPlatform: WallpaperPlatform {
         )
     }
 
-    func setImage(
+    public func setImage(
         _ imageURL: URL,
         placement: WallpaperPlacement,
         for display: WallpaperDisplay
