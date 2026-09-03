@@ -17,6 +17,7 @@ public enum ThemeSourceKind: String, Codable, Equatable, Sendable {
 
 public enum ActivationReach: String, Codable, Equatable, Sendable {
     case currentInstances
+    case nextPrompt
     case newProcessesOnly
     case reloadRequired
     case unavailable
@@ -640,6 +641,7 @@ public actor ThemeEngine {
     private static func worstReach(_ left: ActivationReach, _ right: ActivationReach) -> ActivationReach {
         let order: [ActivationReach] = [
             .currentInstances,
+            .nextPrompt,
             .reloadRequired,
             .newProcessesOnly,
             .unavailable,

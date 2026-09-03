@@ -110,6 +110,29 @@ struct StarshipAdapterTests {
         #expect(!result.contains("old_key"))
     }
 
+    @Test("Transformer changes only exact managed byte ranges")
+    func changesOnlyManagedByteRanges() throws {
+        let original = Data(
+            "palette   =   \"old\"  # selection\r\nformat = \"$directory\"\r[palettes.oh_my_theme]\n# managed note\r\nold_key = \"#000000\"\r[character]\nsuccess_symbol = \"ok\"\r"
+                .utf8
+        )
+        let variant = ThemeVariant(
+            id: "focused",
+            displayName: "Focused",
+            appearance: .dark,
+            contentDigest: "sha256:focused",
+            roles: [.canvas: ThemeColor(rawValue: "#123456")]
+        )
+        let expected = Data(
+            "palette   =   \"oh_my_theme\"  # selection\r\nformat = \"$directory\"\r[palettes.oh_my_theme]\n# managed note\r\ncanvas = \"#123456\"\r\n[character]\nsuccess_symbol = \"ok\"\r"
+                .utf8
+        )
+
+        let transformed = try StarshipPaletteTransformer.applyTheme(to: original, variant: variant)
+
+        #expect(transformed == expected)
+    }
+
     @Test("Transformer handles representative fixtures with comments, existing palette, and unrelated settings")
     func representativeFixture() throws {
         let original = """
@@ -170,6 +193,9 @@ struct StarshipAdapterTests {
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data("settings = { color = ??? }\n".utf8))
         }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("label = \"\\u\"\n".utf8))
+        }
 
         let multiline = Data("description = \"\"\"first line\nsecond line\"\"\"\n".utf8)
         try StarshipPaletteTransformer.validate(multiline)
@@ -204,6 +230,11 @@ struct StarshipAdapterTests {
         let duplicateKey = Data("palette = \"a\"\n\"palette\" = \"b\"\n".utf8)
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(duplicateKey)
+        }
+
+        let escapedDuplicateKey = Data("\"pal\\u0065tte\" = \"a\"\npalette = \"b\"\n".utf8)
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(escapedDuplicateKey)
         }
     }
 
@@ -436,13 +467,13 @@ struct StarshipAdapterTests {
         let adapter = fixture.adapter()
         let plan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
 
-        #expect(plan.activationReach == .newProcessesOnly)
+        #expect(plan.activationReach == .nextPrompt)
         #expect(plan.expectedSideEffects.contains { $0.contains("next prompt") })
         // Detail on apply should mention next prompt and not redraw
         let receipt = try await adapter.apply(plan)
         #expect(receipt.detail?.contains("next prompt") == true)
         #expect(receipt.detail?.contains("existing prompt not redrawn") == true)
-        #expect(receipt.runningInstanceReach == .newProcessesOnly)
+        #expect(receipt.runningInstanceReach == .nextPrompt)
     }
 
     @Test("Apply does not claim to redraw existing prompt")
@@ -551,7 +582,7 @@ struct StarshipAdapterTests {
             previewID: preview.id,
             workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
         #expect(report.outcomes[0].configurationState == .updated)
-        #expect(report.outcomes[0].runningInstanceReach == .newProcessesOnly)
+        #expect(report.outcomes[0].runningInstanceReach == .nextPrompt)
         let after = try String(contentsOf: fixture.configURL, encoding: .utf8)
         #expect(after.contains("# before"))
         #expect(after.contains("format = \"x\""))

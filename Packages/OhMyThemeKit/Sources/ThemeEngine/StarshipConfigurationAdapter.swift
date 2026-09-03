@@ -473,7 +473,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
             requiredPermissions: ["Write the Starship configuration"],
             sourceType: theme.sourceType,
             sourceRevision: theme.sourceRevision,
-            activationReach: .newProcessesOnly,
+            activationReach: .nextPrompt,
             setupNeeds: [],
             conflicts: []
         )
@@ -505,7 +505,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
         }
         return AdapterReceipt(
             configurationState: receipt.changed ? .updated : .unchanged,
-            runningInstanceReach: .newProcessesOnly,
+            runningInstanceReach: .nextPrompt,
             detail: receipt.changed
                 ? "Starship theme updated; next prompt will use \(StarshipPaletteTransformer.ownedPaletteName) palette (existing prompt not redrawn)"
                 : "Starship theme already selected; next prompt will use \(StarshipPaletteTransformer.ownedPaletteName) palette (existing prompt not redrawn)",
@@ -546,7 +546,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
         )
         return AdapterReceipt(
             configurationState: managedReceipt.changed ? .updated : .unchanged,
-            runningInstanceReach: .newProcessesOnly,
+            runningInstanceReach: .nextPrompt,
             detail: "Starship theme apply recovered; the next prompt will use the selected palette",
             rollbackData: try encode(managedReceipt)
         )
