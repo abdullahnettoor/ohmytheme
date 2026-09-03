@@ -84,11 +84,22 @@ private struct StarshipTOMLDocument {
                 let end = assignment.valueEndColumn
             else {
                 throw StarshipAdapterError.ambiguousConfiguration(
-                    "the top-level palette assignment must be a single-line value"
+                    "top-level palette assignment must be one line"
                 )
             }
             replaceValue(on: assignment.startLine, from: start, to: end, with: Self.quoted(name))
             return
+        }
+
+        let namespaceOccupied =
+            tables.contains { $0.path.first == StarshipPaletteTransformer.topLevelPaletteKey }
+            || assignments.contains {
+                ($0.tablePath + $0.keyPath).first == StarshipPaletteTransformer.topLevelPaletteKey
+            }
+        guard !namespaceOccupied else {
+            throw StarshipAdapterError.ambiguousConfiguration(
+                "the top-level palette key conflicts with an existing TOML namespace"
+            )
         }
 
         let insertion = tables.first?.line ?? lines.count
@@ -171,6 +182,7 @@ private struct StarshipTOMLDocument {
         var seenTables: Set<[String]> = []
         var arrayTableCounts: [[String]: Int] = [:]
         var seenKeys: Set<AssignmentIdentity> = []
+        var valuePaths: Set<[String]> = []
         var lineIndex = 0
 
         while lineIndex < lines.count {
@@ -182,6 +194,15 @@ private struct StarshipTOMLDocument {
             }
             if trimmed.hasPrefix("[") {
                 let parsed = try Self.parseTableHeader(trimmed, line: lineIndex)
+                guard
+                    !valuePaths.contains(where: { path in
+                        parsed.path.starts(with: path) || path.starts(with: parsed.path)
+                    })
+                else {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "TOML key conflicts with a table at line \(lineIndex + 1)"
+                    )
+                }
                 tablePath = parsed.path
                 if parsed.isArray {
                     guard parsed.path != ["palettes", StarshipPaletteTransformer.ownedPaletteName],
@@ -218,6 +239,18 @@ private struct StarshipTOMLDocument {
                 throw StarshipAdapterError.ambiguousConfiguration(
                     "the managed palette must use one standard TOML table"
                 )
+            }
+            if arrayOccurrence == nil {
+                guard
+                    !valuePaths.contains(where: { path in
+                        path != fullPath && (fullPath.starts(with: path) || path.starts(with: fullPath))
+                    }), !seenTables.contains(fullPath), arrayTableCounts[fullPath] == nil
+                else {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "TOML key conflicts with an existing namespace at line \(lineIndex + 1)"
+                    )
+                }
+                valuePaths.insert(fullPath)
             }
             let identity = AssignmentIdentity(
                 tablePath: tablePath,
@@ -403,7 +436,7 @@ private struct StarshipTOMLDocument {
                     let character = source[index]
                     if quote == "\"", character == "\\" {
                         index = source.index(after: index)
-                        value += try decodeKeyEscape(in: source, index: &index, line: line)
+                        value += try decodeEscape(in: source, index: &index, line: line)
                     } else if character == quote {
                         index = source.index(after: index)
                         closed = true
@@ -419,9 +452,7 @@ private struct StarshipTOMLDocument {
                 component = value
             } else {
                 let start = index
-                while index < source.endIndex,
-                    source[index].isLetter || source[index].isNumber || source[index] == "_" || source[index] == "-"
-                {
+                while index < source.endIndex, isBareKeyCharacter(source[index]) {
                     index = source.index(after: index)
                 }
                 guard start != index else {
@@ -444,9 +475,20 @@ private struct StarshipTOMLDocument {
         return components
     }
 
-    private static func decodeKeyEscape(
-        in source: String,
-        index: inout String.Index,
+    private static func isBareKeyCharacter(_ character: Character) -> Bool {
+        guard character.unicodeScalars.count == 1, let scalar = character.unicodeScalars.first else {
+            return false
+        }
+        return (65...90).contains(scalar.value)
+            || (97...122).contains(scalar.value)
+            || (48...57).contains(scalar.value)
+            || scalar.value == 95
+            || scalar.value == 45
+    }
+
+    private static func decodeEscape<Source: StringProtocol>(
+        in source: Source,
+        index: inout Source.Index,
         line: Int
     ) throws -> String {
         guard index < source.endIndex else {
@@ -587,7 +629,7 @@ private struct StarshipTOMLDocument {
                         index = source.index(after: index)
                     }
                 } else {
-                    try validateStringEscape(in: source, index: &index, line: line)
+                    _ = try decodeEscape(in: source, index: &index, line: line)
                 }
                 continue
             }
@@ -597,41 +639,6 @@ private struct StarshipTOMLDocument {
             index = source.index(after: index)
         }
         throw StarshipAdapterError.malformedConfiguration("unterminated TOML string at line \(line + 1)")
-    }
-
-    private static func validateStringEscape(
-        in source: Substring,
-        index: inout Substring.Index,
-        line: Int
-    ) throws {
-        guard index < source.endIndex else {
-            throw StarshipAdapterError.malformedConfiguration("invalid TOML escape at line \(line + 1)")
-        }
-        let escape = source[index]
-        index = source.index(after: index)
-        switch escape {
-        case "b", "t", "n", "f", "r", "\"", "\\":
-            return
-        case "u", "U":
-            let count = escape == "u" ? 4 : 8
-            var digits = ""
-            for _ in 0..<count {
-                guard index < source.endIndex, source[index].isHexDigit else {
-                    throw StarshipAdapterError.malformedConfiguration(
-                        "invalid TOML Unicode escape at line \(line + 1)"
-                    )
-                }
-                digits.append(source[index])
-                index = source.index(after: index)
-            }
-            guard let value = UInt32(digits, radix: 16), UnicodeScalar(value) != nil else {
-                throw StarshipAdapterError.malformedConfiguration(
-                    "invalid TOML Unicode escape at line \(line + 1)"
-                )
-            }
-        default:
-            throw StarshipAdapterError.malformedConfiguration("invalid TOML escape at line \(line + 1)")
-        }
     }
 
     private static func consumeComposite(
@@ -645,7 +652,7 @@ private struct StarshipTOMLDocument {
         var bareToken = ""
         var lastSignificantTokenWasComma = false
 
-        func validateBareToken() throws {
+        func validateBareToken(allowSeparateValue: Bool = false) throws {
             let token = bareToken.trimmingCharacters(in: .whitespacesAndNewlines)
             bareToken = ""
             guard !token.isEmpty else { return }
@@ -654,7 +661,7 @@ private struct StarshipTOMLDocument {
                 _ = try parseKeyPath(key, line: line)
                 let value = String(token[token.index(after: equals)...])
                     .trimmingCharacters(in: .whitespaces)
-                guard value.isEmpty || isValidScalar(value) else {
+                guard (!value.isEmpty && isValidScalar(value)) || (value.isEmpty && allowSeparateValue) else {
                     throw StarshipAdapterError.malformedConfiguration(
                         "invalid TOML value at line \(line + 1)"
                     )
@@ -687,13 +694,13 @@ private struct StarshipTOMLDocument {
                 try validateBareToken()
                 inComment = true
             } else if character == "\"" || character == "'" {
-                try validateBareToken()
+                try validateBareToken(allowSeparateValue: true)
                 lastSignificantTokenWasComma = false
                 let consumed = try consumeString(source[index...], quote: character, line: line)
                 index = source.index(index, offsetBy: consumed)
                 continue
             } else if character == "[" || character == "{" {
-                try validateBareToken()
+                try validateBareToken(allowSeparateValue: true)
                 lastSignificantTokenWasComma = false
                 stack.append(character)
             } else if character == "]" || character == "}" {

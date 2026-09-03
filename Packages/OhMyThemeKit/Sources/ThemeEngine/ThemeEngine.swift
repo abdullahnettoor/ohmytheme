@@ -416,7 +416,26 @@ public actor ThemeEngine {
                 upstreamArtifact: targetSource.artifact
             )
             do {
-                let plan = try await adapter.prepareApply(instance: instance, theme: preparedTheme)
+                let plan: AdapterPlan
+                if let writableAdapter = adapter as? any WritableThemeAdapter {
+                    let connectionBaseline: Data?
+                    if let persistence = persistenceForOperations,
+                        let baseline = try persistence.journalLoadConnectionBaseline(targetInstanceID: instance.id),
+                        baseline.adapterID == adapter.id,
+                        baseline.adapterVersion == adapter.version
+                    {
+                        connectionBaseline = try persistence.loadContent(baseline.baselineReference)
+                    } else {
+                        connectionBaseline = nil
+                    }
+                    plan = try await writableAdapter.prepareApply(
+                        instance: instance,
+                        theme: preparedTheme,
+                        connectionBaseline: connectionBaseline
+                    )
+                } else {
+                    plan = try await adapter.prepareApply(instance: instance, theme: preparedTheme)
+                }
                 if let persistence = persistenceForOperations {
                     try persist(plan: plan, previewID: previewID, persistence: persistence)
                 }

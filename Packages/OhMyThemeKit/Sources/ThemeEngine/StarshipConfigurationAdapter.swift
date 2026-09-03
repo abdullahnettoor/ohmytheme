@@ -114,19 +114,24 @@ public struct StarshipConnectionPayload: Codable, Equatable, Sendable {
 
 public struct StarshipConnectionBaseline: Codable, Equatable, Sendable {
     public let inspection: ManagedFileInspection
+    public let approvedLinkedSourceURL: URL?
 
-    public init(inspection: ManagedFileInspection) {
+    public init(
+        inspection: ManagedFileInspection,
+        approvedLinkedSourceURL: URL? = nil
+    ) {
         self.inspection = inspection
+        self.approvedLinkedSourceURL = approvedLinkedSourceURL
     }
 }
 
 public struct StarshipDisconnectPayload: Codable, Equatable, Sendable {
     public let details: StarshipConnectionDetails
-    public let fileAfter: ManagedFileInspection
+    public let restorationReceipt: ManagedFileReceipt
 
-    public init(details: StarshipConnectionDetails, fileAfter: ManagedFileInspection) {
+    public init(details: StarshipConnectionDetails, restorationReceipt: ManagedFileReceipt) {
         self.details = details
-        self.fileAfter = fileAfter
+        self.restorationReceipt = restorationReceipt
     }
 }
 
@@ -289,8 +294,11 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
             expectedReach: "next prompt"
         )
 
-        // Connection baseline captures current inspection; no file mutation yet
-        let baseline = StarshipConnectionBaseline(inspection: inspection)
+        // Connection baseline captures current inspection and any reviewed linked source; no file mutation yet.
+        let baseline = StarshipConnectionBaseline(
+            inspection: inspection,
+            approvedLinkedSourceURL: approveLinkedSource ? isLinked : nil
+        )
         let requiresApproval = isLinked != nil && !approveLinkedSource
 
         return ConnectionPlan(
@@ -349,13 +357,20 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     public func restoreConnection(instance: ConnectedTargetInstance, baseline: Data) async throws -> ConnectionReceipt {
         let saved = try decode(StarshipConnectionBaseline.self, from: baseline)
         let current = try managedFiles.inspect(at: saved.inspection.requestedURL)
-        guard current == saved.inspection else {
-            throw StarshipAdapterError.restorationConflict
+        let receipt = try restorationReceipt(from: current, to: saved.inspection)
+        if receipt.changed {
+            do {
+                try managedFiles.rollback(receipt)
+            } catch {
+                throw StarshipAdapterError.restorationConflict
+            }
         }
         return ConnectionReceipt(
-            configurationState: .unchanged,
-            runningInstanceReach: .currentInstances,
-            detail: "Starship is already at its connection baseline"
+            configurationState: receipt.changed ? .updated : .unchanged,
+            runningInstanceReach: .nextPrompt,
+            detail: receipt.changed
+                ? "Starship restored its connection baseline; the next prompt will use it"
+                : "Starship is already at its connection baseline"
         )
     }
 
@@ -366,9 +381,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     ) async throws -> DisconnectPlan {
         let saved = try decode(StarshipConnectionBaseline.self, from: baselineData)
         let current = try managedFiles.inspect(at: saved.inspection.requestedURL)
-        guard current == saved.inspection else {
-            throw StarshipAdapterError.restorationConflict
-        }
+        let restorationReceipt = try restorationReceipt(from: current, to: saved.inspection)
         let details = StarshipConnectionDetails(
             resolvedConfigURL: current.resolvedURL,
             resolvedConfigPermissions: current.snapshot.metadata?.permissions ?? 0o600,
@@ -381,7 +394,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
             adapterVersion: version,
             baselineReference: baseline.baselineReference,
             staleStateToken: current.snapshot.staleStateToken,
-            opaquePayload: try encode(StarshipDisconnectPayload(details: details, fileAfter: current))
+            opaquePayload: try encode(
+                StarshipDisconnectPayload(details: details, restorationReceipt: restorationReceipt)
+            )
         )
     }
 
@@ -389,42 +404,76 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
         try await revalidateDisconnect(plan: plan)
         let saved = try decode(StarshipConnectionBaseline.self, from: baseline)
         let payload = try disconnectPayload(from: plan)
-        let current = try managedFiles.inspect(at: payload.fileAfter.requestedURL)
-        guard current == payload.fileAfter, current == saved.inspection else {
-            throw StarshipAdapterError.restorationConflict
+        guard payload.restorationReceipt.before == saved.inspection else {
+            throw StarshipAdapterError.malformedPlan
+        }
+        if payload.restorationReceipt.changed {
+            do {
+                try managedFiles.rollback(payload.restorationReceipt)
+            } catch {
+                throw StarshipAdapterError.restorationConflict
+            }
         }
         return AdapterReceipt(
-            configurationState: .unchanged,
-            runningInstanceReach: .currentInstances,
-            detail: "Starship disconnected without changing its configuration"
+            configurationState: payload.restorationReceipt.changed ? .updated : .unchanged,
+            runningInstanceReach: .nextPrompt,
+            detail: payload.restorationReceipt.changed
+                ? "Starship disconnected and restored its baseline; the next prompt will use it"
+                : "Starship disconnected without changing its configuration"
         )
     }
 
     public func revalidateDisconnect(plan: DisconnectPlan) async throws {
         let payload = try disconnectPayload(from: plan)
-        let current = try managedFiles.inspect(at: payload.fileAfter.requestedURL)
-        guard current == payload.fileAfter else {
+        let current = try managedFiles.inspect(at: payload.restorationReceipt.after.requestedURL)
+        guard current == payload.restorationReceipt.after else {
             throw StarshipAdapterError.staleState
         }
     }
 
     public func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification {
         let payload = try disconnectPayload(from: plan)
-        let current = try managedFiles.inspect(at: payload.fileAfter.requestedURL)
-        return current == payload.fileAfter ? .beforeChange : .conflicting
+        let current = try managedFiles.inspect(at: payload.restorationReceipt.after.requestedURL)
+        if current == payload.restorationReceipt.after {
+            return .beforeChange
+        }
+        if current == payload.restorationReceipt.before {
+            return .intendedAfterChange
+        }
+        return .conflicting
     }
 
     // MARK: Theme Apply
 
     public func prepareApply(instance: ConnectedTargetInstance, theme: PreparedTheme) async throws -> AdapterPlan {
+        try await prepareApply(instance: instance, theme: theme, connectionBaseline: nil)
+    }
+
+    public func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme,
+        connectionBaseline: Data?
+    ) async throws -> AdapterPlan {
         let discoveredURL = try managedFiles.existingURLs(in: locator.candidates).last
         let requestedURL = (configuredConfigurationURL ?? discoveredURL ?? locator.defaultURL).standardizedFileURL
         let before = try managedFiles.inspect(at: requestedURL)
         if case .managedByNix = before.ownership {
             throw StarshipAdapterError.managedByNix(before.resolvedURL)
         }
-        if let linkedSource = linkedSourceURL(from: before.ownership) {
-            throw StarshipAdapterError.linkedSourceApprovalRequired(linkedSource)
+        let linkedSource = linkedSourceURL(from: before.ownership)
+        let linkedSourceApproved: Bool
+        if let linkedSource {
+            guard let connectionBaseline,
+                let baseline = try? decode(StarshipConnectionBaseline.self, from: connectionBaseline),
+                baseline.inspection.requestedURL == before.requestedURL,
+                baseline.inspection.resolvedURL == before.resolvedURL,
+                baseline.approvedLinkedSourceURL?.standardizedFileURL == linkedSource.standardizedFileURL
+            else {
+                throw StarshipAdapterError.linkedSourceApprovalRequired(linkedSource)
+            }
+            linkedSourceApproved = true
+        } else {
+            linkedSourceApproved = false
         }
         let existingBytes = before.snapshot.bytes ?? Data()
         // Reject malformed/ambiguous before preparing
@@ -443,9 +492,17 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
         let filePlan: ManagedFilePlan
         if before.snapshot.lineEnding == .none || before.snapshot.lineEnding == .mixed {
             // Allow creation from empty/missing or mixed line endings
-            filePlan = try managedFiles.prepareForConnection(at: requestedURL, replacingWith: finalIntended)
+            filePlan = try managedFiles.prepareForConnection(
+                at: requestedURL,
+                replacingWith: finalIntended,
+                approveLinkedSource: linkedSourceApproved
+            )
         } else {
-            filePlan = try managedFiles.prepare(at: requestedURL, replacingWith: finalIntended)
+            filePlan = try managedFiles.prepare(
+                at: requestedURL,
+                replacingWith: finalIntended,
+                approveLinkedSource: linkedSourceApproved
+            )
         }
 
         let details = StarshipConnectionDetails(
@@ -586,6 +643,19 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     // MARK: - Helpers
+
+    private func restorationReceipt(
+        from current: ManagedFileInspection,
+        to baseline: ManagedFileInspection
+    ) throws -> ManagedFileReceipt {
+        if current == baseline {
+            return ManagedFileReceipt(planID: UUID(), before: baseline, after: current, changed: false)
+        }
+        guard managedFiles.matchesMarkedManagedState(current, preserving: baseline) else {
+            throw StarshipAdapterError.restorationConflict
+        }
+        return ManagedFileReceipt(planID: UUID(), before: baseline, after: current, changed: true)
+    }
 
     private func themeState(from plan: AdapterPlan) throws -> StarshipThemeState {
         guard let data = plan.capturedPreChangeState else { throw StarshipAdapterError.malformedPlan }

@@ -345,12 +345,11 @@ public final class ManagedFiles: @unchecked Sendable {
         in inspection: ManagedFileInspection
     ) -> Bool {
         guard inspection.resolvedURL == plan.resolvedURL,
-            let identity = inspection.snapshot.identity,
-            let marker = inspection.snapshot.metadata?.extendedAttributes[Self.recoveryMarkerAttribute]
+            let marker = Self.validRecoveryMarker(in: inspection)
         else {
             return false
         }
-        return marker == Self.recoveryMarker(for: plan.id, identity: identity)
+        return marker.planID == plan.id && marker.digest == plan.intendedDigest
     }
 
     public func matchesMarkedApplication(
@@ -358,26 +357,37 @@ public final class ManagedFiles: @unchecked Sendable {
         of plan: ManagedFilePlan
     ) -> Bool {
         guard hasRecoveryMarker(for: plan, in: inspection),
-            inspection.snapshot.digest == plan.intendedDigest,
-            let currentMetadata = inspection.snapshot.metadata
+            inspection.snapshot.digest == plan.intendedDigest
         else {
             return false
         }
-        let beforeMetadata = plan.inspection.snapshot.metadata ?? Self.defaultMetadata
-        var currentAttributes = currentMetadata.extendedAttributes
-        var beforeAttributes = beforeMetadata.extendedAttributes
-        currentAttributes.removeValue(forKey: Self.recoveryMarkerAttribute)
-        beforeAttributes.removeValue(forKey: Self.recoveryMarkerAttribute)
-        if beforeAttributes["com.apple.provenance"] == nil {
-            currentAttributes.removeValue(forKey: "com.apple.provenance")
+        return Self.metadataMatchesManagedReplacement(
+            inspection.snapshot.metadata,
+            preserving: plan.inspection.snapshot.metadata,
+            intendedLineEnding: Self.lineEnding(of: plan.intendedBytes)
+        )
+    }
+
+    public func matchesMarkedManagedState(
+        _ inspection: ManagedFileInspection,
+        preserving baseline: ManagedFileInspection
+    ) -> Bool {
+        guard inspection.requestedURL == baseline.requestedURL,
+            inspection.resolvedURL == baseline.resolvedURL,
+            inspection.ownership == baseline.ownership,
+            Self.validRecoveryMarker(in: inspection) != nil
+        else {
+            return false
         }
-        return currentMetadata.permissions == beforeMetadata.permissions
-            && currentMetadata.ownerID == beforeMetadata.ownerID
-            && currentMetadata.groupID == beforeMetadata.groupID
-            && currentMetadata.flags == beforeMetadata.flags
-            && currentAttributes == beforeAttributes
-            && currentMetadata.accessControlList == beforeMetadata.accessControlList
-            && currentMetadata.lineEnding == Self.lineEnding(of: plan.intendedBytes)
+        let expectedLineEnding =
+            baseline.snapshot.exists
+            ? baseline.snapshot.lineEnding
+            : inspection.snapshot.lineEnding
+        return Self.metadataMatchesManagedReplacement(
+            inspection.snapshot.metadata,
+            preserving: baseline.snapshot.metadata,
+            intendedLineEnding: expectedLineEnding
+        )
     }
 
     public func rollback(_ receipt: ManagedFileReceipt) throws {
@@ -543,7 +553,8 @@ public final class ManagedFiles: @unchecked Sendable {
                     [
                         Self.recoveryMarkerAttribute: Self.recoveryMarker(
                             for: applyMarker,
-                            identity: temporaryIdentity
+                            identity: temporaryIdentity,
+                            digest: Self.digest(of: bytes)
                         )
                     ],
                     at: temporaryURL
@@ -754,11 +765,62 @@ public final class ManagedFiles: @unchecked Sendable {
 
     private static let recoveryMarkerAttribute = "com.ohmytheme.apply-id"
 
+    private struct RecoveryMarker {
+        let planID: UUID
+        let identity: ManagedFileIdentity
+        let digest: String
+    }
+
     private static func recoveryMarker(
         for planID: UUID,
-        identity: ManagedFileIdentity
+        identity: ManagedFileIdentity,
+        digest: String
     ) -> Data {
-        Data("\(planID.uuidString)|\(identity.device)|\(identity.inode)".utf8)
+        Data("\(planID.uuidString)|\(identity.device)|\(identity.inode)|\(digest)".utf8)
+    }
+
+    private static func validRecoveryMarker(in inspection: ManagedFileInspection) -> RecoveryMarker? {
+        guard let identity = inspection.snapshot.identity,
+            let digest = inspection.snapshot.digest,
+            let data = inspection.snapshot.metadata?.extendedAttributes[recoveryMarkerAttribute],
+            let encoded = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        let fields = encoded.split(separator: "|", omittingEmptySubsequences: false)
+        guard fields.count == 4,
+            let planID = UUID(uuidString: String(fields[0])),
+            let device = UInt64(fields[1]),
+            let inode = UInt64(fields[2]),
+            fields[3] == Substring(digest),
+            identity == ManagedFileIdentity(device: device, inode: inode)
+        else {
+            return nil
+        }
+        return RecoveryMarker(planID: planID, identity: identity, digest: digest)
+    }
+
+    private static func metadataMatchesManagedReplacement(
+        _ current: ManagedFileMetadata?,
+        preserving baseline: ManagedFileMetadata?,
+        intendedLineEnding: ManagedFileLineEnding
+    ) -> Bool {
+        guard let current else { return false }
+        let baseline = baseline ?? defaultMetadata
+        var currentAttributes = current.extendedAttributes
+        var baselineAttributes = baseline.extendedAttributes
+        currentAttributes.removeValue(forKey: recoveryMarkerAttribute)
+        baselineAttributes.removeValue(forKey: recoveryMarkerAttribute)
+        if baselineAttributes["com.apple.provenance"] == nil {
+            currentAttributes.removeValue(forKey: "com.apple.provenance")
+        }
+        return current.permissions == baseline.permissions
+            && current.ownerID == baseline.ownerID
+            && current.groupID == baseline.groupID
+            && current.flags == baseline.flags
+            && currentAttributes == baselineAttributes
+            && current.accessControlList == baseline.accessControlList
+            && current.lineEnding == intendedLineEnding
     }
 
     private static let defaultNixRoots = [

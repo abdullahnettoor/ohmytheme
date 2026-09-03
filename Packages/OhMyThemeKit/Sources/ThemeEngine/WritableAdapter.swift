@@ -154,6 +154,12 @@ public protocol RecoverableApplyAdapter: WritableThemeAdapter {
 }
 
 public protocol WritableThemeAdapter: ThemeAdapter {
+    func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme,
+        connectionBaseline: Data?
+    ) async throws -> AdapterPlan
+
     func prepareConnection(
         instance: ConnectedTargetInstance,
         approveLinkedSource: Bool
@@ -178,6 +184,14 @@ public protocol WritableThemeAdapter: ThemeAdapter {
 }
 
 public extension WritableThemeAdapter {
+    func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme,
+        connectionBaseline: Data?
+    ) async throws -> AdapterPlan {
+        try await prepareApply(instance: instance, theme: theme)
+    }
+
     func prepareConnection(instance: ConnectedTargetInstance) async throws -> ConnectionPlan {
         try await prepareConnection(instance: instance, approveLinkedSource: false)
     }

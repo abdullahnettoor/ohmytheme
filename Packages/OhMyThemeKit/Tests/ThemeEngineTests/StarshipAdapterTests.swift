@@ -202,6 +202,12 @@ struct StarshipAdapterTests {
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data("settings = { color = \"blue\", }\n".utf8))
         }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("settings = { color = }\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("café = \"quoted key required\"\n".utf8))
+        }
 
         try StarshipPaletteTransformer.validate(Data("\"\" = \"empty quoted key\"\n".utf8))
         let multiline = Data("description = \"\"\"first line\nsecond line\"\"\"\n".utf8)
@@ -253,6 +259,28 @@ struct StarshipAdapterTests {
         )
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(inlineOwnedPalette)
+        }
+    }
+
+    @Test("Validation rejects TOML key and table namespace conflicts")
+    func rejectsKeyTableNamespaceConflict() throws {
+        let malformed = Data("palette = \"value\"\n[palette]\nformat = \"table\"\n".utf8)
+
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(malformed)
+        }
+    }
+
+    @Test("Theme application rejects a top-level palette table that conflicts with the managed key")
+    func rejectsPaletteNamespaceConflict() throws {
+        let conflicting = Data("[palette]\nformat = \"table\"\n".utf8)
+        try StarshipPaletteTransformer.validate(conflicting)
+
+        #expect(throws: StarshipAdapterError.self) {
+            _ = try StarshipPaletteTransformer.applyTheme(
+                to: conflicting,
+                variant: Fixtures.pack.variants[0]
+            )
         }
     }
 
@@ -335,6 +363,51 @@ struct StarshipAdapterTests {
         // Verify metadata preserved (permissions) via ManagedFiles inspection
         let afterInspection = try fixture.managedFiles.inspect(at: fixture.configURL)
         #expect(afterInspection.snapshot.metadata?.permissions == beforeInspection.snapshot.metadata?.permissions)
+    }
+
+    @Test("Disconnect restores the exact connection baseline after a theme apply")
+    func disconnectRestoresAppliedConfiguration() async throws {
+        let original = Data("# original\nformat = \"test\"\n".utf8)
+        let fixture = try Fixture(existingContents: String(decoding: original, as: UTF8.self))
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let applyPlan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        _ = try await adapter.apply(applyPlan)
+
+        let disconnectPlan = try await adapter.prepareDisconnect(
+            instance: fixture.instance,
+            baseline: fixture.baseline(for: connection),
+            baselineData: connection.capturedPreChangeState
+        )
+        let receipt = try await adapter.disconnect(
+            disconnectPlan,
+            baseline: connection.capturedPreChangeState
+        )
+
+        #expect(receipt.configurationState == .updated)
+        #expect(try Data(contentsOf: fixture.configURL) == original)
+    }
+
+    @Test("Disconnect refuses an external edit after a theme apply")
+    func disconnectRefusesExternalEdit() async throws {
+        let fixture = try Fixture(existingContents: "format = \"test\"\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let applyPlan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        _ = try await adapter.apply(applyPlan)
+        let external = Data("format = \"external\"\n".utf8)
+        try external.write(to: fixture.configURL)
+
+        await #expect(throws: StarshipAdapterError.self) {
+            _ = try await adapter.prepareDisconnect(
+                instance: fixture.instance,
+                baseline: fixture.baseline(for: connection),
+                baselineData: connection.capturedPreChangeState
+            )
+        }
+        #expect(try Data(contentsOf: fixture.configURL) == external)
     }
 
     @Test("Prepared Starship plans survive serialization with exact intended bytes")
@@ -583,6 +656,46 @@ struct StarshipAdapterTests {
 
     // MARK: - Durable apply integration (shared safety contract)
 
+    @Test("An approved linked configuration remains writable after the engine restarts")
+    func durableLinkedApprovalSurvivesRestart() async throws {
+        let fixture = try Fixture(linked: true)
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [fixture.instance]
+        )
+        let firstEngine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [fixture.adapter()],
+            persistence: store
+        )
+        _ = try await firstEngine.connect(
+            instance: fixture.instance,
+            workspace: workspace,
+            approveLinkedSource: true
+        )
+
+        let relaunchedEngine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [fixture.adapter()],
+            persistence: store
+        )
+        let preview = try await relaunchedEngine.prepare(
+            themeVariantID: Fixtures.pack.variants[0].qualifiedID,
+            workspace: workspace
+        )
+        #expect(preview.preparationFailures.isEmpty)
+        #expect(preview.targetPlans.count == 1)
+
+        let report = try await relaunchedEngine.applyDurable(previewID: preview.id, workspace: workspace)
+        #expect(report.outcomes[0].configurationState == .updated)
+        #expect(try String(contentsOf: fixture.sourceURL, encoding: .utf8).contains("oh_my_theme"))
+    }
+
     @Test("Durable apply via ThemeEngine preserves format and can undo")
     func durableApplyAndUndo() async throws {
         let fixture = try Fixture(existingContents: "# before\nformat = \"x\"\n")
@@ -766,6 +879,19 @@ struct StarshipAdapterTests {
             return StarshipConfigurationAdapter(
                 managedFiles: managedFiles, homeDirectory: directory,
                 xdgConfigHome: directory.appendingPathComponent("config"), configurationURL: url)
+        }
+
+        func baseline(for plan: ConnectionPlan) -> StoredConnectionBaseline {
+            StoredConnectionBaseline(
+                targetInstanceID: instance.id,
+                adapterID: "starship",
+                adapterVersion: "1",
+                baselineReference: ContentReference(
+                    digest: "baseline",
+                    byteCount: plan.capturedPreChangeState.count
+                ),
+                capturedAt: Date()
+            )
         }
 
         func theme() -> PreparedTheme {
