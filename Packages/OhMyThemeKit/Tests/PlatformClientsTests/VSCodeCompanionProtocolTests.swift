@@ -293,21 +293,16 @@ struct VSCodeCompanionProtocolTests {
         }
     }
 
-    @Test("Decoder rejects unsupported protocol versions")
-    func decoderRejectsUnsupportedVersion() {
-        let body = Data(#"{"protocolVersion":99,"type":"register_ack","id":"x","sessionId":"s"}"#.utf8)
-        do {
-            _ = try CompanionMessageCodec.decodeBody(body)
-            Issue.record("expected unsupportedProtocolVersion")
-        } catch let error as CompanionProtocolError {
-            if case .unsupportedProtocolVersion(let version) = error {
-                #expect(version == 99)
-            } else {
-                Issue.record("unexpected error: \(error)")
-            }
-        } catch {
-            Issue.record("unexpected error: \(error)")
-        }
+    @Test(
+        "Decoder does not enforce protocol version — session applies policy"
+    )
+    func decoderIgnoresProtocolVersion() throws {
+        let body = Data(
+            #"{"protocolVersion":99,"type":"register_ack","id":"11111111-2222-3333-4444-555555555555","sessionId":"s"}"#
+                .utf8
+        )
+        let decoded = try CompanionMessageCodec.decodeBody(body)
+        #expect(decoded.protocolVersion == 99)
     }
 
     @Test("Decoder rejects invalid UUIDs in the id field")

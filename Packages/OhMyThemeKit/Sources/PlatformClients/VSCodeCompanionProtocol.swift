@@ -389,9 +389,6 @@ public enum CompanionMessageCodec {
         let reader = ObjectReader(object)
 
         let protocolVersion = try reader.requireInt("protocolVersion")
-        guard CompanionProtocol.supportedVersions.contains(protocolVersion) else {
-            throw CompanionProtocolError.unsupportedProtocolVersion(protocolVersion)
-        }
         let type = try reader.requireString("type")
 
         // The message type gates the rest of the decode: an unknown type
