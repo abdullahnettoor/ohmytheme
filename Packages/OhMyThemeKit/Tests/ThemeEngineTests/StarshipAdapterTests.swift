@@ -1090,7 +1090,7 @@ struct StarshipAdapterTests {
             StoredConnectionBaseline(
                 targetInstanceID: instance.id,
                 adapterID: "starship",
-                adapterVersion: "1",
+                adapterVersion: "2",
                 baselineReference: ContentReference(
                     digest: "baseline",
                     byteCount: plan.capturedPreChangeState.count

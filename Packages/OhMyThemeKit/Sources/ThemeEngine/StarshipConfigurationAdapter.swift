@@ -147,7 +147,7 @@ private struct StarshipThemeState: Codable {
 
 public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     public let id = "starship"
-    public let version = "1"
+    public let version = "2"
     public let payloadVersion = "1"
 
     private let managedFiles: ManagedFiles
@@ -434,6 +434,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     public func revalidateDisconnect(plan: DisconnectPlan) async throws {
+        guard plan.adapterID == id, plan.adapterVersion == version else {
+            throw StarshipAdapterError.malformedPlan
+        }
         let payload = try disconnectPayload(from: plan)
         guard let expected = payload.restorationReceipt?.after ?? payload.fileAfter else {
             throw StarshipAdapterError.malformedPlan
@@ -445,6 +448,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     public func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification {
+        guard plan.adapterID == id, plan.adapterVersion == version else {
+            throw StarshipAdapterError.malformedPlan
+        }
         let payload = try disconnectPayload(from: plan)
         guard let expected = payload.restorationReceipt?.after ?? payload.fileAfter else {
             throw StarshipAdapterError.malformedPlan
