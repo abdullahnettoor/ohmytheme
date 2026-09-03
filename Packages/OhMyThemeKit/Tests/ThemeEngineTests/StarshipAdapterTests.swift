@@ -370,6 +370,11 @@ struct StarshipAdapterTests {
         }
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(
+                Data("[[palettes]]\n[palettes.oh_my_theme]\ncanvas = \"#000000\"\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
                 Data("[palettes.oh_my_theme]\ncanvas.tint = \"nested\"\n".utf8)
             )
         }

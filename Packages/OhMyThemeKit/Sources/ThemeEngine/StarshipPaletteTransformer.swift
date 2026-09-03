@@ -257,6 +257,11 @@ private struct StarshipTOMLDocument {
                     )
                 }
                 let managedPalettePath = ["palettes", StarshipPaletteTransformer.ownedPaletteName]
+                if parsed.path == managedPalettePath, prospectiveArrayContext != nil {
+                    throw StarshipAdapterError.ambiguousConfiguration(
+                        "the managed palette must be a root TOML table"
+                    )
+                }
                 if parsed.path.count > managedPalettePath.count,
                     parsed.path.starts(with: managedPalettePath)
                 {
