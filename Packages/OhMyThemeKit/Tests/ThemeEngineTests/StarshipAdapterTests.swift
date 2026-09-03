@@ -290,6 +290,11 @@ struct StarshipAdapterTests {
             )
         }
         #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(
+                Data("directory.substitutions.Documents = \"Documents\"\n[directory]\nstyle = \"bold\"\n".utf8)
+            )
+        }
+        #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data("label = \"raw\u{0001}control\"\n".utf8))
         }
 
@@ -305,6 +310,9 @@ struct StarshipAdapterTests {
             "[[fruits]]\n[fruits.physical]\ncolor = \"red\"\n[[fruits]]\n[fruits.physical]\ncolor = \"yellow\"\n".utf8
         )
         try StarshipPaletteTransformer.validate(nestedArraysOfTables)
+        try StarshipPaletteTransformer.validate(
+            Data("[directory.substitutions]\nDocuments = \"Documents\"\n[directory]\nstyle = \"bold\"\n".utf8)
+        )
         try StarshipPaletteTransformer.validate(Data("format = \"\"\"abc\"\"\"\"\n".utf8))
         try StarshipPaletteTransformer.validate(Data("literal = '''abc''''\n".utf8))
         try StarshipPaletteTransformer.validate(

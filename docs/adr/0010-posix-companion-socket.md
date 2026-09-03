@@ -29,6 +29,14 @@ socket path immediately after `bind` to enforce the `0600` mode the
 technical stack requires. Both are trivial with POSIX and awkward
 through Network.framework's higher-level `NWListener` API.
 
+macOS limits a Unix-domain socket path to 103 UTF-8 bytes. The socket
+therefore lives at `/tmp/omt-<uid>/<launch-id>/companion.sock` under
+private `0700` directories. Before binding, the app rejects a socket
+root that is a symbolic link, is not a directory, or belongs to another
+user. The rendezvous file remains under the user's Application Support
+directory with mode `0600` and publishes the short socket path. Peer
+UID verification remains mandatory.
+
 The scope of the affected code is narrow: `CompanionSocketServer` and
 `CompanionConnection` are the only new files that touch sockets. They
 route every read and write through the codec and session types in the

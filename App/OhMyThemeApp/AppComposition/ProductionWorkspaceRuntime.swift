@@ -77,10 +77,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                 throw ProductionWorkspaceRuntimeError.missingVSCodeCompanion
             }
             let launchID = UUID().uuidString
-            let paths = CompanionSocketPaths(
-                root: try CompanionSocketPaths.productionRoot(),
-                launchID: launchID
-            )
+            let paths = try CompanionSocketPaths.production(launchID: launchID)
             let companionServer = CompanionSocketServer(
                 configuration: CompanionSocketServerConfiguration(
                     paths: paths,

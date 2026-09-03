@@ -100,6 +100,18 @@ final class MacOSCapabilitiesTests: XCTestCase {
         XCTAssertTrue(platform.setCalls.isEmpty)
     }
 
+    func testAppleScriptRunnerDecodesTrueAndFalseDescriptors() throws {
+        let trueDescriptor = try XCTUnwrap(
+            NSAppleEventDescriptor(descriptorType: typeTrue, data: Data())
+        )
+        let falseDescriptor = try XCTUnwrap(
+            NSAppleEventDescriptor(descriptorType: typeFalse, data: Data())
+        )
+
+        XCTAssertEqual(SystemEventsAppleScriptRunner.decode(trueDescriptor), .boolean(true))
+        XCTAssertEqual(SystemEventsAppleScriptRunner.decode(falseDescriptor), .boolean(false))
+    }
+
     func testAppearanceReportsUnchangedWithoutSendingASetter() throws {
         let runner = RecordingAppleScriptRunner(values: [.boolean(true)])
         let client = MacOSAppearanceClient(runner: runner)

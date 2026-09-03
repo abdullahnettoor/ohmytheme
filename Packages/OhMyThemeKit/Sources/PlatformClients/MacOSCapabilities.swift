@@ -336,10 +336,16 @@ struct SystemEventsAppleScriptRunner: AppleScriptRunner {
             }
         }
 
-        if result.descriptorType == typeBoolean {
+        return Self.decode(result)
+    }
+
+    static func decode(_ result: NSAppleEventDescriptor) -> AppleScriptValue {
+        switch result.descriptorType {
+        case typeBoolean, typeTrue, typeFalse:
             return .boolean(result.booleanValue)
+        default:
+            return .none
         }
-        return .none
     }
 }
 

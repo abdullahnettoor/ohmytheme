@@ -111,6 +111,26 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("payload_digest", .text).notNull().references("content_references")
                 table.column("restoration_digest", .text).references("content_references")
             }
+            try Self.createDurableOperationTables(in: database)
+        }
+        migrator.registerMigration("add-payload-restoration-digest") { database in
+            let hasRestorationDigest = try database.columns(in: "payload_envelopes").contains {
+                $0.name == "restoration_digest"
+            }
+            if !hasRestorationDigest {
+                try database.alter(table: "payload_envelopes") { table in
+                    table.add(column: "restoration_digest", .text).references("content_references")
+                }
+            }
+        }
+        migrator.registerMigration("add-durable-operation-journal") { database in
+            try Self.createDurableOperationTables(in: database)
+        }
+        try migrator.migrate(database)
+    }
+
+    private static func createDurableOperationTables(in database: Database) throws {
+        if try !database.tableExists("operations") {
             try database.create(table: "operations") { table in
                 table.column("id", .text).primaryKey()
                 table.column("kind", .text).notNull()
@@ -119,6 +139,8 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("variant_id", .text)
                 table.column("created_at", .double).notNull()
             }
+        }
+        if try !database.tableExists("operation_records") {
             try database.create(table: "operation_records") { table in
                 table.column("operation_id", .text).notNull()
                     .references("operations", onDelete: .cascade)
@@ -135,6 +157,8 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("detail", .text)
                 table.primaryKey(["operation_id", "target_instance_id"])
             }
+        }
+        if try !database.tableExists("connection_baselines") {
             try database.create(table: "connection_baselines") { table in
                 table.column("target_instance_id", .text).primaryKey()
                 table.column("adapter_id", .text).notNull()
@@ -143,17 +167,6 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("captured_at", .double).notNull()
             }
         }
-        migrator.registerMigration("add-payload-restoration-digest") { database in
-            let hasRestorationDigest = try database.columns(in: "payload_envelopes").contains {
-                $0.name == "restoration_digest"
-            }
-            if !hasRestorationDigest {
-                try database.alter(table: "payload_envelopes") { table in
-                    table.add(column: "restoration_digest", .text).references("content_references")
-                }
-            }
-        }
-        try migrator.migrate(database)
     }
 
     func withWrite<T>(_ block: (Database) throws -> T) throws -> T {

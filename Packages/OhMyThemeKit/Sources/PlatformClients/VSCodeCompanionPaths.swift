@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 // MARK: - Paths
@@ -5,13 +6,18 @@ import Foundation
 /// Filesystem layout for one launch of the companion server.
 ///
 /// The application-support root and its rendezvous file are shared
-/// across launches (only one is ever present at a time). The launch
-/// directory containing the socket is unique per launch so a stale
-/// socket cannot outlive its process.
+/// across launches (only one is ever present at a time). The socket
+/// uses a short private root because macOS limits Unix-domain paths to
+/// 103 bytes. Its launch directory is unique so a stale socket cannot
+/// be reused by a later process.
 public struct CompanionSocketPaths: Equatable, Sendable {
-    /// Directory that contains the rendezvous file and per-launch
-    /// subdirectories. Created with mode 0700.
+    /// Application Support directory that contains the rendezvous
+    /// file. Created with mode 0700.
     public let root: URL
+
+    /// Short private directory that contains per-launch socket
+    /// directories. Created with mode 0700.
+    public let socketRoot: URL
 
     /// Path to the rendezvous JSON file, atomically replaced each
     /// launch and chmoded to 0600.
@@ -25,10 +31,11 @@ public struct CompanionSocketPaths: Equatable, Sendable {
     /// on macOS (104 bytes), so callers should keep the root short.
     public let socketFile: URL
 
-    public init(root: URL, launchID: String) {
+    public init(root: URL, socketRoot: URL? = nil, launchID: String) {
         self.root = root
+        self.socketRoot = socketRoot ?? root
         self.rendezvousFile = root.appendingPathComponent("rendezvous.json")
-        self.launchDirectory = root.appendingPathComponent(launchID, isDirectory: true)
+        self.launchDirectory = self.socketRoot.appendingPathComponent(launchID, isDirectory: true)
         self.socketFile = self.launchDirectory.appendingPathComponent("companion.sock")
     }
 
@@ -46,6 +53,19 @@ public struct CompanionSocketPaths: Equatable, Sendable {
             base
             .appendingPathComponent("OhMyTheme", isDirectory: true)
             .appendingPathComponent("companion", isDirectory: true)
+    }
+
+    public static func production(
+        launchID: String,
+        fileManager: FileManager = .default,
+        effectiveUserID: uid_t = geteuid()
+    ) throws -> CompanionSocketPaths {
+        CompanionSocketPaths(
+            root: try productionRoot(fileManager: fileManager),
+            socketRoot: URL(fileURLWithPath: "/tmp", isDirectory: true)
+                .appendingPathComponent("omt-\(effectiveUserID)", isDirectory: true),
+            launchID: launchID
+        )
     }
 }
 
@@ -77,6 +97,12 @@ public struct CompanionRendezvous: Codable, Equatable, Sendable {
 
 // MARK: - File utilities
 
+enum CompanionFilesystemError: Error {
+    case unsafePrivateDirectory(String)
+    case privateDirectoryOwnerMismatch(path: String, expected: uid_t, actual: uid_t)
+    case chmodFailed(path: String, code: Int32)
+}
+
 enum CompanionFilesystem {
     /// Create the directory tree at `url` if needed and force its mode
     /// to `0700`. `chmod` runs even when the directory already exists
@@ -90,7 +116,24 @@ enum CompanionFilesystem {
                 attributes: [.posixPermissions: 0o700]
             )
         }
-        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+
+        var status = stat()
+        guard lstat(url.path, &status) == 0,
+            status.st_mode & S_IFMT == S_IFDIR
+        else {
+            throw CompanionFilesystemError.unsafePrivateDirectory(url.path)
+        }
+        let expectedOwner = geteuid()
+        guard status.st_uid == expectedOwner else {
+            throw CompanionFilesystemError.privateDirectoryOwnerMismatch(
+                path: url.path,
+                expected: expectedOwner,
+                actual: status.st_uid
+            )
+        }
+        guard chmod(url.path, 0o700) == 0 else {
+            throw CompanionFilesystemError.chmodFailed(path: url.path, code: errno)
+        }
     }
 
     /// Atomically write `data` to `url` and chmod the result to 0600.

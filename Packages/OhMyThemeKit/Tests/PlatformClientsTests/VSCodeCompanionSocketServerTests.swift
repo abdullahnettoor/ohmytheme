@@ -14,7 +14,9 @@ struct VSCodeCompanionSocketServerTests {
     /// to a socket inside it. `tearDown()` stops the server and removes
     /// the directory.
     final class Fixture {
+        let base: URL
         let root: URL
+        let socketRoot: URL
         let server: CompanionSocketServer
         let paths: CompanionSocketPaths
         let launchID: String
@@ -29,14 +31,16 @@ struct VSCodeCompanionSocketServerTests {
         ) throws {
             // Keep the root path short: `sun_path` is capped at 104 bytes.
             let short = "omt-\(UUID().uuidString.prefix(8))"
-            self.root = URL(fileURLWithPath: "/tmp/\(short)", isDirectory: true)
-            try FileManager.default.createDirectory(
-                at: root, withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
+            self.base = URL(fileURLWithPath: "/tmp/\(short)", isDirectory: true)
+            self.root = base.appendingPathComponent("rendezvous", isDirectory: true)
+            self.socketRoot = base.appendingPathComponent("socket", isDirectory: true)
             self.launchID = launchID
             self.launchNonce = launchNonce
-            self.paths = CompanionSocketPaths(root: root, launchID: launchID)
+            self.paths = CompanionSocketPaths(
+                root: root,
+                socketRoot: socketRoot,
+                launchID: launchID
+            )
             self.server = CompanionSocketServer(
                 configuration: CompanionSocketServerConfiguration(
                     paths: paths,
@@ -51,7 +55,7 @@ struct VSCodeCompanionSocketServerTests {
 
         deinit {
             server.stop()
-            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: base)
         }
     }
 
@@ -185,6 +189,57 @@ struct VSCodeCompanionSocketServerTests {
 
     // MARK: - Basic lifecycle
 
+    @Test("The production socket path fits the macOS Unix-domain limit")
+    func productionSocketPathFitsMacOSLimit() throws {
+        let paths = try CompanionSocketPaths.production(
+            launchID: "12345678-1234-1234-1234-123456789012"
+        )
+
+        #expect(paths.socketFile.path.utf8.count <= 103)
+    }
+
+    @Test("A symlink cannot redirect the private socket root")
+    func rejectsSymlinkedSocketRoot() throws {
+        let base = URL(fileURLWithPath: "/tmp/omt-symlink-\(UUID().uuidString.prefix(8))")
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let victim = base.appendingPathComponent("victim", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: victim,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o755]
+        )
+        let socketRoot = base.appendingPathComponent("socket", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: socketRoot, withDestinationURL: victim)
+        let launchID = "12345678-1234-1234-1234-123456789012"
+        let paths = CompanionSocketPaths(
+            root: base.appendingPathComponent("rendezvous", isDirectory: true),
+            socketRoot: socketRoot,
+            launchID: launchID
+        )
+        let server = CompanionSocketServer(
+            configuration: CompanionSocketServerConfiguration(
+                paths: paths,
+                launchID: launchID,
+                launchNonce: "nonce"
+            )
+        )
+        defer { server.stop() }
+        var rejected = false
+
+        do {
+            try server.start()
+        } catch {
+            rejected = true
+        }
+
+        #expect(rejected)
+        let victimMode =
+            try FileManager.default.attributesOfItem(atPath: victim.path)[
+                .posixPermissions] as? NSNumber
+        #expect(victimMode?.uint16Value == 0o755)
+    }
+
     @Test("Starting the server creates the socket file with 0600 and the root dir with 0700")
     func startCreatesRestrictedFiles() throws {
         let fixture = try Fixture()
@@ -208,10 +263,15 @@ struct VSCodeCompanionSocketServerTests {
                 .posixPermissions] as? NSNumber
         #expect(rendezvousMode?.uint16Value == 0o600)
 
-        let dirMode =
+        let rendezvousDirMode =
             try fm.attributesOfItem(atPath: fixture.paths.root.path)[
                 .posixPermissions] as? NSNumber
-        #expect(dirMode?.uint16Value == 0o700)
+        #expect(rendezvousDirMode?.uint16Value == 0o700)
+
+        let socketDirMode =
+            try fm.attributesOfItem(atPath: fixture.paths.socketRoot.path)[
+                .posixPermissions] as? NSNumber
+        #expect(socketDirMode?.uint16Value == 0o700)
     }
 
     @Test("Starting the server publishes the rendezvous file with the launch nonce")

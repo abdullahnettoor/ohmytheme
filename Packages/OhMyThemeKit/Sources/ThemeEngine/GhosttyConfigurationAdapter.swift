@@ -138,26 +138,41 @@ public struct GhosttyValidationInput: Sendable {
 
 public final class SystemGhosttyRuntime: GhosttyRuntime, @unchecked Sendable {
     private let fileManager: FileManager
+    private let installationCandidates: [String]
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
-    }
-
-    public func discoverInstallations() async throws -> [GhosttyInstallation] {
-        let candidates = Set(
+        installationCandidates =
             [
                 "/Applications/Ghostty.app/Contents/MacOS/ghostty",
                 "\(NSHomeDirectory())/Applications/Ghostty.app/Contents/MacOS/ghostty",
                 "/opt/homebrew/bin/ghostty",
                 "/usr/local/bin/ghostty",
             ]
-                + (ProcessInfo.processInfo.environment["PATH"] ?? "")
-                .split(separator: ":")
-                .map { "\($0)/ghostty" })
+            + (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map { "\($0)/ghostty" }
+    }
+
+    init(fileManager: FileManager = .default, installationCandidates: [String]) {
+        self.fileManager = fileManager
+        self.installationCandidates = installationCandidates
+    }
+
+    public func discoverInstallations() async throws -> [GhosttyInstallation] {
+        let candidates = Set(installationCandidates)
+        var seenExecutables: Set<URL> = []
         var installations: [GhosttyInstallation] = []
         for path in candidates.sorted() {
-            guard fileManager.isExecutableFile(atPath: path) else { continue }
             let executable = URL(fileURLWithPath: path)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            guard seenExecutables.insert(executable).inserted,
+                fileManager.isExecutableFile(atPath: executable.path)
+            else {
+                continue
+            }
             guard let version = try? run(executable: executable, arguments: ["+version"]) else {
                 continue
             }

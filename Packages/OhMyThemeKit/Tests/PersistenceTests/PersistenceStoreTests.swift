@@ -115,6 +115,7 @@ struct PersistenceStoreTests {
         _ = try fixture.store.savePayloadEnvelope(envelope, restorationData: restoration)
 
         #expect(try fixture.store.loadRestorationContent(forEnvelopeID: envelope.id) == restoration)
+        #expect(try fixture.store.journalInterruptedOperations().isEmpty)
     }
 
     @Test("Content store uses user-only permissions and rejects tampering")

@@ -27,6 +27,30 @@ struct GhosttyAdapterTests {
         )
     }
 
+    @Test("System discovery deduplicates symlinked executable candidates")
+    func systemDiscoveryDeduplicatesSymlinks() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostty-discovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("ghostty")
+        try Data("#!/bin/sh\nprintf '1.3.1\\n'\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: executable.path
+        )
+        let symlink = directory.appendingPathComponent("ghostty-link")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: executable)
+        let runtime = SystemGhosttyRuntime(
+            installationCandidates: [executable.path, symlink.path]
+        )
+
+        let installations = try await runtime.discoverInstallations()
+
+        #expect(installations.count == 1)
+        #expect(installations.first?.executableURL == executable.resolvingSymlinksInPath())
+    }
+
     @Test("Connection plan exposes the resolved config, include, artifact, and side effects")
     func planDetails() async throws {
         let fixture = try Fixture()

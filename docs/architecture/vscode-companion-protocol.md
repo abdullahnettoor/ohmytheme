@@ -13,13 +13,14 @@ live-switch proof](../research/vscode-companion-proof.md).
 ## Transport
 
 - The macOS app owns a per-user Unix-domain socket.
-- The socket path is `${socketDirectory}/companion.sock` where
-  `socketDirectory` sits under `~/Library/Application Support/OhMyTheme/`
-  as `companion/<launch-id>/`. The launch identifier changes for every
+- The socket path is `/tmp/omt-<uid>/<launch-id>/companion.sock`. This
+  short path fits macOS's 103-byte Unix-domain limit independently of the
+  user's home-directory length. The launch identifier changes for every
   app launch, so socket paths from a prior launch cannot be reused.
-- The parent socket directory is created with mode `0700` and the socket
-  itself is chmoded to `0600`. Both are removed when the app exits or
-  before rebinding after a launch.
+- The parent socket directory is created with mode `0700` and must be a
+  real directory owned by the app's effective user. The socket itself is
+  chmoded to `0600`. An orderly shutdown removes the launch directory;
+  unique launch identifiers prevent reuse if a crash leaves one behind.
 - The server verifies the peer's effective user id (`LOCAL_PEEREUID`)
   before accepting a connection and rejects any peer whose euid does
   not match the app's.

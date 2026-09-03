@@ -41,8 +41,7 @@ struct WorkspaceMenuView: View {
             Divider()
             footer
         }
-        .frame(width: 380)
-        .frame(maxHeight: 640)
+        .frame(width: 380, height: 640)
 
     }
 

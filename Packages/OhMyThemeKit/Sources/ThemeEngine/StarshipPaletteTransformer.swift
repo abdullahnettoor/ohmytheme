@@ -223,6 +223,7 @@ private struct StarshipTOMLDocument {
         var arrayTableCounts: [[String]: Int] = [:]
         var activeArrayOccurrences: [[String]: Int] = [:]
         var seenKeys: Set<AssignmentIdentity> = []
+        var dottedKeyTables: Set<TableIdentity> = []
         var valuePaths: Set<[String]> = []
         var arrayValuePaths: [ArrayContext: Set<[String]>] = [:]
         var lineIndex = 0
@@ -244,12 +245,21 @@ private struct StarshipTOMLDocument {
                     .max { lhs, rhs in lhs.key.count < rhs.key.count }
                     .map { ArrayContext(path: $0.key, occurrence: $0.value) }
                 let contextualValuePaths = prospectiveArrayContext.flatMap { arrayValuePaths[$0] } ?? []
+                let prospectiveIdentity = TableIdentity(
+                    path: parsed.path,
+                    arrayContext: prospectiveArrayContext
+                )
+                guard !dottedKeyTables.contains(prospectiveIdentity) else {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "duplicate TOML table at line \(lineIndex + 1)"
+                    )
+                }
                 guard
                     !valuePaths.contains(where: { path in
-                        parsed.path.starts(with: path) || path.starts(with: parsed.path)
+                        parsed.path.starts(with: path)
                     }),
                     !contextualValuePaths.contains(where: { path in
-                        parsed.path.starts(with: path) || path.starts(with: parsed.path)
+                        parsed.path.starts(with: path)
                     })
                 else {
                     throw StarshipAdapterError.malformedConfiguration(
@@ -349,6 +359,16 @@ private struct StarshipTOMLDocument {
                 throw StarshipAdapterError.malformedConfiguration(
                     "TOML key conflicts with an existing namespace at line \(lineIndex + 1)"
                 )
+            }
+            if assignment.keyPath.count > 1 {
+                for length in (tablePath.count + 1)..<fullPath.count {
+                    dottedKeyTables.insert(
+                        TableIdentity(
+                            path: Array(fullPath.prefix(length)),
+                            arrayContext: arrayContext
+                        )
+                    )
+                }
             }
             if let arrayContext {
                 arrayValuePaths[arrayContext, default: []].insert(fullPath)

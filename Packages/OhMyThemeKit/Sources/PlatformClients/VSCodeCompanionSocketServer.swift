@@ -230,11 +230,11 @@ public final class CompanionSocketServer: @unchecked Sendable {
         }
     }
 
-
     // MARK: - Bind / listen / accept
 
     private func bindAndListen() throws {
         try CompanionFilesystem.ensurePrivateDirectory(at: configuration.paths.root)
+        try CompanionFilesystem.ensurePrivateDirectory(at: configuration.paths.socketRoot)
         try CompanionFilesystem.ensurePrivateDirectory(at: configuration.paths.launchDirectory)
 
         // Remove any leftover socket file before binding.
