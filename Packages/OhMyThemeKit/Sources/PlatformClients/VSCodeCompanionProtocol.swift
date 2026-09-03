@@ -100,6 +100,48 @@ public enum CompanionProtocolError: Error, Equatable {
     case invalidUUID(String)
     case invalidEnum(field: String, value: String)
     case invalidField(String)
+
+    /// The wire-level `protocol_error.code` that best classifies this
+    /// error when the session turns it into an outgoing message.
+    public var wireCode: CompanionProtocolErrorCode {
+        switch self {
+        case .unsupportedProtocolVersion:
+            return .unsupportedProtocolVersion
+        case .unsupportedType:
+            return .unsupportedType
+        case .missingField:
+            return .missingRequiredField
+        case .bodyTooLarge, .malformedJSON, .notObject, .invalidUUID,
+            .invalidEnum, .invalidField:
+            return .malformedFrame
+        }
+    }
+
+    /// A human-readable description of the error, intended to be sent
+    /// as `protocol_error.message`. Callers should not rely on the
+    /// exact wording; it is meant for diagnostics only.
+    public var wireMessage: String {
+        switch self {
+        case .bodyTooLarge(let size):
+            return "Frame body of \(size) bytes exceeds the maximum."
+        case .malformedJSON:
+            return "Frame body is not valid JSON."
+        case .notObject:
+            return "Frame body is not a JSON object."
+        case .missingField(let name):
+            return "Required field '\(name)' is missing."
+        case .unsupportedType(let type):
+            return "Message type '\(type)' is not supported."
+        case .unsupportedProtocolVersion(let version):
+            return "Protocol version \(version) is not supported."
+        case .invalidUUID(let raw):
+            return "Value '\(raw)' is not a valid UUID."
+        case .invalidEnum(let field, let value):
+            return "Field '\(field)' has unsupported value '\(value)'."
+        case .invalidField(let name):
+            return "Field '\(name)' has an unexpected type."
+        }
+    }
 }
 
 // MARK: - Messages
@@ -206,6 +248,10 @@ public struct CompanionApplyThemeMessage: Equatable, Sendable {
     public let protocolVersion: Int
     public let id: UUID
     public let sessionId: String
+    /// The name of the Theme Variant to apply (see `CONTEXT.md`).
+    /// For VS Code specifically, this is the value the app writes into
+    /// `workbench.colorTheme` — the string a user would see in
+    /// `Preferences: Color Theme`.
     public let themeName: String
     public let target: CompanionApplyTarget
 

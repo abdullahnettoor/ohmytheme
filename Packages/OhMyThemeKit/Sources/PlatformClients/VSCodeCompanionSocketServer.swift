@@ -19,6 +19,7 @@ public enum CompanionSocketServerError: Error, Equatable {
     case socketCreationFailed(Int32)
     case bindFailed(Int32)
     case listenFailed(Int32)
+    case writeFailed(Int32)
     case alreadyRunning
     case notRunning
 }
@@ -131,10 +132,9 @@ public final class CompanionSocketServer: @unchecked Sendable {
     /// connection and await its acknowledgement, or fail if none is
     /// registered.
     public func applyTheme(
-        themeName: String,
-        timeout: TimeInterval = 10
+        themeName: String
     ) async throws -> CompanionApplyOutcome {
-        let outcome = try await withCheckedThrowingContinuation {
+        try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<CompanionApplyOutcome, Error>) in
             queue.async {
                 guard
@@ -160,8 +160,6 @@ public final class CompanionSocketServer: @unchecked Sendable {
                 self.pendingAcks[id] = continuation
             }
         }
-        _ = timeout
-        return outcome
     }
 
     // MARK: - Bind / listen / accept
@@ -450,7 +448,7 @@ final class CompanionConnection: @unchecked Sendable {
                             usleep(1_000)
                             continue
                         }
-                        throw CompanionSocketServerError.socketCreationFailed(errno)
+                        throw CompanionSocketServerError.writeFailed(errno)
                     }
                     written += result
                 }
@@ -505,14 +503,13 @@ final class CompanionConnection: @unchecked Sendable {
             do {
                 body = try decoder.nextFrame()
             } catch let error as CompanionProtocolError {
-                _ = error
                 let message = CompanionMessage.protocolError(
                     CompanionProtocolErrorMessage(
                         protocolVersion: CompanionProtocol.currentVersion,
                         id: UUID(),
                         requestId: nil,
-                        code: .malformedFrame,
-                        message: "Frame decoder rejected an incoming frame."
+                        code: error.wireCode,
+                        message: error.wireMessage
                     )
                 )
                 onEffects(self, [.send(message), .close])

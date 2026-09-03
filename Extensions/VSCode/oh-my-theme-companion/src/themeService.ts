@@ -76,14 +76,19 @@ export class ThemeService {
     const inspection = vscode.workspace.getConfiguration().inspect<string>(THEME_SETTING);
     if (!inspection) return [];
 
+    // If the global value has never been set we still want to surface
+    // any narrower-scope value the extension can see — in that case
+    // every narrower value is effectively an override because the
+    // requested apply cannot compete with a scope that is present.
     const globalValue = inspection.globalValue;
-    if (globalValue === undefined) return [];
+    const differsFromGlobal = (value: string): boolean =>
+      globalValue === undefined || value !== globalValue;
 
     const overrides: OverrideEntry[] = [];
-    if (typeof inspection.workspaceValue === "string" && inspection.workspaceValue !== globalValue) {
+    if (typeof inspection.workspaceValue === "string" && differsFromGlobal(inspection.workspaceValue)) {
       overrides.push({ scope: "workspace", value: inspection.workspaceValue });
     }
-    if (typeof inspection.workspaceFolderValue === "string" && inspection.workspaceFolderValue !== globalValue) {
+    if (typeof inspection.workspaceFolderValue === "string" && differsFromGlobal(inspection.workspaceFolderValue)) {
       const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       overrides.push({
         scope: "workspaceFolder",
@@ -98,7 +103,7 @@ export class ThemeService {
       // Language-scoped overrides are rare for color theme but we
       // surface them as `workspaceFolder` when present.
       const value = inspection.workspaceFolderLanguageValue ?? inspection.workspaceLanguageValue;
-      if (typeof value === "string" && value !== globalValue) {
+      if (typeof value === "string" && differsFromGlobal(value)) {
         overrides.push({ scope: "workspaceFolder", value });
       }
     }

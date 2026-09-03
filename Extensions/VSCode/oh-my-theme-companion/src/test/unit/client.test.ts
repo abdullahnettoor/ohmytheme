@@ -267,4 +267,152 @@ describe("companion client", function () {
     client.disconnect();
     await server.close();
   });
+
+  it("rejects a duplicate request identifier with a protocol_error", async () => {
+    const socketPath = shortSocketPath();
+    const server = new ServerStub(socketPath);
+    await server.listen();
+    const acceptWait = server.waitForAccept();
+
+    const client = new CompanionClient({
+      socketPath,
+      launchNonce: "nonce-1",
+      extensionVersion: "0.1.0",
+      vscodeIdentity: {
+        edition: "vscode",
+        version: "1.94.0",
+        profileName: "Default",
+        profileId: "p",
+        machineId: "m",
+        sessionId: "s",
+        processId: 1,
+        windowId: "w",
+      },
+      currentSettings: {},
+    });
+
+    let handlerCalls = 0;
+    client.onMessage((message, reply) => {
+      if (message.type !== "apply_theme") return;
+      handlerCalls += 1;
+      reply({
+        type: "apply_theme_ack",
+        protocolVersion: 1,
+        id: message.id,
+        status: "applied",
+        requestedSetting: message.themeName,
+        effectiveSetting: message.themeName,
+        overrides: [],
+      });
+    });
+
+    const connectPromise = client.connect();
+    await acceptWait;
+    while (server.received.length === 0) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    server.send({
+      type: "register_ack",
+      protocolVersion: 1,
+      id: (server.received[0] as { id: string }).id,
+      sessionId: "s-1",
+    });
+    await connectPromise;
+
+    const applyID = randomUUID();
+    const request: CompanionMessage = {
+      type: "apply_theme",
+      protocolVersion: 1,
+      id: applyID,
+      sessionId: "s-1",
+      themeName: "Mocha",
+      target: "global",
+    };
+    server.send(request);
+    // Wait for the first ack.
+    while (server.received.length < 2) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    // Now replay the exact same request id.
+    server.send(request);
+    // Wait for the protocol_error reply.
+    while (server.received.length < 3) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    const replay = server.received[2];
+    assert.strictEqual(replay.type, "protocol_error");
+    if (replay.type === "protocol_error") {
+      assert.strictEqual(replay.code, "duplicate_request_id");
+      assert.strictEqual(replay.requestId, applyID);
+    }
+    assert.strictEqual(handlerCalls, 1);
+
+    client.disconnect();
+    await server.close();
+  });
+
+  it("rejects an incoming message whose protocolVersion differs from the negotiated version", async () => {
+    const socketPath = shortSocketPath();
+    const server = new ServerStub(socketPath);
+    await server.listen();
+    const acceptWait = server.waitForAccept();
+
+    const client = new CompanionClient({
+      socketPath,
+      launchNonce: "nonce-1",
+      extensionVersion: "0.1.0",
+      vscodeIdentity: {
+        edition: "vscode",
+        version: "1.94.0",
+        profileName: "",
+        profileId: "",
+        machineId: "m",
+        sessionId: "s",
+        processId: 1,
+        windowId: "",
+      },
+      currentSettings: {},
+    });
+
+    let handlerCalls = 0;
+    client.onMessage((message) => {
+      if (message.type === "apply_theme") handlerCalls += 1;
+    });
+
+    const connectPromise = client.connect();
+    await acceptWait;
+    while (server.received.length === 0) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    server.send({
+      type: "register_ack",
+      protocolVersion: 1,
+      id: (server.received[0] as { id: string }).id,
+      sessionId: "s-1",
+    });
+    await connectPromise;
+
+    server.send({
+      type: "apply_theme",
+      protocolVersion: 2, // differs from negotiated 1
+      id: randomUUID(),
+      sessionId: "s-1",
+      themeName: "Mocha",
+      target: "global",
+    });
+
+    // Wait for the protocol_error reply.
+    while (server.received.length < 2) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const err = server.received[1];
+    assert.strictEqual(err.type, "protocol_error");
+    if (err.type === "protocol_error") {
+      assert.strictEqual(err.code, "unsupported_protocol_version");
+    }
+    assert.strictEqual(handlerCalls, 0);
+
+    await server.close();
+  });
 });

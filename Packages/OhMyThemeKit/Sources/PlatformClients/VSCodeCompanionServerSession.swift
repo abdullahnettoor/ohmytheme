@@ -103,15 +103,12 @@ public struct CompanionServerSession {
                 state = .closed
                 return [
                     .send(
-                        .protocolError(
-                            CompanionProtocolErrorMessage(
-                                protocolVersion: negotiatedVersion,
-                                id: uuidProvider(),
-                                requestId: message.id,
-                                code: .unsupportedProtocolVersion,
-                                message:
-                                    "Message protocol version \(message.protocolVersion) does not match the negotiated version \(negotiatedVersion)."
-                            )
+                        protocolError(
+                            protocolVersion: negotiatedVersion,
+                            requestId: message.id,
+                            code: .unsupportedProtocolVersion,
+                            message:
+                                "Message protocol version \(message.protocolVersion) does not match the negotiated version \(negotiatedVersion)."
                         )
                     ),
                     .close,
@@ -163,14 +160,10 @@ public struct CompanionServerSession {
             state = .closed
             return [
                 .send(
-                    .protocolError(
-                        CompanionProtocolErrorMessage(
-                            protocolVersion: CompanionProtocol.currentVersion,
-                            id: uuidProvider(),
-                            requestId: message.id,
-                            code: .notRegistered,
-                            message: "The first message on a companion connection must be `register`."
-                        )
+                    protocolError(
+                        requestId: message.id,
+                        code: .notRegistered,
+                        message: "The first message on a companion connection must be `register`."
                     )
                 ),
                 .close,
@@ -214,14 +207,10 @@ public struct CompanionServerSession {
             if seenIncomingIDs.contains(ack.id) {
                 return [
                     .send(
-                        .protocolError(
-                            CompanionProtocolErrorMessage(
-                                protocolVersion: CompanionProtocol.currentVersion,
-                                id: uuidProvider(),
-                                requestId: ack.id,
-                                code: .duplicateRequestID,
-                                message: "This request identifier was already acknowledged."
-                            )
+                        protocolError(
+                            requestId: ack.id,
+                            code: .duplicateRequestID,
+                            message: "This request identifier was already acknowledged."
                         )
                     )
                 ]
@@ -230,14 +219,10 @@ public struct CompanionServerSession {
                 seenIncomingIDs.insert(ack.id)
                 return [
                     .send(
-                        .protocolError(
-                            CompanionProtocolErrorMessage(
-                                protocolVersion: CompanionProtocol.currentVersion,
-                                id: uuidProvider(),
-                                requestId: ack.id,
-                                code: .unexpectedMessage,
-                                message: "No apply_theme request is outstanding for this id."
-                            )
+                        protocolError(
+                            requestId: ack.id,
+                            code: .unexpectedMessage,
+                            message: "No apply_theme request is outstanding for this id."
                         )
                     )
                 ]
@@ -258,14 +243,10 @@ public struct CompanionServerSession {
             state = .closed
             return [
                 .send(
-                    .protocolError(
-                        CompanionProtocolErrorMessage(
-                            protocolVersion: CompanionProtocol.currentVersion,
-                            id: uuidProvider(),
-                            requestId: message.id,
-                            code: .unexpectedMessage,
-                            message: "Message type is only valid from server to extension."
-                        )
+                    protocolError(
+                        requestId: message.id,
+                        code: .unexpectedMessage,
+                        message: "Message type is only valid from server to extension."
                     )
                 ),
                 .close,
@@ -297,54 +278,37 @@ public struct CompanionServerSession {
         requestId: UUID?
     ) -> [CompanionServerEffect] {
         state = .closed
-        let code: CompanionProtocolErrorCode
-        switch error {
-        case .unsupportedProtocolVersion:
-            code = .unsupportedProtocolVersion
-        case .unsupportedType:
-            code = .unsupportedType
-        case .missingField:
-            code = .missingRequiredField
-        case .bodyTooLarge, .malformedJSON, .notObject, .invalidUUID,
-            .invalidEnum, .invalidField:
-            code = .malformedFrame
-        }
         return [
             .send(
-                .protocolError(
-                    CompanionProtocolErrorMessage(
-                        protocolVersion: CompanionProtocol.currentVersion,
-                        id: uuidProvider(),
-                        requestId: requestId,
-                        code: code,
-                        message: describe(error)
-                    )
+                protocolError(
+                    requestId: requestId,
+                    code: error.wireCode,
+                    message: error.wireMessage
                 )
             ),
             .close,
         ]
     }
 
-    private func describe(_ error: CompanionProtocolError) -> String {
-        switch error {
-        case .bodyTooLarge(let size):
-            return "Frame body of \(size) bytes exceeds the maximum."
-        case .malformedJSON:
-            return "Frame body is not valid JSON."
-        case .notObject:
-            return "Frame body is not a JSON object."
-        case .missingField(let name):
-            return "Required field '\(name)' is missing."
-        case .unsupportedType(let type):
-            return "Message type '\(type)' is not supported."
-        case .unsupportedProtocolVersion(let version):
-            return "Protocol version \(version) is not supported."
-        case .invalidUUID(let raw):
-            return "Value '\(raw)' is not a valid UUID."
-        case .invalidEnum(let field, let value):
-            return "Field '\(field)' has unsupported value '\(value)'."
-        case .invalidField(let name):
-            return "Field '\(name)' has an unexpected type."
-        }
+    /// Build a `.send(.protocolError(...))` effect using the session's
+    /// UUID provider and, by default, the current protocol version.
+    /// The version override exists for the single case where the peer
+    /// already negotiated a specific version and the error needs to be
+    /// tagged at that version.
+    private func protocolError(
+        protocolVersion: Int = CompanionProtocol.currentVersion,
+        requestId: UUID?,
+        code: CompanionProtocolErrorCode,
+        message: String
+    ) -> CompanionMessage {
+        .protocolError(
+            CompanionProtocolErrorMessage(
+                protocolVersion: protocolVersion,
+                id: uuidProvider(),
+                requestId: requestId,
+                code: code,
+                message: message
+            )
+        )
     }
 }

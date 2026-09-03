@@ -103,6 +103,8 @@ export class CompanionClient {
     reject: (error: Error) => void;
   };
   private handler: MessageHandler = () => undefined;
+  private seenIncomingIds = new Set<string>();
+  private negotiatedProtocolVersion?: number;
 
   constructor(private readonly options: CompanionClientOptions) {}
 
@@ -146,6 +148,8 @@ export class CompanionClient {
     this.socket?.end();
     this.socket = undefined;
     this.registered = false;
+    this.seenIncomingIds.clear();
+    this.negotiatedProtocolVersion = undefined;
   }
 
   send(message: CompanionMessage): void {
@@ -206,6 +210,10 @@ export class CompanionClient {
     switch (message.type) {
       case "register_ack":
         this.registered = true;
+        this.negotiatedProtocolVersion = message.protocolVersion;
+        // register_ack echoes the client's own register id, so it
+        // belongs to the client→server id space, not the
+        // server→client dup-id set. Do not record it here.
         this.registerResolvers?.resolve(message);
         this.registerResolvers = undefined;
         return;
@@ -217,6 +225,42 @@ export class CompanionClient {
         this.disconnect();
         return;
       default:
+        // After register_ack the protocol requires both sides to
+        // reject any message whose protocolVersion differs from the
+        // negotiated version
+        // (docs/architecture/vscode-companion-protocol.md#version-negotiation).
+        if (
+          this.negotiatedProtocolVersion !== undefined &&
+          message.protocolVersion !== this.negotiatedProtocolVersion
+        ) {
+          this.send({
+            type: "protocol_error",
+            protocolVersion: this.negotiatedProtocolVersion,
+            id: randomUUID(),
+            requestId: message.id,
+            code: "unsupported_protocol_version",
+            message: `Message protocol version ${message.protocolVersion} does not match the negotiated version ${this.negotiatedProtocolVersion}.`,
+          });
+          this.disconnect();
+          return;
+        }
+        // The wire protocol requires request identifiers to be unique
+        // per direction. If the app were to send the same id twice we
+        // must not run the handler again — the second reply would
+        // collide with the first and confuse both sides.
+        if (this.seenIncomingIds.has(message.id)) {
+          this.send({
+            type: "protocol_error",
+            protocolVersion:
+              this.negotiatedProtocolVersion ?? CURRENT_PROTOCOL_VERSION,
+            id: randomUUID(),
+            requestId: message.id,
+            code: "duplicate_request_id",
+            message: "This request identifier was already received.",
+          });
+          return;
+        }
+        this.seenIncomingIds.add(message.id);
         void this.handler(message, (reply) => this.send(reply));
     }
   }
@@ -238,8 +282,8 @@ export class CompanionClient {
 
 /** Thrown when the server rejects registration; carries the reason. */
 export class RegisterRejected extends Error {
-  constructor(public readonly message_: RegisterRejectedMessage) {
-    super(`register rejected: ${message_.reason}`);
+  constructor(public readonly rejection: RegisterRejectedMessage) {
+    super(`register rejected: ${rejection.reason}`);
     this.name = "RegisterRejected";
   }
 }

@@ -165,7 +165,9 @@ Prefer Apple frameworks and keep GRDB as the only initial third-party Swift runt
 - Foundation `FileManager`, `URL`, CryptoKit, and narrow Darwin file-descriptor wrappers inside `ManagedFiles`.
 - Direct Apple Event descriptors for stable operations where practical.
 - Static bundled `NSAppleScript` only where direct descriptors add disproportionate complexity. Never interpolate user-controlled values into script source.
-- Network.framework for the Unix-domain socket.
+- Network.framework for the Unix-domain socket, except where the
+  companion server's peer-credential and socket-mode requirements
+  force a raw POSIX path (see [ADR 0010](../adr/0010-posix-companion-socket.md)).
 - AppKit and `NSWorkspace` for app discovery and wallpaper.
 - ServiceManagement for opt-in Launch at Login.
 - OSLog for privacy-aware structured logs.

@@ -72,14 +72,39 @@ function makeHandler(service: ThemeService): (message: CompanionMessage, reply: 
 
 function collectIdentity() {
   const env = vscode.env;
+  // VS Code's stable Extension API doesn't expose the active profile
+  // (name or id) or a distinct window handle. The wire protocol
+  // (docs/architecture/vscode-companion-protocol.md) defines a
+  // closed `edition` enum, so we map `env.appName` into that enum
+  // and leave the fields we cannot obtain honestly as empty strings
+  // rather than sending misleading values (env.appHost, env.sessionId)
+  // in their place. A future ADR/spec revision can either add
+  // opt-in APIs (e.g. via a proposed API) or drop the missing fields.
   return {
-    edition: env.appName,
+    edition: mapEdition(env.appName),
     version: vscode.version,
-    profileName: env.appHost, // "desktop" | "web" | remote host name
-    profileId: env.machineId,
+    profileName: "", // no stable API
+    profileId: "", // no stable API
     machineId: env.machineId,
     sessionId: env.sessionId,
     processId: process.pid,
-    windowId: env.sessionId,
+    windowId: "", // no stable API distinct from sessionId
   };
+}
+
+/**
+ * Map `vscode.env.appName` into the closed `edition` enum defined by
+ * the wire protocol. Unknown editions fall through to `"other"`.
+ */
+function mapEdition(
+  appName: string,
+): "code-oss" | "vscode" | "insiders" | "cursor" | "other" {
+  const normalized = appName.toLowerCase();
+  if (normalized.includes("insider")) return "insiders";
+  if (normalized.includes("cursor")) return "cursor";
+  if (normalized.includes("oss")) return "code-oss";
+  if (normalized.includes("visual studio code") || normalized === "code") {
+    return "vscode";
+  }
+  return "other";
 }
