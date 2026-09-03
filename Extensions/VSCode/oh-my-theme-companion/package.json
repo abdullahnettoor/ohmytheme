@@ -1,0 +1,39 @@
+{
+  "name": "oh-my-theme-companion",
+  "displayName": "Oh My Theme Companion",
+  "description": "Live-switch bridge that lets the Oh My Theme macOS app change VS Code's color theme through supported settings and report the effective outcome.",
+  "version": "0.1.0",
+  "publisher": "ohmytheme",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {},
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test:unit": "mocha --recursive --require ts-node/register 'src/test/unit/**/*.test.ts'",
+    "test:host": "node ./out/test/host/runTest.js",
+    "test": "npm run compile && npm run test:unit && npm run test:host"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.30",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^3.1.0",
+    "glob": "^10.5.0",
+    "mocha": "^10.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
