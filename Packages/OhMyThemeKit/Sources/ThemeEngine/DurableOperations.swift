@@ -39,6 +39,11 @@ public enum DurableOperationError: Error, Equatable, Sendable {
     case noLastApplyTransaction
 }
 
+public enum UndoAvailability: Equatable, Sendable {
+    case unavailable
+    case available(sourceOperationID: UUID, changedTargetCount: Int)
+}
+
 public struct UndoReport: Codable, Equatable, Sendable {
     public let operationID: UUID
     public let sourceOperationID: UUID
@@ -60,10 +65,23 @@ public struct UndoReport: Codable, Equatable, Sendable {
 extension ThemeEngine {
     // MARK: Connect
 
+    public func prepareConnection(
+        instance: ConnectedTargetInstance
+    ) async throws -> ConnectionPlan {
+        guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
+            throw DurableOperationError.adapterUnavailable(instance.adapterID)
+        }
+        return try await adapter.prepareConnection(
+            instance: instance,
+            approveLinkedSource: false
+        )
+    }
+
     public func connect(
         instance: ConnectedTargetInstance,
         workspace: Workspace,
-        approveLinkedSource: Bool = false
+        approveLinkedSource: Bool = false,
+        reviewedPlan: ConnectionPlan? = nil
     ) async throws -> ConnectionReport {
         guard let persistence = self.persistenceStore else {
             throw DurableOperationError.persistenceRequired
@@ -100,10 +118,26 @@ extension ThemeEngine {
 
         var plan: ConnectionPlan
         do {
-            plan = try await adapter.prepareConnection(
-                instance: instance,
-                approveLinkedSource: approveLinkedSource
-            )
+            if let reviewedPlan {
+                guard reviewedPlan.targetInstanceID == instance.id,
+                    reviewedPlan.adapterID == adapter.id,
+                    reviewedPlan.adapterVersion == adapter.version
+                else {
+                    throw DurableOperationError.adapterUnavailable(instance.adapterID)
+                }
+                if approveLinkedSource,
+                    let approvingAdapter = adapter as? any ReviewedConnectionApproving
+                {
+                    plan = try await approvingAdapter.approveReviewedConnection(reviewedPlan)
+                } else {
+                    plan = approveLinkedSource ? reviewedPlan.approvingReviewedSetup() : reviewedPlan
+                }
+            } else {
+                plan = try await adapter.prepareConnection(
+                    instance: instance,
+                    approveLinkedSource: approveLinkedSource
+                )
+            }
         } catch {
             let failure = Self.capabilityOutcome(
                 for: error,
@@ -142,7 +176,11 @@ extension ThemeEngine {
                         configurationState: .permissionRequired,
                         runningInstanceReach: .unavailable,
                         detail: plan.userActions.first?.detail
-                            ?? "Approve the requested setup before connecting."
+                            ?? "Approve the requested setup before connecting.",
+                        userActions: Self.permissionActions(
+                            setupNeeds: plan.userActions,
+                            requiredPermissions: plan.requiredPermissions
+                        )
                     )
                 ]
             )
@@ -180,6 +218,7 @@ extension ThemeEngine {
                 detail: nil
             )
         )
+        try persistence.setTargetInstance(instance, connected: false, workspace: workspace)
 
         // Cancellation is possible up to here. After this point, the adapter owns
         // final write-boundary validation and the external mutation.
@@ -247,15 +286,26 @@ extension ThemeEngine {
                         sourceRevision: "n/a",
                         configurationState: failure.configurationState,
                         runningInstanceReach: failure.activationReach,
-                        detail: failure.detail
+                        detail: failure.detail,
+                        rollbackState: recoveryRequired
+                            ? .recoveryRequired
+                            : mutationNotStarted ? .blocked : .notNeeded,
+                        userActions: recoveryRequired
+                            ? [Self.recoveryRequiredAction]
+                            : failure.configurationState == .permissionRequired
+                                ? Self.permissionActions(
+                                    setupNeeds: plan.userActions,
+                                    requiredPermissions: plan.requiredPermissions
+                                )
+                                : mutationNotStarted ? [Self.reviewExternalChangeAction] : []
                     )
                 ]
             )
         }
 
         let receiptJSON = try encodeReceipt(receipt)
-        try persistence.journalSaveRecord(
-            JournaledRecord(
+        try persistence.finalizeConnectionOperation(
+            record: JournaledRecord(
                 operationID: operation.id,
                 targetInstanceID: instance.id,
                 ordinal: 0,
@@ -268,9 +318,11 @@ extension ThemeEngine {
                 planDigest: planReference.digest,
                 receiptJSON: receiptJSON,
                 detail: receipt.detail
-            )
+            ),
+            instance: instance,
+            connected: true,
+            workspace: workspace
         )
-        try persistence.journalTransitionState(operationID: operation.id, to: .applied)
 
         return ConnectionReport(
             operationID: operation.id,
@@ -283,7 +335,11 @@ extension ThemeEngine {
                     sourceRevision: "n/a",
                     configurationState: receipt.configurationState,
                     runningInstanceReach: receipt.runningInstanceReach,
-                    detail: receipt.detail
+                    detail: receipt.detail,
+                    userActions: Self.activationActions(
+                        for: receipt.runningInstanceReach,
+                        adapterID: adapter.id
+                    )
                 )
             ]
         )
@@ -298,6 +354,24 @@ extension ThemeEngine {
         try await ensureNoOperationInProgress()
         try await reconcileInterruptedOperations()
 
+        guard let pendingPreview = self.previewsInFlight[previewID] else {
+            throw ThemeEngineError.previewNotFound(previewID)
+        }
+        let orderedTargetIDs = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances).map(\.id)
+        let assignmentMatches: Bool
+        if let requiredThemeAssignment = pendingPreview.requiredThemeAssignment {
+            assignmentMatches = workspace.themeAssignment == requiredThemeAssignment
+        } else {
+            assignmentMatches =
+                workspace.themeAssignment == nil
+                || workspace.themeAssignment == .fixed(variantID: pendingPreview.variantID)
+        }
+        guard pendingPreview.workspaceID == workspace.id,
+            pendingPreview.targetInstanceIDs == orderedTargetIDs,
+            assignmentMatches
+        else {
+            throw ThemeEngineError.previewWorkspaceChanged(previewID)
+        }
         guard let preview = self.consumePreview(previewID) else {
             throw ThemeEngineError.previewNotFound(previewID)
         }
@@ -390,6 +464,15 @@ extension ThemeEngine {
         if !records.contains(where: { $0.phase == .applying }) {
             try persistence.journalTransitionState(operationID: operation.id, to: .applied)
         }
+        let outcomeOrder = Dictionary(
+            uniqueKeysWithValues: preview.targetInstanceIDs.enumerated().map { ($0.element, $0.offset) }
+        )
+        outcomes.sort { left, right in
+            let leftIndex = outcomeOrder[left.targetInstanceID] ?? Int.max
+            let rightIndex = outcomeOrder[right.targetInstanceID] ?? Int.max
+            if leftIndex != rightIndex { return leftIndex < rightIndex }
+            return left.capabilityID < right.capabilityID
+        }
         return DurableApplyReport(
             operationID: operation.id,
             variantID: preview.variantID,
@@ -463,7 +546,9 @@ extension ThemeEngine {
                     sourceRevision: plan.sourceRevision,
                     configurationState: .conflicted,
                     runningInstanceReach: .unavailable,
-                    detail: conflict.detail
+                    detail: conflict.detail,
+                    rollbackState: .blocked,
+                    userActions: [Self.reviewExternalChangeAction]
                 )
             } catch {
                 // Target-specific failures such as a revoked permission remain honest
@@ -493,7 +578,15 @@ extension ThemeEngine {
                     sourceRevision: plan.sourceRevision,
                     configurationState: failure.configurationState,
                     runningInstanceReach: failure.activationReach,
-                    detail: failure.detail
+                    detail: failure.detail,
+                    rollbackState: Self.applyRollbackState(
+                        configurationState: failure.configurationState
+                    ),
+                    userActions: Self.applyUserActions(
+                        plan: plan,
+                        configurationState: failure.configurationState,
+                        runningInstanceReach: failure.activationReach
+                    )
                 )
             }
         }
@@ -552,7 +645,15 @@ extension ThemeEngine {
                     sourceRevision: plan.sourceRevision,
                     configurationState: recovered.configurationState,
                     runningInstanceReach: recovered.runningInstanceReach,
-                    detail: "Recovered after apply error: \(recovered.detail ?? "write completed")"
+                    detail: "Recovered after apply error: \(recovered.detail ?? "write completed")",
+                    rollbackState: Self.applyRollbackState(
+                        configurationState: recovered.configurationState
+                    ),
+                    userActions: Self.applyUserActions(
+                        plan: plan,
+                        configurationState: recovered.configurationState,
+                        runningInstanceReach: recovered.runningInstanceReach
+                    )
                 )
             }
             try persistence.journalSaveRecord(
@@ -579,7 +680,16 @@ extension ThemeEngine {
                 sourceRevision: plan.sourceRevision,
                 configurationState: failure.configurationState,
                 runningInstanceReach: failure.activationReach,
-                detail: failure.detail
+                detail: failure.detail,
+                rollbackState: recoveryRequired
+                    ? .recoveryRequired
+                    : Self.applyRollbackState(configurationState: failure.configurationState),
+                userActions: Self.applyUserActions(
+                    plan: plan,
+                    configurationState: failure.configurationState,
+                    runningInstanceReach: failure.activationReach,
+                    recoveryRequired: recoveryRequired
+                )
             )
         }
 
@@ -611,7 +721,15 @@ extension ThemeEngine {
             sourceRevision: plan.sourceRevision,
             configurationState: receipt.configurationState,
             runningInstanceReach: receipt.runningInstanceReach,
-            detail: receipt.detail
+            detail: receipt.detail,
+            rollbackState: Self.applyRollbackState(
+                configurationState: receipt.configurationState
+            ),
+            userActions: Self.applyUserActions(
+                plan: plan,
+                configurationState: receipt.configurationState,
+                runningInstanceReach: receipt.runningInstanceReach
+            )
         )
     }
 
@@ -716,7 +834,9 @@ extension ThemeEngine {
                         sourceRevision: "n/a",
                         configurationState: .conflicted,
                         runningInstanceReach: .unavailable,
-                        detail: String(describing: error)
+                        detail: String(describing: error),
+                        rollbackState: .blocked,
+                        userActions: [Self.reviewExternalChangeAction]
                     )
                 ]
             )
@@ -804,8 +924,8 @@ extension ThemeEngine {
         do {
             try await adapter.revalidateDisconnect(plan: plan)
             let receipt = try await adapter.disconnect(plan, baseline: baselineData)
-            try persistence.journalSaveRecord(
-                JournaledRecord(
+            try persistence.finalizeConnectionOperation(
+                record: JournaledRecord(
                     operationID: operation.id,
                     targetInstanceID: instance.id,
                     ordinal: 0,
@@ -818,10 +938,12 @@ extension ThemeEngine {
                     planDigest: planReference.digest,
                     receiptJSON: try? encodeReceipt(receipt),
                     detail: receipt.detail
-                )
+                ),
+                instance: instance,
+                connected: false,
+                workspace: workspace,
+                removeBaseline: true
             )
-            try persistence.journalDeleteConnectionBaseline(targetInstanceID: instance.id)
-            try persistence.journalTransitionState(operationID: operation.id, to: .applied)
             return ConnectionReport(
                 operationID: operation.id,
                 outcomes: [
@@ -866,7 +988,12 @@ extension ThemeEngine {
                         sourceRevision: "n/a",
                         configurationState: .failed,
                         runningInstanceReach: .unavailable,
-                        detail: String(describing: error)
+                        detail: String(describing: error),
+                        rollbackState: error is any MutationRecoveryRequiredError
+                            ? .recoveryRequired : .blocked,
+                        userActions: error is any MutationRecoveryRequiredError
+                            ? [Self.recoveryRequiredAction]
+                            : [Self.reviewExternalChangeAction]
                     )
                 ]
             )
@@ -892,6 +1019,22 @@ extension ThemeEngine {
     }
 
     // MARK: Undo Last Apply Transaction
+
+    public func undoAvailability(workspace: Workspace) throws -> UndoAvailability {
+        guard let persistence = self.persistenceStore,
+            let operation = try persistence.journalFindLastAppliedTransaction(workspaceID: workspace.id)
+        else {
+            return .unavailable
+        }
+        let changedTargetCount = try persistence.journalLoadRecords(operationID: operation.id)
+            .filter { $0.phase == .applied }
+            .count
+        guard changedTargetCount > 0 else { return .unavailable }
+        return .available(
+            sourceOperationID: operation.id,
+            changedTargetCount: changedTargetCount
+        )
+    }
 
     /// Undo the Last Apply Transaction for the given workspace.
     ///
@@ -1141,7 +1284,9 @@ extension ThemeEngine {
                     sourceRevision: plan.sourceRevision,
                     configurationState: failure.configurationState,
                     runningInstanceReach: failure.activationReach,
-                    detail: failure.detail
+                    detail: failure.detail,
+                    rollbackState: .recoveryRequired,
+                    userActions: [Self.recoveryRequiredAction]
                 )
             }
             // Guarded rollback refused (external edit or state mismatch) — record as conflicted.
@@ -1176,7 +1321,9 @@ extension ThemeEngine {
                 sourceRevision: plan.sourceRevision,
                 configurationState: failure.configurationState,
                 runningInstanceReach: failure.activationReach,
-                detail: failure.detail
+                detail: failure.detail,
+                rollbackState: .blocked,
+                userActions: [Self.reviewExternalChangeAction]
             )
         }
 
@@ -1208,7 +1355,12 @@ extension ThemeEngine {
             sourceRevision: plan.sourceRevision,
             configurationState: undoReceipt.configurationState,
             runningInstanceReach: undoReceipt.runningInstanceReach,
-            detail: undoReceipt.detail ?? "undone"
+            detail: undoReceipt.detail ?? "undone",
+            rollbackState: .restored,
+            userActions: Self.activationActions(
+                for: undoReceipt.runningInstanceReach,
+                adapterID: record.adapterID
+            )
         )
     }
 
@@ -1223,8 +1375,10 @@ extension ThemeEngine {
         guard let persistence = self.persistenceStore else { return }
         let interrupted = try persistence.journalInterruptedOperations()
         for operation in interrupted {
+            var reconciledConnectionState: (TargetInstanceID, Bool)?
             let records = try persistence.journalLoadRecords(operationID: operation.id)
-            for record in records where record.phase == .applying || record.phase == .prepared
+            for record in records
+            where record.phase == .applying || record.phase == .prepared
                 || (operation.kind == .undo && record.phase == .applied)
             {
                 if operation.kind == .undo, record.phase == .applied {
@@ -1263,6 +1417,11 @@ extension ThemeEngine {
                 } else {
                     recoveredAdapterReceipt = nil
                     recoveredReceiptJSON = nil
+                }
+                if operation.kind == .connect, classification == .intendedAfterChange {
+                    reconciledConnectionState = (record.targetInstanceID, true)
+                } else if operation.kind == .disconnect, classification == .intendedAfterChange {
+                    reconciledConnectionState = (record.targetInstanceID, false)
                 }
                 if operation.kind == .connect, classification == .beforeChange {
                     try removeNewConnectionBaseline(
@@ -1307,12 +1466,42 @@ extension ThemeEngine {
                     )
                 }
             }
-            try persistence.journalTransitionState(operationID: operation.id, to: .reconciled)
+            if reconciledConnectionState == nil,
+                let intendedRecord = records.first(where: { $0.phase == .reconciledIntended })
+            {
+                switch operation.kind {
+                case .connect:
+                    reconciledConnectionState = (intendedRecord.targetInstanceID, true)
+                case .disconnect:
+                    reconciledConnectionState = (intendedRecord.targetInstanceID, false)
+                case .apply, .undo, .restore:
+                    break
+                }
+            }
+            if let (targetInstanceID, connected) = reconciledConnectionState {
+                try persistence.transitionOperation(
+                    operationID: operation.id,
+                    to: .reconciled,
+                    targetInstanceID: targetInstanceID,
+                    connected: connected
+                )
+            } else {
+                try persistence.journalTransitionState(operationID: operation.id, to: .reconciled)
+            }
         }
     }
 
     private func applyRecordPhase(for receipt: AdapterReceipt) -> RecordPhase {
-        receipt.configurationState == .unchanged ? .skipped : .applied
+        switch receipt.configurationState {
+        case .updated:
+            return .applied
+        case .unchanged:
+            return .skipped
+        case .conflicted:
+            return .conflicted
+        case .permissionRequired, .failed, .unavailable:
+            return .failed
+        }
     }
 
     private func removeNewConnectionBaseline(
@@ -1401,16 +1590,20 @@ extension ThemeEngine {
         record: JournaledRecord,
         persistence: PersistenceStore
     ) throws {
-        guard let source = try persistence.journalFindLastAppliedTransaction(
-            workspaceID: operation.workspaceID
-        ) else { return }
+        guard
+            let source = try persistence.journalFindLastAppliedTransaction(
+                workspaceID: operation.workspaceID
+            )
+        else { return }
         let sourceRecords = try persistence.journalLoadRecords(operationID: source.id)
-        guard var sourceRecord = sourceRecords.first(where: {
-            $0.targetInstanceID == record.targetInstanceID
-                && $0.adapterID == record.adapterID
-                && $0.planDigest == record.planDigest
-                && $0.phase == .applied
-        }) else { return }
+        guard
+            var sourceRecord = sourceRecords.first(where: {
+                $0.targetInstanceID == record.targetInstanceID
+                    && $0.adapterID == record.adapterID
+                    && $0.planDigest == record.planDigest
+                    && $0.phase == .applied
+            })
+        else { return }
         sourceRecord.phase = .rolledBack
         try persistence.journalSaveRecord(sourceRecord)
     }
@@ -1460,6 +1653,113 @@ extension ThemeEngine {
     }
 
     // MARK: Helpers
+
+    private static let reviewExternalChangeAction = UserAction(
+        title: "Review external change",
+        detail: "Review the external change before trying again."
+    )
+
+    private static let recoveryRequiredAction = UserAction(
+        title: "Finish recovery",
+        detail: "Restart Oh My Theme to reconcile this Target before trying another change."
+    )
+
+    private static func applyRollbackState(
+        configurationState: ConfigurationState
+    ) -> RollbackState {
+        switch configurationState {
+        case .updated: .undoAvailable
+        case .conflicted: .blocked
+        case .unchanged, .permissionRequired, .failed, .unavailable: .notNeeded
+        }
+    }
+
+    private static func applyUserActions(
+        plan: AdapterPlan,
+        configurationState: ConfigurationState,
+        runningInstanceReach: ActivationReach,
+        recoveryRequired: Bool = false
+    ) -> [UserAction] {
+        if recoveryRequired {
+            return [recoveryRequiredAction]
+        }
+
+        switch configurationState {
+        case .permissionRequired:
+            return permissionActions(
+                setupNeeds: plan.setupNeeds,
+                requiredPermissions: plan.requiredPermissions
+            )
+        case .conflicted:
+            return [reviewExternalChangeAction]
+        case .failed:
+            return [
+                UserAction(
+                    title: "Review failure",
+                    detail: "Review the failure details before trying again."
+                )
+            ]
+        case .unavailable:
+            return [
+                UserAction(
+                    title: "Connect Target",
+                    detail: "Connect this Target, then prepare the Theme Variant again."
+                )
+            ]
+        case .updated, .unchanged:
+            return activationActions(for: runningInstanceReach, adapterID: plan.adapterID)
+        }
+    }
+
+    private static func permissionActions(
+        setupNeeds: [UserAction],
+        requiredPermissions: [String]
+    ) -> [UserAction] {
+        if !setupNeeds.isEmpty {
+            return setupNeeds
+        }
+        if !requiredPermissions.isEmpty {
+            return requiredPermissions.map {
+                UserAction(title: "Grant permission", detail: $0)
+            }
+        }
+        return [
+            UserAction(
+                title: "Grant permission",
+                detail: "Grant the requested permission, then try again."
+            )
+        ]
+    }
+
+    private static func activationActions(
+        for reach: ActivationReach,
+        adapterID: String
+    ) -> [UserAction] {
+        switch reach {
+        case .reloadRequired:
+            let detail =
+                adapterID == "ghostty"
+                ? "Reload Ghostty to use the saved theme."
+                : "Reload this Target to use the saved theme."
+            return [UserAction(title: "Reload", detail: detail)]
+        case .nextPrompt:
+            return [
+                UserAction(
+                    title: "Start a new prompt",
+                    detail: "Start a new prompt to use the saved theme."
+                )
+            ]
+        case .newProcessesOnly:
+            return [
+                UserAction(
+                    title: "Start a new process",
+                    detail: "Start a new process to use the saved theme."
+                )
+            ]
+        case .currentInstances, .unavailable:
+            return []
+        }
+    }
 
     fileprivate func encodeReceipt<T: Encodable>(_ receipt: T) throws -> String {
         let encoder = JSONEncoder()

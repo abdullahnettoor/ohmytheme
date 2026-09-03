@@ -43,7 +43,8 @@ struct PersistenceStoreTests {
         let restored = try fixture.store.loadWorkspace()
 
         #expect(restored.workspace == workspace)
-        #expect(restored.targetInstances == targets)
+        let canonicalTargets = [targets[1], targets[0]]
+        #expect(restored.targetInstances == canonicalTargets)
 
         let updated = Workspace(
             id: workspace.id,
@@ -52,7 +53,7 @@ struct PersistenceStoreTests {
             themeAssignment: .fixed(variantID: "aurora/light")
         )
         try fixture.store.saveWorkspace(updated)
-        #expect(try fixture.store.loadWorkspace().targetInstances == targets)
+        #expect(try fixture.store.loadWorkspace().targetInstances == canonicalTargets)
     }
 
     @Test("Fixed assignments survive a fresh PersistenceStore instance")

@@ -53,6 +53,88 @@ struct DurableOperationsTests {
         #expect(report.outcomes[0].configurationState == .failed)
     }
 
+    @Test("Connection review returns a read-only plan before setup is approved")
+    func connectionReviewIsReadOnly() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = RecordingWritableAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.review"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        let worldBefore = await adapter.currentWorldBytes()
+
+        let plan = try await engine.prepareConnection(instance: instance)
+
+        #expect(plan.targetInstanceID == instance.id)
+        #expect(await adapter.currentWorldBytes() == worldBefore)
+        #expect(try fixture.store.journalLoadConnectionBaseline(targetInstanceID: instance.id) == nil)
+    }
+
+    @Test("A durable connection adds the Target Instance to the persisted Workspace")
+    func durableConnectionPersistsConnectedTarget() async throws {
+        let fixture = try Self.makeFixture()
+        try fixture.store.saveWorkspace(.myMac)
+        let adapter = RecordingWritableAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.connected"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+
+        let report = try await engine.connect(instance: instance, workspace: .myMac)
+        let persisted = try fixture.store.loadWorkspace()
+        let operation = try fixture.store.journalLoadOperation(id: report.operationID)
+
+        #expect(report.outcomes.first?.configurationState == .updated)
+        #expect(operation?.state == .applied)
+        #expect(persisted.workspace.connectedTargetInstances == [instance])
+    }
+
+    @Test("Interrupted connect reconciliation makes intended-after membership connected")
+    func interruptedConnectReconcilesMembership() async throws {
+        let fixture = try Self.makeFixture()
+        try fixture.store.saveWorkspace(.myMac)
+        let adapter = RecordingWritableAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.reconciled-connect"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        let report = try await engine.connect(instance: instance, workspace: .myMac)
+        let record = try #require(
+            try fixture.store.journalLoadRecords(operationID: report.operationID).first
+        )
+
+        try fixture.store.setTargetInstance(instance, connected: false, workspace: .myMac)
+        var reconciledRecord = record
+        reconciledRecord.phase = .reconciledIntended
+        try fixture.store.journalSaveRecord(reconciledRecord)
+        try fixture.store.journalTransitionState(operationID: report.operationID, to: .applying)
+
+        try await engine.reconcileInterruptedOperations()
+
+        let persisted = try fixture.store.loadWorkspace()
+        let operation = try fixture.store.journalLoadOperation(id: report.operationID)
+        #expect(operation?.state == .reconciled)
+        #expect(persisted.workspace.connectedTargetInstances == [instance])
+    }
+
     @Test("Connection baselines are durable before the first connect write")
     func connectionBaselinePersistedBeforeMutation() async throws {
         let fixture = try Self.makeFixture()
@@ -81,6 +163,116 @@ struct DurableOperationsTests {
     }
 
     // MARK: AC #2 — One mutating operation at a time; deterministic order
+
+    @Test("The fixed Workspace assignment prepares every target in canonical order")
+    func fixedAssignmentPreparesCanonicalTargetOrder() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = FaultyRecordingAdapter(failingInstanceIDs: [])
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: ["recording.c", "recording.a", "recording.b"].map {
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: $0),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            },
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+
+        let preview = try await engine.prepare(workspace: workspace)
+        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+
+        #expect(
+            preview.targetPlans.map(\.targetInstanceID.rawValue) == [
+                "recording.a", "recording.b", "recording.c",
+            ])
+        #expect(
+            report.outcomes.map(\.targetInstanceID.rawValue) == [
+                "recording.a", "recording.b", "recording.c",
+            ])
+    }
+
+    @Test("A preview cannot be applied after its Workspace assignment or target set changes")
+    func previewRejectsChangedWorkspace() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = RecordingWritableAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let preparedWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.original"),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+        let changedWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.other"),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+        let preview = try await engine.prepare(workspace: preparedWorkspace)
+        let originalWorld = await adapter.currentWorldBytes()
+
+        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(preview.id)) {
+            _ = try await engine.applyDurable(previewID: preview.id, workspace: changedWorkspace)
+        }
+        #expect(await adapter.currentWorldBytes() == originalWorld)
+    }
+
+    @Test("A fixed-assignment preview cannot be applied after the assignment is removed")
+    func fixedAssignmentPreviewRejectsMissingAssignment() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = RecordingWritableAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let assignedWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: Fixtures.workspace(
+                recordingInstances: ["recording.assignment"]
+            ).connectedTargetInstances,
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+        let unassignedWorkspace = Workspace(
+            id: assignedWorkspace.id,
+            displayName: assignedWorkspace.displayName,
+            connectedTargetInstances: assignedWorkspace.connectedTargetInstances,
+            themeAssignment: nil
+        )
+        let preview = try await engine.prepare(workspace: assignedWorkspace)
+
+        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(preview.id)) {
+            _ = try await engine.applyDurable(
+                previewID: preview.id,
+                workspace: unassignedWorkspace
+            )
+        }
+    }
 
     @Test("A second operation cannot start while another is in flight")
     func mutuallyExclusiveMutations() async throws {
@@ -191,6 +383,11 @@ struct DurableOperationsTests {
         #expect(await adapter.currentWorldBytes() != originalWorld)
         #expect(await adapter.currentWorldBytes() == Data("someone-else-edited".utf8))
         #expect(report.outcomes[0].configurationState == .conflicted)
+        #expect(report.outcomes[0].rollbackState == .blocked)
+        #expect(
+            report.outcomes[0].userActions.contains {
+                $0.detail == "Review the external change before trying again."
+            })
 
         let records = try fixture.store.journalLoadRecords(operationID: report.operationID)
         #expect(records[0].phase == .conflicted)
@@ -364,8 +561,10 @@ struct DurableOperationsTests {
         #expect(report.outcomes.count == 3)
         let byInstance = Dictionary(uniqueKeysWithValues: report.outcomes.map { ($0.targetInstanceID.rawValue, $0) })
         #expect(byInstance["recording.ok-a"]?.configurationState == .updated)
+        #expect(byInstance["recording.ok-a"]?.rollbackState == .undoAvailable)
         #expect(byInstance["recording.fail"]?.configurationState == .failed)
         #expect(byInstance["recording.ok-b"]?.configurationState == .updated)
+        #expect(byInstance["recording.ok-b"]?.rollbackState == .undoAvailable)
     }
 
     // MARK: AC #7 — Shared adapter safety contract

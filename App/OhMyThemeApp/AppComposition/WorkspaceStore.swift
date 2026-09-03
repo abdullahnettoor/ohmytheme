@@ -37,25 +37,8 @@ final class WorkspaceStore {
 
     var persistenceStore: PersistenceStore? { persistence }
 
-    var appWorkspace: Workspace {
-        let persisted = workspace
-        #if DEBUG
-        guard persisted.connectedTargetInstances.isEmpty else { return persisted }
-        return Workspace(
-            id: .myMac,
-            displayName: "My Mac",
-            connectedTargetInstances: [
-                ConnectedTargetInstance(
-                    id: TargetInstanceID(rawValue: "recording.debug"),
-                    displayName: "Recording Target",
-                    adapterID: "recording"
-                )
-            ],
-            themeAssignment: persisted.themeAssignment
-        )
-        #else
-        return persisted
-        #endif
+    var targetInstances: [PersistedTargetInstance] {
+        (try? persistence?.loadWorkspace().targetInstances) ?? []
     }
 
     func selectFixedVariant(_ variantID: String) {

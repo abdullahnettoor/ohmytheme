@@ -27,6 +27,75 @@ struct UndoLastApplyTests {
 
     // MARK: AC #1 — LAT is set by any completed transaction that changed ≥1 instance
 
+    @Test("Undo availability follows the latest transaction while any changed target remains")
+    func undoAvailabilityTracksChangedTargets() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = RecordingWritableAdapter(initialWorld: Data("before-theme".utf8))
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.undo-availability"),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+
+        #expect(try await engine.undoAvailability(workspace: workspace) == .unavailable)
+        let preview = try await engine.prepare(workspace: workspace)
+        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+
+        #expect(
+            try await engine.undoAvailability(workspace: workspace)
+                == .available(sourceOperationID: apply.operationID, changedTargetCount: 1)
+        )
+
+        _ = try await engine.undoLast(workspace: workspace)
+        #expect(try await engine.undoAvailability(workspace: workspace) == .unavailable)
+    }
+
+    @Test("A receipt that reports no update does not create Undo availability")
+    func nonUpdatedReceiptDoesNotCreateUndoAvailability() async throws {
+        let fixture = try Self.makeFixture()
+        let adapter = NonUpdatingReceiptAdapter()
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "non-updating.permission"),
+                    displayName: "Permission target",
+                    adapterID: adapter.id
+                )
+            ],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+
+        let preview = try await engine.prepare(workspace: workspace)
+        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+
+        #expect(report.outcomes.first?.configurationState == .permissionRequired)
+        #expect(report.outcomes.first?.rollbackState == .notNeeded)
+        #expect(
+            report.outcomes.first?.userActions.contains {
+                $0.detail == "Allow the requested change."
+            } == true)
+        #expect(try await engine.undoAvailability(workspace: workspace) == .unavailable)
+    }
+
     @Test("Successful apply becomes the Last Apply Transaction and undo restores prior state")
     func successfulUndoRestoresState() async throws {
         let fixture = try Self.makeFixture()
@@ -46,6 +115,7 @@ struct UndoLastApplyTests {
         let undo = try await engine.undoLast(workspace: workspace)
         #expect(undo.outcomes.count == 1)
         #expect(undo.outcomes[0].configurationState == .updated)
+        #expect(undo.outcomes[0].rollbackState == .restored)
         #expect(undo.outcomes[0].detail == "undone")
         #expect(await adapter.currentWorldBytes() == Data("before-theme".utf8))
     }
@@ -204,6 +274,11 @@ struct UndoLastApplyTests {
 
         let undo = try await engine.undoLast(workspace: workspace)
         #expect(undo.outcomes[0].configurationState == .conflicted)
+        #expect(undo.outcomes[0].rollbackState == .blocked)
+        #expect(
+            undo.outcomes[0].userActions.contains {
+                $0.detail == "Review the external change before trying again."
+            })
         // The external state must be preserved.
         #expect(await adapter.currentWorldBytes() == external)
     }
@@ -327,4 +402,89 @@ struct UndoLastApplyTests {
             _ = try await engine.undoLast(workspace: workspace)
         }
     }
+}
+
+private actor NonUpdatingReceiptAdapter: WritableThemeAdapter {
+    let id = "non-updating"
+    let version = "1"
+    let payloadVersion = "1"
+
+    func prepareApply(instance: ConnectedTargetInstance, theme: PreparedTheme) async throws -> AdapterPlan {
+        AdapterPlan(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            adapterVersion: version,
+            capabilityID: "theme",
+            payload: AdapterPayloadEnvelope(
+                adapterID: id,
+                adapterVersion: version,
+                payloadVersion: payloadVersion,
+                payload: Data("prepared".utf8)
+            ),
+            intendedChangeDigest: theme.contentDigest,
+            sourceType: theme.sourceType,
+            sourceRevision: theme.sourceRevision,
+            activationReach: .unavailable,
+            setupNeeds: [
+                UserAction(title: "Grant permission", detail: "Allow the requested change.")
+            ]
+        )
+    }
+
+    func revalidateApply(plan: AdapterPlan) async throws {}
+
+    func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
+        AdapterReceipt(
+            configurationState: .permissionRequired,
+            runningInstanceReach: .unavailable,
+            detail: "Permission is required."
+        )
+    }
+
+    func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification { .beforeChange }
+    func rollbackApply(plan: AdapterPlan, receipt: AdapterReceipt) async throws {}
+
+    func prepareConnection(
+        instance: ConnectedTargetInstance,
+        approveLinkedSource: Bool
+    ) async throws -> ConnectionPlan {
+        ConnectionPlan(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            adapterVersion: version,
+            capturedPreChangeState: Data(),
+            intendedChangeDigest: "none"
+        )
+    }
+
+    func connect(_ plan: ConnectionPlan) async throws -> ConnectionReceipt {
+        ConnectionReceipt(configurationState: .unchanged)
+    }
+
+    func revalidateConnection(plan: ConnectionPlan) async throws {}
+    func classifyConnection(plan: ConnectionPlan) async throws -> ReconciliationClassification { .beforeChange }
+
+    func restoreConnection(instance: ConnectedTargetInstance, baseline: Data) async throws -> ConnectionReceipt {
+        ConnectionReceipt(configurationState: .unchanged)
+    }
+
+    func prepareDisconnect(
+        instance: ConnectedTargetInstance,
+        baseline: StoredConnectionBaseline,
+        baselineData: Data
+    ) async throws -> DisconnectPlan {
+        DisconnectPlan(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            adapterVersion: version,
+            baselineReference: baseline.baselineReference
+        )
+    }
+
+    func disconnect(_ plan: DisconnectPlan, baseline: Data) async throws -> AdapterReceipt {
+        AdapterReceipt(configurationState: .unchanged, runningInstanceReach: .unavailable)
+    }
+
+    func revalidateDisconnect(plan: DisconnectPlan) async throws {}
+    func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification { .beforeChange }
 }

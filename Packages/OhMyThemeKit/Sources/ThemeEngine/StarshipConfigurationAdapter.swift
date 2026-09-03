@@ -145,9 +145,10 @@ private struct StarshipThemeState: Codable {
 
 // MARK: - Adapter
 
-public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
+public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConnectionApproving {
     public let id = "starship"
     public let version = "2"
+    public static let defaultTargetInstanceID = TargetInstanceID(rawValue: "starship.default")
     public let payloadVersion = "1"
 
     private let managedFiles: ManagedFiles
@@ -322,6 +323,29 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
                 ] : [],
             opaquePayload: try encode(StarshipConnectionPayload(details: details, filePlan: nil)),
             requiresApproval: requiresApproval
+        )
+    }
+
+    public func approveReviewedConnection(_ plan: ConnectionPlan) async throws -> ConnectionPlan {
+        let baseline = try decode(StarshipConnectionBaseline.self, from: plan.capturedPreChangeState)
+        let payload = try connectionPayload(from: plan)
+        let approvedBaseline = StarshipConnectionBaseline(
+            inspection: baseline.inspection,
+            approvedLinkedSourceURL: payload.details.linkedSourceURL
+        )
+        return ConnectionPlan(
+            targetInstanceID: plan.targetInstanceID,
+            adapterID: plan.adapterID,
+            adapterVersion: plan.adapterVersion,
+            capturedPreChangeState: try encode(approvedBaseline),
+            intendedChangeDigest: plan.intendedChangeDigest,
+            staleStateToken: plan.staleStateToken,
+            expectedSideEffects: plan.expectedSideEffects,
+            requiredPermissions: plan.requiredPermissions,
+            userActions: plan.userActions,
+            opaquePayload: plan.opaquePayload,
+            requiresApproval: false,
+            baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored
         )
     }
 

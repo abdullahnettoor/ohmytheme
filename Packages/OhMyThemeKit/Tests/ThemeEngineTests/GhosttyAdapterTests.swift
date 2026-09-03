@@ -102,6 +102,56 @@ struct GhosttyAdapterTests {
         #expect(try String(contentsOf: fixture.managedURL, encoding: .utf8) == "# Managed by Oh My Theme\n")
     }
 
+    @Test("Switching Theme Variants only replaces the managed Ghostty fragment")
+    func switchingVariantsPreservesParentConfiguration() async throws {
+        let fixture = try Fixture(parentContents: "font-family = Iosevka\n")
+        let adapter = fixture.adapter()
+        let connection = try await adapter.prepareConnection(instance: fixture.instance)
+        _ = try await adapter.connect(connection)
+        let parentAfterConnection = try Data(contentsOf: fixture.parentURL)
+        let firstPlan = try await adapter.prepareApply(
+            instance: fixture.instance,
+            theme: fixture.theme()
+        )
+        _ = try await adapter.apply(firstPlan)
+        let firstManagedBytes = try Data(contentsOf: fixture.managedURL)
+
+        let baseVariant = Fixtures.pack.variants[0]
+        let secondVariant = ThemeVariant(
+            id: "alternate",
+            displayName: "Alternate",
+            appearance: baseVariant.appearance,
+            contentDigest: "alternate-theme",
+            roles: baseVariant.roles.merging([
+                .ansiRed: ThemeColor(rawValue: "#abcdef")
+            ]) { _, new in new },
+            wallpaper: baseVariant.wallpaper
+        )
+        let secondTheme = PreparedTheme(
+            variantID: "test-pack/alternate",
+            variant: secondVariant,
+            sourceType: .generated,
+            sourceRevision: Fixtures.pack.source.revision,
+            attribution: Fixtures.pack.source.attribution,
+            themeSchemaVersion: Fixtures.pack.schemaVersion,
+            contentDigest: secondVariant.contentDigest,
+            compilerVersion: "theme-compiler-1",
+            upstreamArtifact: nil
+        )
+        let secondPlan = try await adapter.prepareApply(
+            instance: fixture.instance,
+            theme: secondTheme
+        )
+        _ = try await adapter.apply(secondPlan)
+
+        #expect(try Data(contentsOf: fixture.parentURL) == parentAfterConnection)
+        #expect(try Data(contentsOf: fixture.managedURL) != firstManagedBytes)
+        #expect(
+            try String(contentsOf: fixture.parentURL, encoding: .utf8)
+                .contains("font-family = Iosevka")
+        )
+    }
+
     @Test("Undo refuses an external replacement with the same theme bytes")
     func themeUndoRejectsSameContentReplacement() async throws {
         let fixture = try Fixture(parentContents: "background = #101010\n")
@@ -386,11 +436,24 @@ struct GhosttyAdapterTests {
         await #expect(throws: GhosttyAdapterError.self) {
             _ = try await adapter.connect(plan)
         }
-        let approved = try await adapter.prepareConnection(
-            instance: fixture.instance,
-            approveLinkedSource: true
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
         )
-        _ = try await adapter.connect(approved)
+        try store.saveWorkspace(.myMac)
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter],
+            persistence: store
+        )
+        let report = try await engine.connect(
+            instance: fixture.instance,
+            workspace: .myMac,
+            approveLinkedSource: true,
+            reviewedPlan: plan
+        )
+
+        #expect(report.outcomes.first?.configurationState == .updated)
         #expect(try String(contentsOf: fixture.parentSourceURL, encoding: .utf8).contains("config-file"))
     }
 

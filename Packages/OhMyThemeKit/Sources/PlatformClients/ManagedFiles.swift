@@ -134,6 +134,17 @@ public struct ManagedFilePlan: Codable, Equatable, Sendable, Identifiable {
         self.staleStateToken = staleStateToken
         self.linkedSourceApproved = linkedSourceApproved
     }
+
+    public func approvingLinkedSource() -> ManagedFilePlan {
+        ManagedFilePlan(
+            id: id,
+            inspection: inspection,
+            intendedBytes: intendedBytes,
+            intendedDigest: intendedDigest,
+            staleStateToken: staleStateToken,
+            linkedSourceApproved: true
+        )
+    }
 }
 
 public struct ManagedFileReceipt: Codable, Equatable, Sendable {

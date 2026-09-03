@@ -48,7 +48,12 @@ public struct VSCodeRegistrationExpectation: Codable, Equatable, Sendable {
         if let profileID {
             profileMatches = registration.vscode.profileId == profileID
         } else if let profileName {
-            profileMatches = registration.vscode.profileName == profileName
+            profileMatches =
+                registration.vscode.profileName == profileName
+                || Self.matchesDefaultProfileStorage(
+                    expectedProfileName: profileName,
+                    registration: registration
+                )
         } else {
             profileMatches = false
         }
@@ -70,6 +75,20 @@ public struct VSCodeRegistrationExpectation: Codable, Equatable, Sendable {
         case .window:
             return profileMatches && processOrWindowMatches
         }
+    }
+
+    private static func matchesDefaultProfileStorage(
+        expectedProfileName: String,
+        registration: CompanionRegistration
+    ) -> Bool {
+        guard expectedProfileName.caseInsensitiveCompare("Default") == .orderedSame,
+            registration.vscode.profileName.isEmpty,
+            !registration.vscode.profileId.isEmpty,
+            let storageURL = URL(string: registration.vscode.profileId)
+        else {
+            return false
+        }
+        return !storageURL.pathComponents.contains("profiles")
     }
 }
 
@@ -181,8 +200,11 @@ public final class SystemVSCodeConnectionPlatform: VSCodeConnectionPlatform, @un
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: registrationTimeout)
         repeat {
-            if let match = server.registrations().first(where: expectation.matches) {
-                return match
+            if let registration = Self.selectRegistration(
+                from: server.registrations(),
+                matching: expectation
+            ) {
+                return registration
             }
             if clock.now >= deadline { return nil }
             try? await Task.sleep(for: pollInterval)
@@ -190,13 +212,34 @@ public final class SystemVSCodeConnectionPlatform: VSCodeConnectionPlatform, @un
         return nil
     }
 
+    static func selectRegistration(
+        from registrations: [CompanionRegistration],
+        matching expectation: VSCodeRegistrationExpectation
+    ) -> CompanionRegistration? {
+        let matches = registrations.filter(expectation.matches).sorted {
+            $0.serverSessionID < $1.serverSessionID
+        }
+        switch expectation.scope {
+        case .profile:
+            let profileIDs = Set(matches.map(\.vscode.profileId))
+            guard profileIDs.count == 1, profileIDs.first?.isEmpty == false else {
+                return nil
+            }
+            return matches.first
+        case .window:
+            return matches.count == 1 ? matches[0] : nil
+        }
+    }
+
     public func inspectTheme(
         serverSessionID: String,
         matching expectation: VSCodeRegistrationExpectation
     ) async throws -> CompanionThemeInspection {
-        guard server.registrations().contains(where: {
-            $0.serverSessionID == serverSessionID && expectation.matches($0)
-        }) else {
+        guard
+            server.registrations().contains(where: {
+                $0.serverSessionID == serverSessionID && expectation.matches($0)
+            })
+        else {
             throw VSCodeCompanionRequestError.disconnected
         }
         do {
@@ -213,9 +256,11 @@ public final class SystemVSCodeConnectionPlatform: VSCodeConnectionPlatform, @un
         serverSessionID: String,
         matching expectation: VSCodeRegistrationExpectation
     ) async throws -> CompanionApplyOutcome {
-        guard server.registrations().contains(where: {
-            $0.serverSessionID == serverSessionID && expectation.matches($0)
-        }) else {
+        guard
+            server.registrations().contains(where: {
+                $0.serverSessionID == serverSessionID && expectation.matches($0)
+            })
+        else {
             throw VSCodeCompanionRequestError.disconnected
         }
         do {

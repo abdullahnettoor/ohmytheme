@@ -668,6 +668,8 @@ struct StarshipAdapterTests {
         )
         let secondPlan = try await adapter.prepareApply(instance: fixture.instance, theme: secondTheme)
         let secondReceipt = try await adapter.apply(secondPlan)
+        let afterSecondSwitch = try String(contentsOf: fixture.configURL, encoding: .utf8)
+        #expect(afterSecondSwitch.contains("format = \"before\""))
 
         try await adapter.rollbackApply(plan: secondPlan, receipt: secondReceipt)
         try await adapter.rollbackApply(plan: firstPlan, receipt: firstReceipt)
@@ -920,10 +922,12 @@ struct StarshipAdapterTests {
             adapters: [fixture.adapter()],
             persistence: store
         )
+        let reviewedPlan = try await firstEngine.prepareConnection(instance: fixture.instance)
         _ = try await firstEngine.connect(
             instance: fixture.instance,
             workspace: workspace,
-            approveLinkedSource: true
+            approveLinkedSource: true,
+            reviewedPlan: reviewedPlan
         )
 
         let relaunchedEngine = ThemeEngine(

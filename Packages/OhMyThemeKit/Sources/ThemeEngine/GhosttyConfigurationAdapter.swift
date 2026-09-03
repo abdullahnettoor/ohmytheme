@@ -359,9 +359,10 @@ extension DisconnectPlan {
     }
 }
 
-public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
+public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConnectionApproving {
     public let id = "ghostty"
     public let version = "1"
+    public static let defaultTargetInstanceID = TargetInstanceID(rawValue: "ghostty.default")
     public let payloadVersion = "1"
 
     private let runtime: any GhosttyRuntime
@@ -496,6 +497,29 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter {
                     ]),
             opaquePayload: try encode(payload),
             requiresApproval: details.linkedSourceURL != nil && !approveLinkedSource
+        )
+    }
+
+    public func approveReviewedConnection(_ plan: ConnectionPlan) async throws -> ConnectionPlan {
+        let payload = try connectionPayload(from: plan)
+        let approvedPayload = GhosttyConnectionPayload(
+            details: payload.details,
+            parentPlan: payload.parentPlan.approvingLinkedSource(),
+            managedArtifactPlan: payload.managedArtifactPlan
+        )
+        return ConnectionPlan(
+            targetInstanceID: plan.targetInstanceID,
+            adapterID: plan.adapterID,
+            adapterVersion: plan.adapterVersion,
+            capturedPreChangeState: plan.capturedPreChangeState,
+            intendedChangeDigest: plan.intendedChangeDigest,
+            staleStateToken: plan.staleStateToken,
+            expectedSideEffects: plan.expectedSideEffects,
+            requiredPermissions: plan.requiredPermissions,
+            userActions: plan.userActions,
+            opaquePayload: try encode(approvedPayload),
+            requiresApproval: false,
+            baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored
         )
     }
 

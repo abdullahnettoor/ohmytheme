@@ -6,13 +6,19 @@ import ThemeModel
 struct BundledThemeCatalog {
     private static let packFileNames = ["catppuccin-mocha", "oh-my-theme-aurora"]
 
-    func load() -> [ThemePack] {
+    func load() throws -> [ThemePack] {
         let compiler = ThemePackCompiler()
-        return Self.packFileNames.compactMap { fileName in
+        let packs = try Self.packFileNames.map { fileName in
             guard let url = Bundle.main.url(forResource: fileName, withExtension: "json") else {
-                return nil
+                throw BundledThemeCatalogError.missingResource(fileName)
             }
-            return try? compiler.loadPack(at: url)
+            return try compiler.loadPack(at: url)
         }
+        try compiler.validateCatalog(packs)
+        return packs
     }
+}
+
+enum BundledThemeCatalogError: Error, Equatable {
+    case missingResource(String)
 }

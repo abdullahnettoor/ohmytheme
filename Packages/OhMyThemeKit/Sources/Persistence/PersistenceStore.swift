@@ -180,7 +180,9 @@ public final class PersistenceStore: @unchecked Sendable {
                 database,
                 sql: """
                     SELECT id, display_name, adapter_id, is_connected
-                    FROM target_instances WHERE workspace_id = ? ORDER BY rowid
+                    FROM target_instances
+                    WHERE workspace_id = ?
+                    ORDER BY adapter_id, id
                     """,
                 arguments: [workspaceID.rawValue]
             ).map {
@@ -190,6 +192,12 @@ public final class PersistenceStore: @unchecked Sendable {
                     adapterID: $0["adapter_id"],
                     isConnected: ($0["is_connected"] as Int) != 0
                 )
+            }.sorted { left, right in
+                let leftRank = WorkspaceTargetOrder.rank(adapterID: left.adapterID)
+                let rightRank = WorkspaceTargetOrder.rank(adapterID: right.adapterID)
+                if leftRank != rightRank { return leftRank < rightRank }
+                if left.adapterID != right.adapterID { return left.adapterID < right.adapterID }
+                return left.id.rawValue < right.id.rawValue
             }
             let connected = targets.filter(\.isConnected).map {
                 ConnectedTargetInstance(id: $0.id, displayName: $0.displayName, adapterID: $0.adapterID)
@@ -263,6 +271,77 @@ public final class PersistenceStore: @unchecked Sendable {
                     )
                 }
             }
+        }
+    }
+
+    public func setTargetInstance(
+        _ instance: ConnectedTargetInstance,
+        connected: Bool,
+        workspace: Workspace
+    ) throws {
+        try database.write { database in
+            try Self.upsertWorkspace(workspace, in: database)
+            try Self.insert(
+                PersistedTargetInstance(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: connected
+                ),
+                workspaceID: workspace.id,
+                in: database
+            )
+        }
+    }
+
+    public func finalizeConnectionOperation(
+        record: JournaledRecord,
+        instance: ConnectedTargetInstance,
+        connected: Bool,
+        workspace: Workspace,
+        removeBaseline: Bool = false
+    ) throws {
+        try database.write { database in
+            try Self.save(record, in: database)
+            try database.execute(
+                sql: "UPDATE operations SET state = ? WHERE id = ?",
+                arguments: [OperationState.applied.rawValue, record.operationID.uuidString]
+            )
+            try Self.upsertWorkspace(workspace, in: database)
+            try Self.insert(
+                PersistedTargetInstance(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: connected
+                ),
+                workspaceID: workspace.id,
+                in: database
+            )
+            if removeBaseline {
+                try database.execute(
+                    sql: "DELETE FROM connection_baselines WHERE target_instance_id = ?",
+                    arguments: [instance.id.rawValue]
+                )
+            }
+        }
+    }
+
+    public func transitionOperation(
+        operationID: UUID,
+        to state: OperationState,
+        targetInstanceID: TargetInstanceID,
+        connected: Bool
+    ) throws {
+        try database.write { database in
+            try database.execute(
+                sql: "UPDATE operations SET state = ? WHERE id = ?",
+                arguments: [state.rawValue, operationID.uuidString]
+            )
+            try database.execute(
+                sql: "UPDATE target_instances SET is_connected = ? WHERE id = ?",
+                arguments: [connected, targetInstanceID.rawValue]
+            )
         }
     }
 
@@ -388,6 +467,43 @@ public final class PersistenceStore: @unchecked Sendable {
 
     public func loadContent(_ reference: ContentReference) throws -> Data {
         try contentStore.get(reference)
+    }
+
+    private static func upsertWorkspace(_ workspace: Workspace, in database: Database) throws {
+        try database.execute(
+            sql: """
+                INSERT INTO workspaces (id, display_name) VALUES (?, ?)
+                ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name
+                """,
+            arguments: [workspace.id.rawValue, workspace.displayName]
+        )
+    }
+
+    private static func save(_ record: JournaledRecord, in database: Database) throws {
+        try database.execute(
+            sql: """
+                INSERT OR REPLACE INTO operation_records (
+                    operation_id, target_instance_id, ordinal,
+                    adapter_id, adapter_version, capability_id, phase,
+                    intended_change_digest, stale_state_token,
+                    plan_digest, receipt_json, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+            arguments: [
+                record.operationID.uuidString,
+                record.targetInstanceID.rawValue,
+                record.ordinal,
+                record.adapterID,
+                record.adapterVersion,
+                record.capabilityID,
+                record.phase.rawValue,
+                record.intendedChangeDigest,
+                record.staleStateToken,
+                record.planDigest,
+                record.receiptJSON,
+                record.detail,
+            ]
+        )
     }
 
     private static func insert(

@@ -228,7 +228,7 @@ extension PersistenceStore {
                         SELECT 1 FROM operation_records r
                         WHERE r.operation_id = o.id AND r.phase = 'applied'
                       )
-                    ORDER BY o.created_at DESC
+                    ORDER BY o.created_at DESC, o.id DESC
                     LIMIT 1
                     """,
                 arguments: [workspaceID.rawValue]
@@ -247,7 +247,7 @@ extension PersistenceStore {
                            intended_change_digest, stale_state_token,
                            plan_digest, receipt_json, detail
                     FROM operation_records
-                    WHERE operation_id = ? ORDER BY ordinal
+                    WHERE operation_id = ? ORDER BY ordinal, target_instance_id
                     """,
                 arguments: [operationID.uuidString]
             )

@@ -55,6 +55,23 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         self.baselineWasPreviouslyStored = baselineWasPreviouslyStored
     }
 
+    public func approvingReviewedSetup() -> ConnectionPlan {
+        ConnectionPlan(
+            targetInstanceID: targetInstanceID,
+            adapterID: adapterID,
+            adapterVersion: adapterVersion,
+            capturedPreChangeState: capturedPreChangeState,
+            intendedChangeDigest: intendedChangeDigest,
+            staleStateToken: staleStateToken,
+            expectedSideEffects: expectedSideEffects,
+            requiredPermissions: requiredPermissions,
+            userActions: userActions,
+            opaquePayload: opaquePayload,
+            requiresApproval: false,
+            baselineWasPreviouslyStored: baselineWasPreviouslyStored
+        )
+    }
+
     func recordingStoredBaseline(_ wasPreviouslyStored: Bool) -> ConnectionPlan {
         ConnectionPlan(
             targetInstanceID: targetInstanceID,
@@ -210,6 +227,10 @@ public protocol RecoverableRollbackAdapter: AcknowledgedRollbackAdapter {
 
 public protocol RecoverableConnectionAdapter: ConnectionAdapter {
     func recoverConnectionReceipt(plan: ConnectionPlan) async throws -> ConnectionReceipt
+}
+
+public protocol ReviewedConnectionApproving: Sendable {
+    func approveReviewedConnection(_ plan: ConnectionPlan) async throws -> ConnectionPlan
 }
 
 public protocol ConnectionAdapter: Sendable {

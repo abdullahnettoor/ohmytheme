@@ -184,6 +184,91 @@ struct VSCodeCompanionInstallerTests {
         #expect(!profileOnly.matches(registration))
         #expect(durableProfile.matches(registration))
     }
+
+    @Test("Profile selection accepts multiple windows only when they share one profile identity")
+    func profileSelectionDeduplicatesWindows() {
+        func registration(sessionID: String, profileID: String) -> CompanionRegistration {
+            CompanionRegistration(
+                serverSessionID: sessionID,
+                extensionVersion: "0.1.0",
+                vscode: CompanionVSCodeIdentity(
+                    edition: "vscode",
+                    version: "1.95.2",
+                    profileName: "Default",
+                    profileId: profileID,
+                    machineId: "machine-1",
+                    sessionId: sessionID,
+                    processId: 42,
+                    windowId: sessionID
+                ),
+                capabilities: ["colorTheme"],
+                currentSettings: [:]
+            )
+        }
+        let expectation = VSCodeRegistrationExpectation(
+            scope: .profile,
+            edition: .stable,
+            applicationVersion: "1.95.2",
+            extensionVersion: "0.1.0",
+            profileName: "Default"
+        )
+        let firstWindow = registration(sessionID: "a", profileID: "default-profile")
+        let secondWindow = registration(sessionID: "b", profileID: "default-profile")
+        let otherProfile = registration(sessionID: "c", profileID: "other-profile")
+
+        #expect(
+            SystemVSCodeConnectionPlatform.selectRegistration(
+                from: [secondWindow, firstWindow],
+                matching: expectation
+            ) == firstWindow
+        )
+        #expect(
+            SystemVSCodeConnectionPlatform.selectRegistration(
+                from: [firstWindow, otherProfile],
+                matching: expectation
+            ) == nil
+        )
+    }
+
+    @Test("Default profile matching rejects opaque named-profile storage identities")
+    func defaultProfileMatchingUsesOpaqueStorageIdentity() {
+        func registration(profileID: String) -> CompanionRegistration {
+            CompanionRegistration(
+                serverSessionID: profileID,
+                extensionVersion: "0.1.0",
+                vscode: CompanionVSCodeIdentity(
+                    edition: "vscode",
+                    version: "1.95.2",
+                    profileName: "",
+                    profileId: profileID,
+                    machineId: "machine-1",
+                    sessionId: "window-1",
+                    processId: 42,
+                    windowId: "window-1"
+                ),
+                capabilities: ["colorTheme"],
+                currentSettings: [:]
+            )
+        }
+        let expectation = VSCodeRegistrationExpectation(
+            scope: .profile,
+            edition: .stable,
+            applicationVersion: "1.95.2",
+            extensionVersion: "0.1.0",
+            profileName: "Default"
+        )
+        let defaultProfile = registration(
+            profileID:
+                "file:///Users/test/Library/Application%20Support/Code/User/globalStorage/ohmytheme.oh-my-theme-companion"
+        )
+        let namedProfile = registration(
+            profileID:
+                "file:///Users/test/Library/Application%20Support/Code/User/profiles/work/globalStorage/ohmytheme.oh-my-theme-companion"
+        )
+
+        #expect(expectation.matches(defaultProfile))
+        #expect(!expectation.matches(namedProfile))
+    }
 }
 
 private struct InstallerFixture {

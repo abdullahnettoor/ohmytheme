@@ -216,6 +216,14 @@ public struct AdapterReceipt: Codable, Equatable, Sendable {
     }
 }
 
+public enum RollbackState: String, Codable, Equatable, Sendable {
+    case notNeeded
+    case undoAvailable
+    case restored
+    case blocked
+    case recoveryRequired
+}
+
 public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
     public let adapterID: String
@@ -225,6 +233,8 @@ public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
     public let configurationState: ConfigurationState
     public let runningInstanceReach: ActivationReach
     public let detail: String?
+    public let rollbackState: RollbackState
+    public let userActions: [UserAction]
 
     public init(
         targetInstanceID: TargetInstanceID,
@@ -234,7 +244,9 @@ public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
         sourceRevision: String,
         configurationState: ConfigurationState,
         runningInstanceReach: ActivationReach,
-        detail: String? = nil
+        detail: String? = nil,
+        rollbackState: RollbackState = .notNeeded,
+        userActions: [UserAction] = []
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
@@ -244,6 +256,8 @@ public struct TargetCapabilityOutcome: Codable, Equatable, Sendable {
         self.configurationState = configurationState
         self.runningInstanceReach = runningInstanceReach
         self.detail = detail
+        self.rollbackState = rollbackState
+        self.userActions = userActions
     }
 }
 
@@ -271,6 +285,9 @@ public struct TargetPreparationFailure: Codable, Equatable, Sendable {
 
 public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
+    public let workspaceID: WorkspaceID
+    public let targetInstanceIDs: [TargetInstanceID]
+    public let requiredThemeAssignment: ThemeAssignment?
     public let variantID: String
     public let sourceType: ThemeSourceKind
     public let sourceRevision: String
@@ -286,6 +303,9 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
 
     public init(
         id: UUID,
+        workspaceID: WorkspaceID,
+        targetInstanceIDs: [TargetInstanceID],
+        requiredThemeAssignment: ThemeAssignment? = nil,
         variantID: String,
         sourceType: ThemeSourceKind,
         sourceRevision: String,
@@ -300,6 +320,9 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
         targetPlans: [AdapterPlan]
     ) {
         self.id = id
+        self.workspaceID = workspaceID
+        self.targetInstanceIDs = targetInstanceIDs
+        self.requiredThemeAssignment = requiredThemeAssignment
         self.variantID = variantID
         self.sourceType = sourceType
         self.sourceRevision = sourceRevision
@@ -330,15 +353,17 @@ public protocol ThemeAdapter: Sendable {
 
 public enum ThemeEngineError: Error, Equatable, Sendable {
     case variantNotFound(String)
+    case fixedThemeAssignmentRequired
     case previewNotFound(UUID)
+    case previewWorkspaceChanged(UUID)
     case engineUnavailable
     case applyInProgress
 }
 
 public actor ThemeEngine {
     private let packs: [ThemePack]
-    internal let adaptersByID: [String: any ThemeAdapter]
-    internal let connectionAdaptersByID: [String: any ConnectionAdapter]
+    internal var adaptersByID: [String: any ThemeAdapter]
+    internal var connectionAdaptersByID: [String: any ConnectionAdapter]
     private let sourcePolicy: ThemeSourcePolicy
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
     internal let persistenceForOperations: PersistenceStore?
@@ -372,11 +397,42 @@ public actor ThemeEngine {
         self.persistenceForOperations = persistence
     }
 
-    public func prepare(themeVariantID: String, workspace: Workspace) async throws -> ThemePreview {
+    public func register(adapter: any ThemeAdapter) {
+        adaptersByID[adapter.id] = adapter
+        if let connectionAdapter = adapter as? any ConnectionAdapter {
+            connectionAdaptersByID[adapter.id] = connectionAdapter
+        }
+    }
+
+    public func prepare(workspace: Workspace) async throws -> ThemePreview {
+        guard case .fixed(let themeVariantID) = workspace.themeAssignment else {
+            throw ThemeEngineError.fixedThemeAssignmentRequired
+        }
+        return try await prepare(
+            themeVariantID: themeVariantID,
+            workspace: workspace,
+            requiredThemeAssignment: workspace.themeAssignment
+        )
+    }
+
+    func prepare(themeVariantID: String, workspace: Workspace) async throws -> ThemePreview {
+        try await prepare(
+            themeVariantID: themeVariantID,
+            workspace: workspace,
+            requiredThemeAssignment: nil
+        )
+    }
+
+    private func prepare(
+        themeVariantID: String,
+        workspace: Workspace,
+        requiredThemeAssignment: ThemeAssignment?
+    ) async throws -> ThemePreview {
         guard let packAndVariant = findVariant(themeVariantID) else {
             throw ThemeEngineError.variantNotFound(themeVariantID)
         }
         let (pack, variant) = packAndVariant
+        let orderedInstances = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances)
         let resolvedSource = resolveSource(for: pack, variant: variant, adapterID: nil)
         if sourcePolicy == .requireUpstream,
             resolvedSource == nil,
@@ -384,6 +440,9 @@ public actor ThemeEngine {
         {
             let preview = ThemePreview(
                 id: UUID(),
+                workspaceID: workspace.id,
+                targetInstanceIDs: orderedInstances.map(\.id),
+                requiredThemeAssignment: requiredThemeAssignment,
                 variantID: variant.qualifiedID,
                 sourceType: .unavailable,
                 sourceRevision: pack.source.revision,
@@ -391,8 +450,8 @@ public actor ThemeEngine {
                 activationReach: .unavailable,
                 setupNeeds: [],
                 conflicts: [],
-                unavailableCapabilities: workspace.connectedTargetInstances.map { _ in "theme" },
-                unavailableTargetInstanceIDs: workspace.connectedTargetInstances.map(\.id),
+                unavailableCapabilities: orderedInstances.map { _ in "theme" },
+                unavailableTargetInstanceIDs: orderedInstances.map(\.id),
                 userActions: [],
                 targetPlans: []
             )
@@ -411,7 +470,7 @@ public actor ThemeEngine {
         var unavailableTargetInstanceIDs: [TargetInstanceID] = []
         var preparationFailures: [TargetPreparationFailure] = []
         var userActions: [UserAction] = []
-        for instance in workspace.connectedTargetInstances {
+        for instance in orderedInstances {
             guard let adapter = adaptersByID[instance.adapterID] else {
                 unavailableCapabilities.append("theme")
                 unavailableTargetInstanceIDs.append(instance.id)
@@ -496,6 +555,9 @@ public actor ThemeEngine {
         }
         let preview = ThemePreview(
             id: previewID,
+            workspaceID: workspace.id,
+            targetInstanceIDs: orderedInstances.map(\.id),
+            requiredThemeAssignment: requiredThemeAssignment,
             variantID: variant.qualifiedID,
             sourceType: previewSourceType,
             sourceRevision: pack.source.revision,
