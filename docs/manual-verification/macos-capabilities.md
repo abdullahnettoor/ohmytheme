@@ -31,6 +31,22 @@ This does not establish dynamic wallpaper, collection scheduling, or an
 every-Space guarantee. The product promise remains static wallpaper on the
 explicitly selected connected displays.
 
+## Bundled demo display and Space check
+
+Both bundled Theme Variants, Catppuccin Mocha and Oh My Theme Aurora, contain no wallpaper. The issue #23 live run must therefore prove discovery and non-mutation, not a bundled wallpaper switch.
+
+1. Before launching Oh My Theme, count the connected displays. On each display, visit every available desktop Space and full-screen Space. Record only neutral labels such as `display A, Space 1`; do not record wallpaper URLs.
+2. Open Oh My Theme and confirm the macOS row reports the same display count and says wallpaper stays unchanged.
+3. Connect System Appearance, Ghostty, VS Code, and Starship as available.
+4. Preview and apply Aurora, then Catppuccin Mocha, then Aurora again.
+5. Revisit every observed Space on every display. Confirm no wallpaper or placement changed.
+6. Disconnect and reconnect a display if the machine permits it, reopen the menu, and confirm the discovered count updates without a wallpaper mutation.
+7. Record the limitation exactly: the public interface can enumerate connected displays, but it cannot enumerate every Space. A static wallpaper apply can claim the selected connected displays and the active Space behavior observed from macOS. It cannot claim every Space, dynamic wallpaper, or scheduled collections.
+
+| Date | Displays | Spaces observed | Result |
+| --- | --- | --- | --- |
+| Pending | Pending | Pending | Pending |
+
 ## Static wallpaper adapter switch and restore (issue #17)
 
 1. Note the wallpaper URL and placement on each connected display.
@@ -39,10 +55,7 @@ explicitly selected connected displays.
 3. Connect exactly one display and confirm nothing changes on the desktop; the
    returned `ConnectionReceipt` should be `.unchanged` with reach
    `.currentInstances`.
-4. Prepare and apply a Theme Variant whose `wallpaper.contentDigest` matches the
-   on-disk asset. The selected display should switch to the bundled asset and
-   preserve the display's prior scaling, clipping, and fill color; the other
-   display should not change.
+4. For an adapter-only wallpaper qualification, prepare a local test Theme Variant whose `wallpaper.contentDigest` matches its on-disk test asset. Neither bundled Theme Variant contains a wallpaper. The selected display should switch to the test asset and preserve the display's prior scaling, clipping, and fill color; the other display should not change.
 5. Change the selected display's wallpaper manually in System Settings, then
    invoke Undo. Undo must refuse (the adapter surfaces
    `MacOSWallpaperAdapterError.restorationConflict`) rather than overwrite the
@@ -102,21 +115,15 @@ outcome and does not block unrelated target capabilities.
 1. Reset the app's Automation decision with
    `tccutil reset AppleEvents <app-bundle-id>`, replacing `<app-bundle-id>` with
    the locally signed app's bundle identifier.
-2. Run `MacOSAppearanceAdapter.discover()` and confirm it reports the System
-   Appearance Target Instance and the Automation disclosure without presenting
-   a prompt or contacting System Events.
-3. Start connection. Confirm the disclosure is visible immediately before this
-   step and that the first appearance read presents the macOS Automation prompt.
-4. Grant access. Confirm connection records the current Light/Dark value as the
-   Connection Baseline, changes no setting, and reports that Automation access
-   is available.
+2. Launch Oh My Theme and confirm discovery reports the System Appearance Target and shows `Automation access to System Events is required to read and change the system Light/Dark appearance.` Discovery must not present a prompt or contact System Events.
+3. Select `Review connection`. Preparing the review performs the first appearance read, so macOS should present the Automation prompt now.
+4. Grant access. Confirm the completed review says it will record the current Light/Dark value. Select `Approve and connect`, then confirm connection records that value as the Connection Baseline, changes no setting, and reports that Automation access is available.
 5. Apply a Theme Variant with the opposite `appearance`. Confirm the system
    switches to Light or Dark, the Capability Outcome is `updated`, and no accent
    color changes.
 6. Apply a Theme Variant matching the current appearance. Confirm the Capability
    Outcome is `unchanged` and no setter is sent.
-7. Reset the permission again, deny access during connection, and confirm the
-   connection Capability Outcome is `permissionRequired` with denial guidance.
+7. Reset the permission again and select `Review connection`. Deny the prompt. Confirm review preparation stops, the row remains unconnected, and the visible operation error identifies the denied permission. No Connection Report is created because no reviewed plan reached `Approve and connect`.
 8. Grant and connect, then revoke System Events access in System Settings before
    preview/apply. Confirm the appearance Capability Outcome is
    `permissionRequired` with revocation guidance. In the same Workspace, confirm
@@ -135,6 +142,22 @@ outcome and does not block unrelated target capabilities.
 12. Attempt disconnect before Undo and confirm it refuses. After Undo restores
     the Connection Baseline, confirm disconnect is a no-op and removes no other
     system setting.
+
+### Clean-permission partial Workspace report
+
+Use the exact app route below after System Appearance, Ghostty, VS Code, and Starship are connected.
+
+1. Run `/usr/bin/tccutil reset AppleEvents com.ohmytheme.OhMyTheme`.
+2. Select Aurora and choose `Preview workspace change`.
+3. Deny the macOS prompt to control System Events.
+4. Confirm the preview keeps independent Target plans and identifies the Appearance permission need.
+5. Choose `Apply to ready Targets`.
+6. Confirm the title is `Theme applied with remaining work` when at least one other Target updates.
+7. Confirm System Appearance shows `Appearance`, `Permission required`, no reach line, and `No rollback needed`.
+8. Confirm independent ready Targets keep their successful outcomes and are not rolled back because Automation was denied.
+9. Grant Automation in System Settings before later full-Workspace checks and prepare a new preview.
+
+A denial reported as `Already set`, `Failed`, or `Current windows` is a qualification failure.
 
 ### Documented limits
 

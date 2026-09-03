@@ -1,8 +1,21 @@
 import SwiftUI
 import ThemeEngine
+import ThemeModel
 
 struct WorkspaceMenuView: View {
+    private struct PendingRestoreAndDisconnectAction: Identifiable {
+        let targetInstanceID: TargetInstanceID
+        let targetName: String
+
+        var id: TargetInstanceID { targetInstanceID }
+        var title: String { "Restore and disconnect \(targetName)?" }
+        var message: String {
+            "Restore the captured Connection Baseline, remove managed setup that still matches, and stop managing this Target. External changes are never overwritten."
+        }
+    }
+
     @ObservedObject var model: WorkspaceMenuModel
+    @State private var pendingConnectionAction: PendingRestoreAndDisconnectAction?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,6 +23,9 @@ struct WorkspaceMenuView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     header
                     targetSection
+                    if !model.workspace.connectedTargetInstances.isEmpty {
+                        connectionManagementSection
+                    }
                     themeSection
                     startupSection
 
@@ -43,6 +59,24 @@ struct WorkspaceMenuView: View {
             footer
         }
         .frame(width: 380, height: 640)
+        .confirmationDialog(
+            pendingConnectionAction?.title ?? "Manage Target",
+            isPresented: Binding(
+                get: { pendingConnectionAction != nil },
+                set: { isPresented in
+                    if !isPresented { pendingConnectionAction = nil }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingConnectionAction
+        ) { action in
+            Button("Restore and Disconnect", role: .destructive) {
+                perform(action)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { action in
+            Text(action.message)
+        }
 
     }
 
@@ -94,6 +128,56 @@ struct WorkspaceMenuView: View {
                 .padding(.horizontal, 12)
                 .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
             }
+        }
+    }
+
+    private var connectionManagementSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeading(
+                "Connection recovery",
+                detail: "Restore captured state and stop managing a connected Target."
+            )
+
+            VStack(spacing: 0) {
+                ForEach(Array(model.workspace.connectedTargetInstances.enumerated()), id: \.element.id) {
+                    index, instance in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(instance.displayName)
+                                .font(.callout.weight(.medium))
+                            Text("Connection Baseline available")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 8)
+
+                        Button("Disconnect…") {
+                            pendingConnectionAction = PendingRestoreAndDisconnectAction(
+                                targetInstanceID: instance.id,
+                                targetName: instance.displayName
+                            )
+                        }
+                        .fixedSize()
+                        .disabled(model.isBusy)
+                        .accessibilityIdentifier("restore-and-disconnect-\(instance.id.rawValue)")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+
+                    if index < model.workspace.connectedTargetInstances.count - 1 {
+                        Divider().padding(.leading, 12)
+                    }
+                }
+            }
+            .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private func perform(_ action: PendingRestoreAndDisconnectAction) {
+        pendingConnectionAction = nil
+        model.perform {
+            try await model.restoreAndDisconnect(action.targetInstanceID)
         }
     }
 

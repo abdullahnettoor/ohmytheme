@@ -26,9 +26,7 @@ matters an extension-host test cannot cover from CI.
 
 ## Manual proof cases
 
-Run these on a macOS 14+ machine with a stable installation of
-Microsoft VS Code (Stable channel) and the companion extension
-installed as a `.vsix` under the intended profile.
+Run these on a macOS 14+ machine with standard Microsoft VS Code Stable and Insiders installations at version 1.90 or later in the 1.x line. The app installs the pinned companion in the selected edition's Default profile after approval.
 
 ### 1. Cold-launch registration
 
@@ -101,12 +99,40 @@ installed as a `.vsix` under the intended profile.
    `stat -f "%p %u" ~/Library/Application Support/OhMyTheme/companion/*/companion.sock`.
 2. Confirm the mode ends in `0600` and the owner matches the current
    user's UID. Repeat for the rendezvous file.
+3. Record only the mode and owner-match result. Do not put socket paths, nonces, profile IDs, process IDs, or window IDs in the committed verification record.
+
+### 9. Edition, profile, and concurrent-window matrix
+
+Use a fresh account or a completed in-app Restore and Disconnect between the Stable-selected and Insiders-selected runs.
+
+1. Install Stable and Insiders. Keep two Default-profile windows open in each edition.
+2. Create one named test profile in each edition and open one window for it. Do not record its opaque profile identifier.
+3. In Oh My Theme, choose one edition's `Default profile` during `Review connection`, then select `Approve and connect`.
+4. Apply Aurora. Confirm both Default-profile windows in the selected edition change without reload.
+5. Confirm the selected edition's named-profile window and every window in the unselected edition remain unchanged.
+6. Confirm the report names the selected edition and Default profile, then shows `Theme`, `Updated`, `Current windows`, and `Undo available`.
+7. Add a workspace-level `workbench.colorTheme` override in one selected Default-profile window and apply Catppuccin Mocha.
+8. Confirm the profile setting is stored, the override stays active, and the report does not claim `Current windows`. Its detail must say the current workspace setting overrides the stored profile theme.
+9. Remove the workspace override, apply again, and confirm both selected Default-profile windows now show Catppuccin.
+10. Select `Undo Last Theme Change`. Confirm only the selected Default profile returns to its preceding profile setting.
+11. Repeat with the other edition selected.
+
+Record the four scopes for each run:
+
+| Scope | Expected result |
+| --- | --- |
+| Selected edition, Default profile, first window | Changes and acknowledges the request |
+| Selected edition, Default profile, second concurrent window | Changes because the global profile setting is shared |
+| Selected edition, named profile | Unchanged |
+| Unselected edition, any profile | Unchanged |
+
+A change outside the selected edition's Default profile is a hard failure. The production UI does not support choosing a named profile or targeting only one window.
 
 ## Scope limits
 
 - Only `workbench.colorTheme` is exchanged in this proof.
-- Only `ConfigurationTarget.Global` is a supported apply target.
-- Overrides at workspace, workspace-folder, and remote scope are
-  reported but not modified.
-- Insiders, remote windows, and custom `--user-data-dir` sessions are
-  each their own extension instance and produce their own receipts.
+- Only `ConfigurationTarget.Global` in the selected Default profile is a supported apply target.
+- Overrides at workspace, workspace-folder, and remote scope are reported but not modified.
+- Standard Microsoft VS Code Stable and Insiders are supported at version 1.90 or later in the 1.x line. Qualify each edition separately.
+- Named profiles, remote extension hosts, custom `--user-data-dir` sessions, and single-window selection are outside the production UI support boundary.
+- The app addresses one authenticated companion registration for acknowledgement. The live matrix must prove whether the resulting global profile change reaches all concurrent windows in the selected Default profile.

@@ -196,14 +196,15 @@ public struct CompanionServerSession {
         target: CompanionApplyTarget = .global
     ) -> [CompanionServerEffect] {
         guard let protocolVersion = negotiatedProtocolVersion else { return [] }
-        return (try? sendApplyTheme(
-            VSCodeCompanionThemeRequest(
-                protocolVersion: protocolVersion,
-                themeName: themeName,
-                expectedSetting: nil,
-                target: target
-            )
-        )) ?? []
+        return
+            (try? sendApplyTheme(
+                VSCodeCompanionThemeRequest(
+                    protocolVersion: protocolVersion,
+                    themeName: themeName,
+                    expectedSetting: nil,
+                    target: target
+                )
+            )) ?? []
     }
 
     /// Stop tracking a request whose socket-level waiter timed out.

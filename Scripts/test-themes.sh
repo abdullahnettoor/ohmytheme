@@ -12,8 +12,8 @@ trap 'rm -f "$temporary_catalog"' EXIT
 
 (
   cd "$PACKAGE_PATH"
-  swift run ThemeTool validate "$REPO_ROOT"/Themes/Packs/*.json
-  swift run ThemeTool catalog "$REPO_ROOT/Themes/Packs" "$temporary_catalog"
+  swift run --disable-automatic-resolution ThemeTool validate "$REPO_ROOT"/Themes/Packs/*.json
+  swift run --disable-automatic-resolution ThemeTool catalog "$REPO_ROOT/Themes/Packs" "$temporary_catalog"
 )
 
 diff -u "$catalog_path" "$temporary_catalog"

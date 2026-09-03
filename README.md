@@ -7,7 +7,8 @@ The product contract, boundaries, and safety rules live in [`docs/architecture/m
 ## Requirements
 
 - macOS 14 Sonoma or later
-- Xcode 26 or later (Swift 6 language mode)
+- Xcode 26.1 build 17B55 (Swift 6.2.1; CI bundle `Xcode_26.1.1.app`)
+- Node.js 22.23.2 and npm 11.16.0 for the VS Code companion
 
 ## Layout
 
@@ -30,7 +31,9 @@ Scripts/                 Stable local and CI entry points
 ./Scripts/test-themes.sh    # Validate bundled Theme Packs and catalog output
 ./Scripts/test-app.sh       # App-hosted smoke tests only
 ./Scripts/build-app.sh      # Build the locally signed app
-./Scripts/prove-ghostty.sh  # Run the disposable Ghostty configuration proof
+./Scripts/prove-ghostty.sh             # Run the disposable Ghostty configuration proof
+./Scripts/prove-vscode-companion.sh    # Run companion unit tests; set OMT_REQUIRE_VSCODE_HOST_TESTS=1 for the pinned host
+./Scripts/check-vscode-generated.sh    # Rebuild and compare the checked-in VSIX and checksum
 ```
 
 Scripts report missing tools; they never install software.

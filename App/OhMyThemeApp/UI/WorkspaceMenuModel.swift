@@ -10,6 +10,7 @@ final class WorkspaceMenuModel: ObservableObject {
         case apply
         case undo
         case connection
+        case disconnect
     }
 
     struct ApplicationTarget: Equatable, Identifiable {
@@ -320,6 +321,15 @@ final class WorkspaceMenuModel: ObservableObject {
         return try await apply(previewID: preview.id)
     }
 
+    func restoreAndDisconnect(_ targetInstanceID: TargetInstanceID) async throws {
+        guard let runtime else { throw ThemeEngineError.engineUnavailable }
+        let result = try await runtime.restoreAndDisconnect(targetInstanceID: targetInstanceID)
+        report = present(outcomes: result.report.outcomes, kind: .disconnect)
+        replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+        await refreshUndoAvailability()
+        operationError = nil
+    }
+
     @discardableResult
     func undoLastThemeChange() async throws -> UndoReport {
         guard let themeEngine else {
@@ -401,6 +411,9 @@ final class WorkspaceMenuModel: ObservableObject {
         case (.connection, true, false): title = "Connection updated"
         case (.connection, true, true): title = "Connection updated with remaining work"
         case (.connection, false, _): title = "Connection not updated"
+        case (.disconnect, true, false): title = "Target restored and disconnected"
+        case (.disconnect, true, true): title = "Target disconnected with remaining work"
+        case (.disconnect, false, _): title = "Target not disconnected"
         }
         return PresentedReport(kind: kind, title: title, groups: groups)
     }
@@ -460,6 +473,7 @@ final class WorkspaceMenuModel: ObservableObject {
         case "appearance": "Appearance"
         case "wallpaper": "Wallpaper"
         case "connection": "Connection"
+        case "disconnect": "Disconnect"
         default: capabilityID
         }
     }
@@ -554,6 +568,9 @@ protocol WorkspaceRuntime: AnyObject {
     func connect(
         optionID: TargetInstanceID,
         reviewedPlan: ConnectionPlan
+    ) async throws -> WorkspaceConnectionResult
+    func restoreAndDisconnect(
+        targetInstanceID: TargetInstanceID
     ) async throws -> WorkspaceConnectionResult
 }
 

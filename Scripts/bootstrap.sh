@@ -22,8 +22,19 @@ if [[ "$xcode_major_version" -lt "$REQUIRED_XCODE_MAJOR_VERSION" ]]; then
   fail "Xcode $REQUIRED_XCODE_MAJOR_VERSION or later is required for Swift 6 language mode. Found $xcode_version."
 fi
 
+if [[ "${OMT_REQUIRE_PINNED_TOOLCHAIN:-0}" == "1" ]]; then
+  [[ "$xcode_version" == "$PINNED_XCODE_VERSION" ]] ||
+    fail "CI requires Xcode $PINNED_XCODE_VERSION. Found $xcode_version."
+  [[ "$xcode_version_output" == *"Build version $PINNED_XCODE_BUILD"* ]] ||
+    fail "CI requires Xcode build $PINNED_XCODE_BUILD."
+fi
+
 if ! swift_version_output="$(swift --version 2>&1)"; then
   fail "swift needs a full Xcode installation. $xcode_hint"
+fi
+if [[ "${OMT_REQUIRE_PINNED_TOOLCHAIN:-0}" == "1" ]]; then
+  [[ "$swift_version_output" == *"Apple Swift version $PINNED_SWIFT_VERSION"* ]] ||
+    fail "CI requires Apple Swift $PINNED_SWIFT_VERSION."
 fi
 
 echo "Xcode:  $xcode_version ($(xcode-select --print-path))"

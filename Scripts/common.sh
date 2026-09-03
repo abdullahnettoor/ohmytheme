@@ -10,8 +10,11 @@ XCODE_SCHEME="OhMyTheme"
 XCODE_DESTINATION="${XCODE_DESTINATION:-platform=macOS}"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$REPO_ROOT/.build/DerivedData}"
 
-# The Xcode major version the project is developed and validated against.
+# Local development accepts this major version or later. CI also requires the exact pins.
 REQUIRED_XCODE_MAJOR_VERSION=26
+PINNED_XCODE_VERSION=26.1
+PINNED_XCODE_BUILD=17B55
+PINNED_SWIFT_VERSION=6.2.1
 
 fail() {
   echo "error: $*" >&2

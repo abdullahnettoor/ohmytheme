@@ -425,10 +425,12 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
         }
         let themeArtifact: VSCodeThemeArtifact
         if let upstreamArtifact = theme.upstreamArtifact {
-            guard let pinned = try? JSONDecoder().decode(
-                VSCodeThemeArtifact.self,
-                from: upstreamArtifact
-            ), !pinned.themeName.isEmpty else {
+            guard
+                let pinned = try? JSONDecoder().decode(
+                    VSCodeThemeArtifact.self,
+                    from: upstreamArtifact
+                ), !pinned.themeName.isEmpty
+            else {
                 throw VSCodeThemeAdapterError.malformedThemeArtifact
             }
             themeArtifact = pinned
@@ -634,7 +636,8 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
             expectedSetting: payload.request.themeName,
             target: payload.request.target
         )
-        let active = before.configuredSetting == nil
+        let active =
+            before.configuredSetting == nil
             ? current.overrides.isEmpty
             : current.effectiveSetting == before.configuredSetting
         return AdapterReceipt(

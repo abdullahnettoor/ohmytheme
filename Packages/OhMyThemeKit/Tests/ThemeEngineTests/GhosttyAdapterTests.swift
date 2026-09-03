@@ -591,6 +591,50 @@ struct GhosttyAdapterTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.managedURL.path))
     }
 
+    @Test("Restore and Disconnect restores the baseline and removes the durable connection")
+    func engineDisconnect() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        try store.saveWorkspace(.myMac)
+        let engine = ThemeEngine(packs: [], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
+
+        let report = try await engine.disconnect(instance: fixture.instance, workspace: .myMac)
+
+        #expect(report.outcomes[0].configurationState == .updated)
+        #expect(try store.loadWorkspace().workspace.connectedTargetInstances.isEmpty)
+        #expect(try store.journalLoadConnectionBaseline(targetInstanceID: fixture.instance.id) == nil)
+        #expect(try String(contentsOf: fixture.parentURL, encoding: .utf8) == "background = #101010\n")
+        #expect(!FileManager.default.fileExists(atPath: fixture.managedURL.path))
+    }
+
+    @Test("Restore and Disconnect reports a conflict and keeps the Target connected after an external edit")
+    func disconnectConflictReport() async throws {
+        let fixture = try Fixture(parentContents: "background = #101010\n")
+        let adapter = fixture.adapter()
+        let store = try PersistenceStore(
+            databaseURL: fixture.directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: fixture.directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        try store.saveWorkspace(.myMac)
+        let engine = ThemeEngine(packs: [], adapters: [adapter], persistence: store)
+        _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
+        let external = "background = #303030\nconfig-file = ?oh-my-theme/config.ghostty\n"
+        try Data(external.utf8).write(to: fixture.parentURL)
+
+        let report = try await engine.disconnect(instance: fixture.instance, workspace: .myMac)
+
+        #expect(report.outcomes[0].configurationState == .conflicted)
+        #expect(report.outcomes[0].rollbackState == .blocked)
+        #expect(try store.loadWorkspace().workspace.connectedTargetInstances == [fixture.instance])
+        #expect(try store.journalLoadConnectionBaseline(targetInstanceID: fixture.instance.id) != nil)
+        #expect(try String(contentsOf: fixture.parentURL, encoding: .utf8) == external)
+    }
+
     @Test("Restore reports a conflict instead of overwriting an external edit")
     func restoreConflict() async throws {
         let fixture = try Fixture(parentContents: "background = #101010\n")

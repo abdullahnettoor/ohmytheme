@@ -632,12 +632,12 @@ struct DurableOperationsTests {
         #expect(!asText.contains("SECRET-BASELINE-BYTES"))
     }
 
-    // MARK: AC #8 — Interruption at every journal transition
+    // MARK: Adapter failures at named mutation points
 
     @Test(
-        "Interruption at every journal transition leaves durable state consistent",
+        "Injected adapter failures leave no operation requiring reconciliation",
         arguments: InterruptionPoint.allCases)
-    func interruptionAtEveryTransition(point: InterruptionPoint) async throws {
+    func adapterFailureAtEachMutationPoint(point: InterruptionPoint) async throws {
         let fixture = try Self.makeFixture()
         let adapter = RecordingWritableAdapter()
         await adapter.setInterruption(point, enabled: true)
@@ -670,8 +670,8 @@ struct DurableOperationsTests {
             _ = try await engine.applyDurable(previewID: preview.id, workspace: workspaceForApply)
         }
 
-        // Regardless of where interruption occurred, the journal must contain the operation and
-        // reconciliation must complete without throwing.
+        // The engine catches these injected adapter errors and reaches a terminal state.
+        // The subprocess crash harness separately tests process death after durable commits.
         let interrupted = try fixture.store.journalInterruptedOperations()
         try await engine.reconcileInterruptedOperations()
         let stillInterrupted = try fixture.store.journalInterruptedOperations()

@@ -13,7 +13,7 @@ let package = Package(
         .executable(name: "ThemeTool", targets: ["ThemeTool"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0")
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1")
     ],
     targets: [
         .target(
@@ -52,6 +52,11 @@ let package = Package(
             dependencies: ["ThemeCompiler"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .executableTarget(
+            name: "DurabilityCrashHarness",
+            dependencies: ["ThemeEngine", "ThemeModel", "Persistence"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "ThemeModelTests",
             dependencies: ["ThemeModel"],
@@ -69,7 +74,14 @@ let package = Package(
         ),
         .testTarget(
             name: "ThemeEngineTests",
-            dependencies: ["ThemeEngine", "ThemeModel", "PlatformClients", "Persistence", "Adapters"],
+            dependencies: [
+                "ThemeEngine",
+                "ThemeModel",
+                "PlatformClients",
+                "Persistence",
+                "Adapters",
+                "DurabilityCrashHarness",
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

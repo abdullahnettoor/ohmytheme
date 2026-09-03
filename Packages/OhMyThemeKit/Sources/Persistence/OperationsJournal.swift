@@ -152,6 +152,7 @@ extension PersistenceStore {
                 ]
             )
         }
+        didCommit(.operationStarted)
         return operation
     }
 
@@ -182,6 +183,7 @@ extension PersistenceStore {
                 ]
             )
         }
+        didCommit(.operationRecordSaved)
     }
 
     public func journalTransitionState(operationID: UUID, to state: OperationState) throws {
@@ -191,6 +193,7 @@ extension PersistenceStore {
                 arguments: [state.rawValue, operationID.uuidString]
             )
         }
+        didCommit(.operationStateTransitioned)
     }
 
     public func journalLoadOperation(id: UUID) throws -> JournaledOperation? {
@@ -311,6 +314,7 @@ extension PersistenceStore {
                 ]
             )
         }
+        didCommit(.connectionBaselineSaved)
         return StoredConnectionBaseline(
             targetInstanceID: targetInstanceID,
             adapterID: adapterID,
@@ -357,6 +361,7 @@ extension PersistenceStore {
                 arguments: [targetInstanceID.rawValue]
             )
         }
+        didCommit(.connectionBaselineDeleted)
     }
 
     // Testing / internal use: for content-store-backed plan payloads.

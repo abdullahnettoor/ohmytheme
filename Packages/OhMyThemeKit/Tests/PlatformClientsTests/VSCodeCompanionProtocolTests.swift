@@ -422,7 +422,8 @@ struct VSCodeCompanionProtocolTests {
             #"{"protocolVersion":1,"type":"inspect_theme_ack","id":"11111111-2222-3333-4444-555555555555"}"#.utf8
         )
         let failedWithoutFailure = Data(
-            #"{"protocolVersion":1,"type":"apply_theme_ack","id":"11111111-2222-3333-4444-555555555555","status":"failed","requestedSetting":null,"overrides":[]}"#.utf8
+            #"{"protocolVersion":1,"type":"apply_theme_ack","id":"11111111-2222-3333-4444-555555555555","status":"failed","requestedSetting":null,"overrides":[]}"#
+                .utf8
         )
 
         #expect(throws: CompanionProtocolError.self) {

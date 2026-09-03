@@ -9,7 +9,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private enum Constants {
         static let companionExtensionID = "ohmytheme.oh-my-theme-companion"
         static let companionVersion = "0.1.0"
-        static let companionSHA256 = "8e444eff4be3d6b7f9cc16fde6fe573dffa7c5a62088e1b4cf9f594627e34427"
+        static let companionSHA256 = "93633ba57e6a7002f93a7f528178b4be9ec9ab089dd7bbd9fef8bfe60506f496"
         static let vscodeProfileName = "Default"
     }
 
@@ -176,6 +176,24 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         if connected {
             discovery = await discoverTargets()
         }
+        return WorkspaceConnectionResult(
+            snapshot: makeSnapshot(discovery: discovery),
+            report: report
+        )
+    }
+
+    func restoreAndDisconnect(
+        targetInstanceID: TargetInstanceID
+    ) async throws -> WorkspaceConnectionResult {
+        guard let themeEngine else {
+            throw ProductionWorkspaceRuntimeError.engineUnavailable(
+                fatalStartupFailure ?? "ThemeEngine is unavailable.")
+        }
+        guard let instance = workspace.connectedTargetInstances.first(where: { $0.id == targetInstanceID }) else {
+            throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
+        }
+        let report = try await themeEngine.disconnect(instance: instance, workspace: workspace)
+        let discovery = await discoverTargets()
         return WorkspaceConnectionResult(
             snapshot: makeSnapshot(discovery: discovery),
             report: report

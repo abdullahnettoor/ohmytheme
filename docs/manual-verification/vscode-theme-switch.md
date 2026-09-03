@@ -4,11 +4,12 @@ Use this checklist to verify issue #20 against a real connected VS Code Target I
 
 ## Apply and acknowledgement
 
-1. Start Oh My Theme and VS Code with the intended profile or window connected.
+1. Start Oh My Theme and VS Code with the selected edition's Default profile connected. Keep two windows in that profile open, plus one named-profile window and one window in the unselected edition.
 2. Prepare Catppuccin Mocha. Confirm the preview names the upstream source revision and the intended `workbench.colorTheme` value.
 3. Apply the preview.
-4. Confirm VS Code changes without a reload and its profile setting now contains the requested theme name.
-5. Confirm the Apply Report identifies the intended Target Instance, reports the configuration as updated, and reports current-instance reach.
+4. Confirm both concurrent windows in the selected Default profile change without a reload and its profile setting now contains the requested theme name.
+5. Confirm the named-profile window and the unselected edition remain unchanged.
+6. Confirm the Apply Report identifies the selected edition and Default profile, then reports `Theme`, `Updated`, `Current windows`, and `Undo available`.
 
 The pinned companion includes the generated `Oh My Theme Aurora` color theme. Upstream themes such as `Catppuccin Mocha` must otherwise be installed in VS Code. If the requested theme is missing, the result must say that the theme is unavailable rather than claiming a successful switch.
 

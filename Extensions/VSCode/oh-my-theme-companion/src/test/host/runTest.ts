@@ -25,6 +25,7 @@ async function main(): Promise<void> {
     const userDataDir = path.join(testRoot, "ud");
 
     await runTests({
+      version: "1.136.0",
       extensionDevelopmentPath,
       extensionTestsPath,
       launchArgs: ["--disable-extensions", `--user-data-dir=${userDataDir}`],

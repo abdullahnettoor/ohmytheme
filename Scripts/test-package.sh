@@ -6,4 +6,4 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 require_tool swift "Install Xcode and run 'sudo xcode-select --switch /Applications/Xcode.app'."
 
-swift test --package-path "$PACKAGE_PATH" "$@"
+swift test --disable-automatic-resolution --package-path "$PACKAGE_PATH" "$@"

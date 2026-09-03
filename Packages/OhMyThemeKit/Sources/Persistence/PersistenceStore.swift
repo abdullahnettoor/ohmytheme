@@ -2,6 +2,22 @@ import Foundation
 import GRDB
 import ThemeModel
 
+public enum DurableJournalCheckpoint: String, Codable, Equatable, Sendable {
+    case workspaceSaved
+    case targetMembershipSaved
+    case contentSaved
+    case operationStarted
+    case operationRecordSaved
+    case operationStateTransitioned
+    case connectionBaselineSaved
+    case connectionPreparationSaved
+    case connectionBaselineDeleted
+    case connectionFinalized
+    case operationAndMembershipTransitioned
+}
+
+public typealias DurableJournalCheckpointHandler = @Sendable (DurableJournalCheckpoint) -> Void
+
 public struct PersistedTargetInstance: Codable, Equatable, Sendable, Identifiable {
     public let id: TargetInstanceID
     public let displayName: String
@@ -65,8 +81,14 @@ public final class PersistenceStore: @unchecked Sendable {
     public let contentStore: ContentAddressedStore
 
     private let database: DatabaseQueue
+    private let checkpointHandler: DurableJournalCheckpointHandler?
 
-    public init(databaseURL: URL, contentStoreURL: URL) throws {
+    public init(
+        databaseURL: URL,
+        contentStoreURL: URL,
+        checkpointHandler: DurableJournalCheckpointHandler? = nil
+    ) throws {
+        self.checkpointHandler = checkpointHandler
         contentStore = try ContentAddressedStore(rootURL: contentStoreURL)
         let databaseDirectory = databaseURL.deletingLastPathComponent()
         let fileManager = FileManager.default
@@ -285,6 +307,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 }
             }
         }
+        didCommit(.workspaceSaved)
     }
 
     public func setTargetInstance(
@@ -305,6 +328,52 @@ public final class PersistenceStore: @unchecked Sendable {
                 in: database
             )
         }
+        didCommit(.targetMembershipSaved)
+    }
+
+    public func saveConnectionPreparation(
+        record: JournaledRecord,
+        baseline: Data,
+        capturedAt: Date = Date()
+    ) throws {
+        if let existing = try journalLoadConnectionBaseline(targetInstanceID: record.targetInstanceID) {
+            guard existing.adapterID == record.adapterID, existing.adapterVersion == record.adapterVersion else {
+                throw PersistenceError.invalidAssignment
+            }
+            try journalSaveRecord(record)
+            return
+        }
+
+        let reference = try contentStore.put(baseline)
+        try database.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO content_references (digest, byte_count, kind, owner_id)
+                    VALUES (?, ?, 'connection-baseline', ?)
+                    ON CONFLICT(digest) DO UPDATE SET
+                        byte_count = excluded.byte_count,
+                        kind = excluded.kind,
+                        owner_id = excluded.owner_id
+                    """,
+                arguments: [reference.digest, reference.byteCount, record.targetInstanceID.rawValue]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO connection_baselines
+                        (target_instance_id, adapter_id, adapter_version, baseline_digest, captured_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    record.targetInstanceID.rawValue,
+                    record.adapterID,
+                    record.adapterVersion,
+                    reference.digest,
+                    capturedAt.timeIntervalSince1970,
+                ]
+            )
+            try Self.save(record, in: database)
+        }
+        didCommit(.connectionPreparationSaved)
     }
 
     public func finalizeConnectionOperation(
@@ -338,6 +407,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 )
             }
         }
+        didCommit(.connectionFinalized)
     }
 
     public func transitionOperation(
@@ -356,6 +426,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 arguments: [connected, targetInstanceID.rawValue]
             )
         }
+        didCommit(.operationAndMembershipTransitioned)
     }
 
     @discardableResult
@@ -475,11 +546,16 @@ public final class PersistenceStore: @unchecked Sendable {
                 arguments: [reference.digest, reference.byteCount, kind, ownerID]
             )
         }
+        didCommit(.contentSaved)
         return reference
     }
 
     public func loadContent(_ reference: ContentReference) throws -> Data {
         try contentStore.get(reference)
+    }
+
+    func didCommit(_ checkpoint: DurableJournalCheckpoint) {
+        checkpointHandler?(checkpoint)
     }
 
     private static func upsertWorkspace(_ workspace: Workspace, in database: Database) throws {

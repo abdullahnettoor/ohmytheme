@@ -1,6 +1,6 @@
 # Ghostty configuration and reload proof
 
-This record covers [issue #4](https://github.com/abdullahnettoor/ohmytheme/issues/4). It distinguishes the disposable configuration proof from the live activation behavior that a production adapter must report.
+This record covers [issue #4](https://github.com/abdullahnettoor/ohmytheme/issues/4) and the live qualification required by [issue #23](https://github.com/abdullahnettoor/ohmytheme/issues/23). It separates the dated disposable configuration proof from the pending app-level reload check.
 
 ## Disposable proof
 
@@ -27,15 +27,32 @@ The version history and full candidate-path rules are recorded in [the Ghostty r
 
 ## Activation reach
 
-Ghostty documents `cmd+shift+,` as an explicit `reload_config` action. The current proof therefore records the production adapter's conservative result as:
+Ghostty documents `cmd+shift+,` as its `reload_config` action. Oh My Theme does not send that action. Connection, Apply, Undo, Restore, and Disconnect must report `Reload required` and tell the user to press `cmd+shift+,` in Ghostty.
 
-| Configuration | Running instances | User action |
+| Configuration | Reported reach | Required user action |
 | --- | --- | --- |
-| Updated after the user approves one parent include | Reload required | Press `cmd+shift+,` in Ghostty |
+| Managed include, fragment, or theme bytes changed | `Reload required` | Focus Ghostty and press `cmd+shift+,` |
+| Managed bytes already selected | `Reload required` | Press `cmd+shift+,` if running windows have not loaded those bytes |
 
-Ghostty's documented action is app scoped, but some settings are non-reloadable or affect only new terminals. The generated fragment must consequently contain only documented reloadable color settings before the production adapter can report a stronger result. The proof does not claim that every existing window repaints after any arbitrary configuration change.
+The reach claim covers the saved configuration only. A live pass requires the generated color settings to repaint existing windows after the documented reload. It does not claim that arbitrary Ghostty settings reload or that Oh My Theme automated the keyboard action.
 
-Ghostty 1.3.0 added a documented AppleScript action interface, but this proof does not use it. Automating a reload would require macOS Automation consent and a live application, so it belongs in the production adapter's explicit setup and verification flow.
+## Live app qualification
+
+Use a fresh local test account with a synthetic Ghostty 1.3.x configuration. Do not record its path or contents.
+
+1. Open two Ghostty windows and keep both visible.
+2. In Oh My Theme, select `Review connection` for Ghostty. Confirm the review names one managed include, one managed fragment, `Ghostty: configuration reload required`, and `Press cmd+shift+,`.
+3. Select `Approve and connect`. Confirm the connection report shows `Connection`, `Updated` or `Already set`, and `Reload required`.
+4. Press `cmd+shift+,` in one Ghostty window. Confirm both existing windows remain usable.
+5. Select `Oh My Theme Aurora`, then `Preview workspace change`, then `Apply to ready Targets`.
+6. Confirm the Ghostty report shows `Theme`, `Updated`, `Reload required`, and `Undo available`. Its detail must say `Ghostty theme updated; reload required with cmd+shift+,`.
+7. Before reloading, confirm the existing windows still show their prior colors.
+8. Focus Ghostty and press `cmd+shift+,`. Confirm both existing windows repaint to Aurora without quitting Ghostty or opening a new terminal.
+9. Apply Catppuccin Mocha. Confirm the same report fields, then press `cmd+shift+,` and confirm both windows repaint again.
+10. Select `Undo Last Theme Change`. Confirm Ghostty says `Restored` and `Reload required`. Press `cmd+shift+,` and confirm the prior colors return.
+11. Complete the Ghostty Restore and Disconnect and conflict cases in [`workspace-theme-apply.md`](workspace-theme-apply.md).
+
+If colors appear only in new terminals after `cmd+shift+,`, or the report claims `Current windows` before the user reloads, mark the live check failed and narrow or remove Ghostty support.
 
 ## Record
 
@@ -43,3 +60,4 @@ Ghostty 1.3.0 added a documented AppleScript action interface, but this proof do
 | --- | --- | --- |
 | 2026-09-02 | 1.3.0 | Source-reviewed floor. The version-tagged Ghostty source establishes the `config.ghostty` transition, include handling, validator, and AppleScript availability. |
 | 2026-09-02 | 1.3.1 stable | Pass. The disposable proof confirmed modern-name discovery, managed-fragment precedence, valid staged configuration, invalid configuration rejection, and preservation of the parent file. No user configuration or live Ghostty window was changed. |
+| Pending | Pending | Live app connection, Apply, `cmd+shift+,` reload, Undo, Restore and Disconnect, and external-edit conflict. |

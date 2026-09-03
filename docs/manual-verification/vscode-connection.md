@@ -46,7 +46,9 @@ VS Code's stable extension API does not expose a profile display name or native 
 - Prevent the expected registration from reconnecting: reconciliation must report a conflict rather than accepting another profile/window.
 - If Oh My Theme installed the pinned companion over an absent baseline, it places a private ownership record beside that installed extension. The record binds a random token to a digest of the installed extension files. Restore and Disconnect uninstall only when the extension ID, version, token, and installed content still match.
 - If the companion was already installed at the pinned version before connection, Restore and Disconnect leave it installed.
-- Replace or remove the extension outside Oh My Theme before Restore or Disconnect. Confirm the missing or changed ownership token causes a conflict and no extension is uninstalled.
+- Replace or remove the extension outside Oh My Theme before Restore and Disconnect. Confirm the missing or changed ownership token causes a conflict and no extension is uninstalled.
 - A different pre-existing companion version is not overwritten because this beta cannot restore its exact package bytes.
 
-Theme switching and Undo through the companion are intentionally deferred to issue #20. UI discovery and connection presentation are wired in issue #21.
+Continue with [`vscode-theme-switch.md`](vscode-theme-switch.md) for Apply and guarded Undo, and with [`vscode-companion-live-switch.md`](vscode-companion-live-switch.md) for Stable/Insiders, profile, concurrent-window, override, and reconnect checks.
+
+The production menu currently offers the Default profile and allows one VS Code edition to join My Mac at a time. Named profiles, custom `--user-data-dir` sessions, remote extension hosts, and single-window selection are outside this live support boundary. Qualify Stable and Insiders in separate fresh-account runs, and verify that the unselected edition and named profiles remain unchanged.

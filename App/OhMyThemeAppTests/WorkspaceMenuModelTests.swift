@@ -408,6 +408,28 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertEqual(selectedVariantID, "aurora/dark")
     }
 
+    func testRestoreAndDisconnectPresentsTheOutcomeAndRemovesTheTarget() async throws {
+        let runtime = RecordingWorkspaceRuntime()
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.disconnect"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        runtime.workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [instance]
+        )
+        let model = WorkspaceMenuModel(runtime: runtime)
+
+        try await model.restoreAndDisconnect(instance.id)
+
+        XCTAssertEqual(runtime.disconnectCalls, 1)
+        XCTAssertEqual(model.report?.kind, .disconnect)
+        XCTAssertEqual(model.report?.title, "Target restored and disconnected")
+        XCTAssertTrue(model.workspace.connectedTargetInstances.isEmpty)
+    }
+
     func testLaunchAtLoginIsDisabledUntilTheUserOptsIn() {
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
         let model = WorkspaceMenuModel(
@@ -566,6 +588,7 @@ private enum RecordingLaunchAtLoginError: LocalizedError {
 private final class RecordingWorkspaceRuntime: WorkspaceRuntime {
     private(set) var reviewCalls = 0
     private(set) var connectCalls = 0
+    private(set) var disconnectCalls = 0
     var workspace = Workspace.myMac
     let themePacks: [ThemePack] = []
     let themeEngine: ThemeEngine? = nil
@@ -607,21 +630,55 @@ private final class RecordingWorkspaceRuntime: WorkspaceRuntime {
         )
         return WorkspaceConnectionResult(
             snapshot: WorkspaceTargetSnapshot(workspace: workspace, targets: []),
-            report: ConnectionReport(
-                operationID: UUID(),
-                outcomes: [
-                    TargetCapabilityOutcome(
-                        targetInstanceID: optionID,
-                        adapterID: "recording",
-                        capabilityID: "connection",
-                        sourceType: .unavailable,
-                        sourceRevision: "n/a",
-                        configurationState: .unchanged,
-                        runningInstanceReach: .currentInstances,
-                        detail: "Connected."
-                    )
-                ]
+            report: connectionReport(
+                targetInstanceID: optionID,
+                capabilityID: "connection",
+                detail: "Connected."
             )
+        )
+    }
+
+    func restoreAndDisconnect(
+        targetInstanceID: TargetInstanceID
+    ) async throws -> WorkspaceConnectionResult {
+        disconnectCalls += 1
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: workspace.connectedTargetInstances.filter {
+                $0.id != targetInstanceID
+            },
+            themeAssignment: workspace.themeAssignment
+        )
+        return WorkspaceConnectionResult(
+            snapshot: WorkspaceTargetSnapshot(workspace: workspace, targets: []),
+            report: connectionReport(
+                targetInstanceID: targetInstanceID,
+                capabilityID: "disconnect",
+                detail: "Restored and disconnected."
+            )
+        )
+    }
+
+    private func connectionReport(
+        targetInstanceID: TargetInstanceID,
+        capabilityID: String,
+        detail: String
+    ) -> ConnectionReport {
+        ConnectionReport(
+            operationID: UUID(),
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: targetInstanceID,
+                    adapterID: "recording",
+                    capabilityID: capabilityID,
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: detail
+                )
+            ]
         )
     }
 }

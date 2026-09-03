@@ -196,14 +196,8 @@ extension ThemeEngine {
             planPayload,
             ownerID: "connect.\(operation.id.uuidString).\(instance.id.rawValue)"
         )
-        _ = try persistence.journalSaveConnectionBaseline(
-            targetInstanceID: instance.id,
-            adapterID: adapter.id,
-            adapterVersion: adapter.version,
-            baseline: plan.capturedPreChangeState
-        )
-        try persistence.journalSaveRecord(
-            JournaledRecord(
+        try persistence.saveConnectionPreparation(
+            record: JournaledRecord(
                 operationID: operation.id,
                 targetInstanceID: instance.id,
                 ordinal: 0,
@@ -216,7 +210,8 @@ extension ThemeEngine {
                 planDigest: planReference.digest,
                 receiptJSON: nil,
                 detail: nil
-            )
+            ),
+            baseline: plan.capturedPreChangeState
         )
         try persistence.setTargetInstance(instance, connected: false, workspace: workspace)
 
@@ -875,11 +870,53 @@ extension ThemeEngine {
         defer { try? closeOperationTracking(operation.id) }
 
         let baselineData = try persistence.loadContent(baseline.baselineReference)
-        let plan = try await adapter.prepareDisconnect(
-            instance: instance,
-            baseline: baseline,
-            baselineData: baselineData
-        )
+        let plan: DisconnectPlan
+        do {
+            plan = try await adapter.prepareDisconnect(
+                instance: instance,
+                baseline: baseline,
+                baselineData: baselineData
+            )
+        } catch {
+            let failure = Self.capabilityOutcome(for: error, fallbackState: .conflicted)
+            try persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operation.id,
+                    targetInstanceID: instance.id,
+                    ordinal: 0,
+                    adapterID: adapter.id,
+                    adapterVersion: adapter.version,
+                    capabilityID: "disconnect",
+                    phase: failure.configurationState == .conflicted ? .conflicted : .failed,
+                    intendedChangeDigest: "disconnect.\(baseline.baselineReference.digest)",
+                    staleStateToken: nil,
+                    planDigest: nil,
+                    receiptJSON: nil,
+                    detail: failure.detail
+                )
+            )
+            try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+            return ConnectionReport(
+                operationID: operation.id,
+                outcomes: [
+                    TargetCapabilityOutcome(
+                        targetInstanceID: instance.id,
+                        adapterID: adapter.id,
+                        capabilityID: "disconnect",
+                        sourceType: .unavailable,
+                        sourceRevision: "n/a",
+                        configurationState: failure.configurationState,
+                        runningInstanceReach: failure.activationReach,
+                        detail: failure.detail,
+                        rollbackState: failure.configurationState == .conflicted ? .blocked : .notNeeded,
+                        userActions: Self.connectionOperationFailureActions(
+                            configurationState: failure.configurationState,
+                            recoveryRequired: false
+                        )
+                    )
+                ]
+            )
+        }
         let planPayload = try JSONEncoder().encode(plan)
         let planReference = try persistence.journalStorePlanPayload(
             planPayload,
@@ -960,6 +997,9 @@ extension ThemeEngine {
                 ]
             )
         } catch {
+            let recoveryRequired = error is any MutationRecoveryRequiredError
+            let fallbackState: ConfigurationState = error is WriteBoundaryConflict ? .conflicted : .failed
+            let failure = Self.capabilityOutcome(for: error, fallbackState: fallbackState)
             try persistence.journalSaveRecord(
                 JournaledRecord(
                     operationID: operation.id,
@@ -968,15 +1008,18 @@ extension ThemeEngine {
                     adapterID: adapter.id,
                     adapterVersion: adapter.version,
                     capabilityID: "disconnect",
-                    phase: .failed,
+                    phase: recoveryRequired
+                        ? .applying : failure.configurationState == .conflicted ? .conflicted : .failed,
                     intendedChangeDigest: "disconnect.\(baseline.baselineReference.digest)",
                     staleStateToken: plan.staleStateToken,
                     planDigest: planReference.digest,
                     receiptJSON: nil,
-                    detail: String(describing: error)
+                    detail: failure.detail
                 )
             )
-            try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+            if !recoveryRequired {
+                try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+            }
             return ConnectionReport(
                 operationID: operation.id,
                 outcomes: [
@@ -986,14 +1029,16 @@ extension ThemeEngine {
                         capabilityID: "disconnect",
                         sourceType: .unavailable,
                         sourceRevision: "n/a",
-                        configurationState: .failed,
-                        runningInstanceReach: .unavailable,
-                        detail: String(describing: error),
-                        rollbackState: error is any MutationRecoveryRequiredError
-                            ? .recoveryRequired : .blocked,
-                        userActions: error is any MutationRecoveryRequiredError
-                            ? [Self.recoveryRequiredAction]
-                            : [Self.reviewExternalChangeAction]
+                        configurationState: failure.configurationState,
+                        runningInstanceReach: failure.activationReach,
+                        detail: failure.detail,
+                        rollbackState: recoveryRequired
+                            ? .recoveryRequired
+                            : failure.configurationState == .conflicted ? .blocked : .notNeeded,
+                        userActions: Self.connectionOperationFailureActions(
+                            configurationState: failure.configurationState,
+                            recoveryRequired: recoveryRequired
+                        )
                     )
                 ]
             )
@@ -1708,6 +1753,30 @@ extension ThemeEngine {
             ]
         case .updated, .unchanged:
             return activationActions(for: runningInstanceReach, adapterID: plan.adapterID)
+        }
+    }
+
+    private static func connectionOperationFailureActions(
+        configurationState: ConfigurationState,
+        recoveryRequired: Bool
+    ) -> [UserAction] {
+        if recoveryRequired {
+            return [recoveryRequiredAction]
+        }
+        switch configurationState {
+        case .permissionRequired:
+            return permissionActions(setupNeeds: [], requiredPermissions: [])
+        case .conflicted:
+            return [reviewExternalChangeAction]
+        case .failed, .unavailable:
+            return [
+                UserAction(
+                    title: "Review failure",
+                    detail: "Review the failure details before trying again."
+                )
+            ]
+        case .updated, .unchanged:
+            return []
         }
     }
 
