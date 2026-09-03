@@ -196,7 +196,14 @@ struct StarshipAdapterTests {
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(Data("label = \"\\u\"\n".utf8))
         }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("date = 2026-99-99\n".utf8))
+        }
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(Data("settings = { color = \"blue\", }\n".utf8))
+        }
 
+        try StarshipPaletteTransformer.validate(Data("\"\" = \"empty quoted key\"\n".utf8))
         let multiline = Data("description = \"\"\"first line\nsecond line\"\"\"\n".utf8)
         try StarshipPaletteTransformer.validate(multiline)
         let arraysOfTables = Data(
@@ -235,6 +242,17 @@ struct StarshipAdapterTests {
         let escapedDuplicateKey = Data("\"pal\\u0065tte\" = \"a\"\npalette = \"b\"\n".utf8)
         #expect(throws: StarshipAdapterError.self) {
             try StarshipPaletteTransformer.validate(escapedDuplicateKey)
+        }
+
+        let dottedOwnedPalette = Data("palettes.oh_my_theme.canvas = \"#000000\"\n".utf8)
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(dottedOwnedPalette)
+        }
+        let inlineOwnedPalette = Data(
+            "[palettes]\n\"oh_my_theme\" = { canvas = \"#000000\" }\n".utf8
+        )
+        #expect(throws: StarshipAdapterError.self) {
+            try StarshipPaletteTransformer.validate(inlineOwnedPalette)
         }
     }
 

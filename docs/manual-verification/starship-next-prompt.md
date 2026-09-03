@@ -27,8 +27,8 @@ Use this check when changing the Starship adapter or its activation-reach report
 
 ## Record
 
-- Date:
-- macOS version:
-- Starship version:
-- Result: Pass / Fail
-- Notes:
+- Date: 2026-09-03
+- macOS version: 26.5.2
+- Starship version: 1.24.0 (Homebrew)
+- Result: Pass
+- Notes: Two `starship prompt` invocations ran in the same shell with one palette edit between them. The first emitted red `38;2;255;0;0` bytes; the second emitted blue `38;2;0;0;255` bytes. The already-emitted first prompt bytes did not change.

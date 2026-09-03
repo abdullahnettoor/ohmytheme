@@ -210,6 +210,15 @@ private struct StarshipTOMLDocument {
             }
 
             let assignment = try parseAssignment(startingAt: lineIndex, tablePath: tablePath)
+            let fullPath = tablePath + assignment.keyPath
+            let managedPalettePath = ["palettes", StarshipPaletteTransformer.ownedPaletteName]
+            if tablePath != managedPalettePath,
+                Array(fullPath.prefix(managedPalettePath.count)) == managedPalettePath
+            {
+                throw StarshipAdapterError.ambiguousConfiguration(
+                    "the managed palette must use one standard TOML table"
+                )
+            }
             let identity = AssignmentIdentity(
                 tablePath: tablePath,
                 arrayOccurrence: arrayOccurrence,
@@ -404,7 +413,7 @@ private struct StarshipTOMLDocument {
                         index = source.index(after: index)
                     }
                 }
-                guard closed, !value.isEmpty else {
+                guard closed else {
                     throw StarshipAdapterError.malformedConfiguration("invalid TOML key at line \(line + 1)")
                 }
                 component = value
@@ -634,6 +643,7 @@ private struct StarshipTOMLDocument {
         var index = source.index(after: source.startIndex)
         var inComment = false
         var bareToken = ""
+        var lastSignificantTokenWasComma = false
 
         func validateBareToken() throws {
             let token = bareToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -663,19 +673,37 @@ private struct StarshipTOMLDocument {
                 index = source.index(after: index)
                 continue
             }
+            if character == "\n", stack.contains("{") {
+                throw StarshipAdapterError.malformedConfiguration(
+                    "inline TOML tables must stay on one line"
+                )
+            }
             if character == "#" {
+                guard !stack.contains("{") else {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "inline TOML tables cannot contain comments"
+                    )
+                }
                 try validateBareToken()
                 inComment = true
             } else if character == "\"" || character == "'" {
                 try validateBareToken()
+                lastSignificantTokenWasComma = false
                 let consumed = try consumeString(source[index...], quote: character, line: line)
                 index = source.index(index, offsetBy: consumed)
                 continue
             } else if character == "[" || character == "{" {
                 try validateBareToken()
+                lastSignificantTokenWasComma = false
                 stack.append(character)
             } else if character == "]" || character == "}" {
                 try validateBareToken()
+                if character == "}", lastSignificantTokenWasComma {
+                    throw StarshipAdapterError.malformedConfiguration(
+                        "inline TOML tables cannot have a trailing comma"
+                    )
+                }
+                lastSignificantTokenWasComma = false
                 let expectedOpening: Character = character == "]" ? "[" : "{"
                 guard stack.last == expectedOpening else {
                     throw StarshipAdapterError.malformedConfiguration(
@@ -688,7 +716,11 @@ private struct StarshipTOMLDocument {
                 }
             } else if character == "," {
                 try validateBareToken()
+                lastSignificantTokenWasComma = true
             } else {
+                if !character.isWhitespace {
+                    lastSignificantTokenWasComma = false
+                }
                 bareToken.append(character)
             }
             index = source.index(after: index)
@@ -712,17 +744,52 @@ private struct StarshipTOMLDocument {
         if ["true", "false", "inf", "+inf", "-inf", "nan", "+nan", "-nan"].contains(value) {
             return true
         }
-        let patterns = [
+        let dateTimePattern =
+            #"^\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})?)?$"#
+        if matches(value, pattern: dateTimePattern) {
+            return isValidDateTime(value)
+        }
+        let timePattern = #"^\d{2}:\d{2}:\d{2}(?:\.\d+)?$"#
+        if matches(value, pattern: timePattern) {
+            return isValidTime(String(value.prefix(8)))
+        }
+        let numericPatterns = [
             #"^[+-]?(0|[1-9](?:_?\d)*)$"#,
             #"^[+-]?0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*$"#,
             #"^[+-]?0o[0-7](?:_?[0-7])*$"#,
             #"^[+-]?0b[01](?:_?[01])*$"#,
             #"^[+-]?(?:\d(?:_?\d)*)?\.\d(?:_?\d)*(?:[eE][+-]?\d(?:_?\d)*)?$"#,
             #"^[+-]?\d(?:_?\d)*[eE][+-]?\d(?:_?\d)*$"#,
-            #"^\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})?)?$"#,
-            #"^\d{2}:\d{2}:\d{2}(?:\.\d+)?$"#,
         ]
-        return patterns.contains { value.range(of: $0, options: .regularExpression) != nil }
+        return numericPatterns.contains { matches(value, pattern: $0) }
+    }
+
+    private static func isValidDateTime(_ value: String) -> Bool {
+        let dateParts = value.prefix(10).split(separator: "-").compactMap { Int($0) }
+        guard dateParts.count == 3 else { return false }
+        let year = dateParts[0]
+        let month = dateParts[1]
+        let day = dateParts[2]
+        let leapYear = year.isMultiple(of: 4) && (!year.isMultiple(of: 100) || year.isMultiple(of: 400))
+        let daysPerMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        guard (1...12).contains(month), (1...daysPerMonth[month - 1]).contains(day) else {
+            return false
+        }
+        guard value.count > 10 else { return true }
+        let timeStart = value.index(value.startIndex, offsetBy: 11)
+        return isValidTime(String(value[timeStart...].prefix(8)))
+    }
+
+    private static func isValidTime(_ value: String) -> Bool {
+        let parts = value.split(separator: ":").compactMap { Int($0) }
+        return parts.count == 3
+            && (0...23).contains(parts[0])
+            && (0...59).contains(parts[1])
+            && (0...60).contains(parts[2])
+    }
+
+    private static func matches(_ value: String, pattern: String) -> Bool {
+        value.range(of: pattern, options: .regularExpression) != nil
     }
 
     private static func replacingCharacters(
