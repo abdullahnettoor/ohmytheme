@@ -305,7 +305,7 @@ enum AppleScriptValue: Equatable {
     case none
 }
 
-enum AppleScriptFailure: Error, Equatable {
+public enum AppleScriptFailure: Error, Equatable, Sendable {
     case notAuthorized
     case targetUnavailable
     case executionFailed(code: Int, message: String)
@@ -343,11 +343,15 @@ struct SystemEventsAppleScriptRunner: AppleScriptRunner {
     }
 }
 
-struct AppearanceSnapshot: Equatable {
-    let darkMode: Bool
+public struct AppearanceSnapshot: Codable, Equatable, Sendable {
+    public let darkMode: Bool
+
+    public init(darkMode: Bool) {
+        self.darkMode = darkMode
+    }
 }
 
-enum AppearanceApplyResult: Equatable {
+public enum AppearanceApplyResult: Codable, Equatable, Sendable {
     case applied(previous: AppearanceSnapshot, current: AppearanceSnapshot)
     case unchanged(current: AppearanceSnapshot)
     case verificationFailed(
@@ -357,7 +361,13 @@ enum AppearanceApplyResult: Equatable {
     )
 }
 
-struct MacOSAppearanceClient {
+public protocol MacOSAppearancePlatform {
+    func read() throws -> AppearanceSnapshot
+    func apply(darkMode desired: Bool) throws -> AppearanceApplyResult
+    func restore(_ snapshot: AppearanceSnapshot) throws -> AppearanceApplyResult
+}
+
+public struct MacOSAppearanceClient: MacOSAppearancePlatform {
     static let readScript = """
         tell application "System Events"
             return dark mode of appearance preferences
@@ -378,18 +388,22 @@ struct MacOSAppearanceClient {
 
     private let runner: any AppleScriptRunner
 
-    init(runner: any AppleScriptRunner = SystemEventsAppleScriptRunner()) {
+    public init() {
+        runner = SystemEventsAppleScriptRunner()
+    }
+
+    init(runner: any AppleScriptRunner) {
         self.runner = runner
     }
 
-    func read() throws -> AppearanceSnapshot {
+    public func read() throws -> AppearanceSnapshot {
         guard case .boolean(let darkMode) = try runner.run(Self.readScript) else {
             throw AppleScriptFailure.executionFailed(code: 0, message: "System Events returned no appearance value.")
         }
         return AppearanceSnapshot(darkMode: darkMode)
     }
 
-    func apply(darkMode desired: Bool) throws -> AppearanceApplyResult {
+    public func apply(darkMode desired: Bool) throws -> AppearanceApplyResult {
         let previous = try read()
         guard previous.darkMode != desired else {
             return .unchanged(current: previous)
@@ -408,7 +422,7 @@ struct MacOSAppearanceClient {
         return .applied(previous: previous, current: current)
     }
 
-    func restore(_ snapshot: AppearanceSnapshot) throws -> AppearanceApplyResult {
+    public func restore(_ snapshot: AppearanceSnapshot) throws -> AppearanceApplyResult {
         try apply(darkMode: snapshot.darkMode)
     }
 }

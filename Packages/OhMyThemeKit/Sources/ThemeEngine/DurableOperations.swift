@@ -105,6 +105,11 @@ extension ThemeEngine {
                 approveLinkedSource: approveLinkedSource
             )
         } catch {
+            let failure = Self.capabilityOutcome(
+                for: error,
+                fallbackState: .failed,
+                fallbackDetail: "Preparation failed: \(error)"
+            )
             try persistence.journalTransitionState(operationID: operation.id, to: .failed)
             return ConnectionReport(
                 operationID: operation.id,
@@ -115,9 +120,9 @@ extension ThemeEngine {
                         capabilityID: "connection",
                         sourceType: .unavailable,
                         sourceRevision: "n/a",
-                        configurationState: .failed,
-                        runningInstanceReach: .unavailable,
-                        detail: "Preparation failed: \(error)"
+                        configurationState: failure.configurationState,
+                        runningInstanceReach: failure.activationReach,
+                        detail: failure.detail
                     )
                 ]
             )
@@ -179,6 +184,7 @@ extension ThemeEngine {
             try await adapter.revalidateConnection(plan: plan)
             receipt = try await adapter.connect(plan)
         } catch {
+            let failure = Self.capabilityOutcome(for: error, fallbackState: .failed)
             try persistence.journalSaveRecord(
                 JournaledRecord(
                     operationID: operation.id,
@@ -192,7 +198,7 @@ extension ThemeEngine {
                     staleStateToken: plan.staleStateToken,
                     planDigest: planReference.digest,
                     receiptJSON: nil,
-                    detail: String(describing: error)
+                    detail: failure.detail
                 )
             )
             try persistence.journalTransitionState(operationID: operation.id, to: .failed)
@@ -205,9 +211,9 @@ extension ThemeEngine {
                         capabilityID: "connection",
                         sourceType: .unavailable,
                         sourceRevision: "n/a",
-                        configurationState: .failed,
-                        runningInstanceReach: .unavailable,
-                        detail: String(describing: error)
+                        configurationState: failure.configurationState,
+                        runningInstanceReach: failure.activationReach,
+                        detail: failure.detail
                     )
                 ]
             )
@@ -423,7 +429,9 @@ extension ThemeEngine {
                     detail: conflict.detail
                 )
             } catch {
-                // Any other revalidation failure is a conflict — do not mutate.
+                // Target-specific failures such as a revoked permission remain honest
+                // Capability Outcomes. Unknown revalidation failures are conflicts.
+                let failure = Self.capabilityOutcome(for: error, fallbackState: .conflicted)
                 try? persistence.journalSaveRecord(
                     JournaledRecord(
                         operationID: operationID,
@@ -432,12 +440,12 @@ extension ThemeEngine {
                         adapterID: plan.adapterID,
                         adapterVersion: plan.adapterVersion,
                         capabilityID: plan.capabilityID,
-                        phase: .conflicted,
+                        phase: failure.configurationState == .conflicted ? .conflicted : .failed,
                         intendedChangeDigest: plan.intendedChangeDigest,
                         staleStateToken: plan.staleStateToken,
                         planDigest: planReference?.digest,
                         receiptJSON: nil,
-                        detail: String(describing: error)
+                        detail: failure.detail
                     )
                 )
                 return TargetCapabilityOutcome(
@@ -446,9 +454,9 @@ extension ThemeEngine {
                     capabilityID: plan.capabilityID,
                     sourceType: plan.sourceType,
                     sourceRevision: plan.sourceRevision,
-                    configurationState: .conflicted,
-                    runningInstanceReach: .unavailable,
-                    detail: String(describing: error)
+                    configurationState: failure.configurationState,
+                    runningInstanceReach: failure.activationReach,
+                    detail: failure.detail
                 )
             }
         }
@@ -504,6 +512,7 @@ extension ThemeEngine {
                 detail: receipt.detail
             )
         } catch {
+            let failure = Self.capabilityOutcome(for: error, fallbackState: .failed)
             if let recovered = await self.recoverApplyReceipt(plan: plan) {
                 try? persistence.journalSaveRecord(
                     JournaledRecord(
@@ -545,7 +554,7 @@ extension ThemeEngine {
                     staleStateToken: plan.staleStateToken,
                     planDigest: planReference?.digest,
                     receiptJSON: nil,
-                    detail: String(describing: error)
+                    detail: failure.detail
                 )
             )
             return TargetCapabilityOutcome(
@@ -554,9 +563,9 @@ extension ThemeEngine {
                 capabilityID: plan.capabilityID,
                 sourceType: plan.sourceType,
                 sourceRevision: plan.sourceRevision,
-                configurationState: .failed,
-                runningInstanceReach: .unavailable,
-                detail: String(describing: error)
+                configurationState: failure.configurationState,
+                runningInstanceReach: failure.activationReach,
+                detail: failure.detail
             )
         }
     }

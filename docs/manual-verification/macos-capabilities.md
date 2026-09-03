@@ -1,8 +1,9 @@
 # macOS capability proofs
 
 These steps cover [issue #5](https://github.com/abdullahnettoor/ohmytheme/issues/5),
-[issue #6](https://github.com/abdullahnettoor/ohmytheme/issues/6), and
-[issue #17](https://github.com/abdullahnettoor/ohmytheme/issues/17). The
+[issue #6](https://github.com/abdullahnettoor/ohmytheme/issues/6),
+[issue #17](https://github.com/abdullahnettoor/ohmytheme/issues/17), and
+[issue #18](https://github.com/abdullahnettoor/ohmytheme/issues/18). The
 automated proof uses injectable seams; these checks exercise the public macOS
 interfaces on the developer's actual machine.
 
@@ -95,3 +96,60 @@ writable `dark mode` property. It does not mutate accent color: AppKit exposes
 `NSColor.controlAccentColor` as read-only for this purpose. Appearance
 automation is optional and machine-wide; failure narrows the capability
 outcome and does not block unrelated target capabilities.
+
+## System appearance adapter and clean-permission checklist (issue #18)
+
+1. Reset the app's Automation decision with
+   `tccutil reset AppleEvents <app-bundle-id>`, replacing `<app-bundle-id>` with
+   the locally signed app's bundle identifier.
+2. Run `MacOSAppearanceAdapter.discover()` and confirm it reports the System
+   Appearance Target Instance and the Automation disclosure without presenting
+   a prompt or contacting System Events.
+3. Start connection. Confirm the disclosure is visible immediately before this
+   step and that the first appearance read presents the macOS Automation prompt.
+4. Grant access. Confirm connection records the current Light/Dark value as the
+   Connection Baseline, changes no setting, and reports that Automation access
+   is available.
+5. Apply a Theme Variant with the opposite `appearance`. Confirm the system
+   switches to Light or Dark, the Capability Outcome is `updated`, and no accent
+   color changes.
+6. Apply a Theme Variant matching the current appearance. Confirm the Capability
+   Outcome is `unchanged` and no setter is sent.
+7. Reset the permission again, deny access during connection, and confirm the
+   connection Capability Outcome is `permissionRequired` with denial guidance.
+8. Grant and connect, then revoke System Events access in System Settings before
+   preview/apply. Confirm the appearance Capability Outcome is
+   `permissionRequired` with revocation guidance. In the same Workspace, confirm
+   wallpaper and developer-application Target Instances continue independently.
+9. With System Events unavailable, confirm the appearance Capability Outcome is
+   `unavailable`. For another AppleScript execution error, confirm it is
+   `failed`; neither result should be presented as permission denial or
+   `unchanged`.
+10. After a successful switch, invoke Undo and confirm the exact pre-apply
+    Light/Dark value returns. Repeat after manually changing appearance away from
+    the intended value and confirm guarded Undo refuses with
+    `restorationConflict`.
+11. Simulate receipt loss after the setter succeeds, restart, and confirm
+    reconciliation classifies the intended appearance and reconstructs a receipt
+    that can still Undo.
+12. Attempt disconnect before Undo and confirm it refuses. After Undo restores
+    the Connection Baseline, confirm disconnect is a no-op and removes no other
+    system setting.
+
+### Documented limits
+
+- The Target Instance is the single machine-wide System Appearance setting,
+  identified as `macos.appearance:system`.
+- Discovery is intentionally read-free so the product can explain Automation
+  before macOS asks. Connection performs the first System Events read and may
+  therefore present the consent prompt.
+- macOS reports both an initial denial and later revocation with Apple event
+  error `-1743`. Oh My Theme distinguishes them by lifecycle context: denial
+  while connecting and revocation for an already connected appearance Target
+  Instance.
+- Light/Dark state is binary and exposes no supported revision token. If another
+  actor independently reaches the exact intended value between preview and
+  apply, the operation is treated as an idempotent `unchanged` result.
+- The only mutation route is System Events' `dark mode of appearance
+  preferences`. Accent color and undocumented preference keys are outside this
+  adapter's ownership scope.

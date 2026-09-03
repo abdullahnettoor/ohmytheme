@@ -26,9 +26,17 @@ public enum ActivationReach: String, Codable, Equatable, Sendable {
 public enum ConfigurationState: String, Codable, Equatable, Sendable {
     case updated
     case unchanged
+    case permissionRequired
     case conflicted
     case failed
     case unavailable
+}
+
+/// An error that can preserve a target-specific failure as an honest Capability Outcome.
+public protocol CapabilityOutcomeError: Error {
+    var capabilityConfigurationState: ConfigurationState { get }
+    var capabilityActivationReach: ActivationReach { get }
+    var capabilityOutcomeDetail: String { get }
 }
 
 public struct UserAction: Codable, Equatable, Sendable {
@@ -564,15 +572,16 @@ public actor ThemeEngine {
                     detail: receipt.detail
                 )
             } catch {
+                let failure = Self.capabilityOutcome(for: error, fallbackState: .failed)
                 outcomes[index] = TargetCapabilityOutcome(
                     targetInstanceID: plan.targetInstanceID,
                     adapterID: plan.adapterID,
                     capabilityID: plan.capabilityID,
                     sourceType: plan.sourceType,
                     sourceRevision: plan.sourceRevision,
-                    configurationState: .failed,
-                    runningInstanceReach: .unavailable,
-                    detail: String(describing: error)
+                    configurationState: failure.configurationState,
+                    runningInstanceReach: failure.activationReach,
+                    detail: failure.detail
                 )
             }
         }
@@ -655,6 +664,21 @@ public actor ThemeEngine {
         case .useGenerated:
             return ResolvedSource(type: .generated, revision: pack.source.revision, artifact: nil)
         }
+    }
+
+    internal static func capabilityOutcome(
+        for error: any Error,
+        fallbackState: ConfigurationState,
+        fallbackDetail: String? = nil
+    ) -> (configurationState: ConfigurationState, activationReach: ActivationReach, detail: String) {
+        if let outcomeError = error as? any CapabilityOutcomeError {
+            return (
+                outcomeError.capabilityConfigurationState,
+                outcomeError.capabilityActivationReach,
+                outcomeError.capabilityOutcomeDetail
+            )
+        }
+        return (fallbackState, .unavailable, fallbackDetail ?? String(describing: error))
     }
 
     private static func worstReach(_ left: ActivationReach, _ right: ActivationReach) -> ActivationReach {
