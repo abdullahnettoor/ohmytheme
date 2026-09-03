@@ -1,5 +1,31 @@
 import Foundation
 
+// MARK: - Registration
+
+/// An authenticated companion registration retained by the server for identity
+/// matching and durable connection receipts.
+public struct CompanionRegistration: Codable, Equatable, Sendable {
+    public let serverSessionID: String
+    public let extensionVersion: String
+    public let vscode: CompanionVSCodeIdentity
+    public let capabilities: [String]
+    public let currentSettings: [String: String]
+
+    public init(
+        serverSessionID: String,
+        extensionVersion: String,
+        vscode: CompanionVSCodeIdentity,
+        capabilities: [String],
+        currentSettings: [String: String]
+    ) {
+        self.serverSessionID = serverSessionID
+        self.extensionVersion = extensionVersion
+        self.vscode = vscode
+        self.capabilities = capabilities
+        self.currentSettings = currentSettings
+    }
+}
+
 // MARK: - Effect
 
 /// Outcomes produced by a ``CompanionServerSession`` in response to an
@@ -41,6 +67,7 @@ public struct CompanionServerSession {
     private var state: State = .awaitingRegister
     private var seenIncomingIDs: Set<UUID> = []
     private var outstandingRequests: [UUID: CompanionApplyThemeMessage] = [:]
+    private var acceptedRegistration: CompanionRegistration?
 
     private let launchNonce: String
     private let supportedProtocolVersions: ClosedRange<Int>
@@ -66,6 +93,9 @@ public struct CompanionServerSession {
     public var negotiatedProtocolVersion: Int? {
         if case .registered(_, let version) = state { return version } else { return nil }
     }
+
+    /// The authenticated identity accepted for this session.
+    public var registration: CompanionRegistration? { acceptedRegistration }
 
     public init(
         launchNonce: String,
@@ -182,6 +212,13 @@ public struct CompanionServerSession {
 
         seenIncomingIDs.insert(register.id)
         let sessionId = sessionIdProvider()
+        acceptedRegistration = CompanionRegistration(
+            serverSessionID: sessionId,
+            extensionVersion: register.extensionVersion,
+            vscode: register.vscode,
+            capabilities: register.capabilities,
+            currentSettings: register.currentSettings
+        )
         state = .registered(sessionId: sessionId, protocolVersion: register.protocolVersion)
         return [
             .send(

@@ -276,18 +276,29 @@ extension PersistenceStore {
         baseline: Data,
         capturedAt: Date = Date()
     ) throws -> StoredConnectionBaseline {
+        if let existing = try journalLoadConnectionBaseline(targetInstanceID: targetInstanceID) {
+            guard existing.adapterID == adapterID, existing.adapterVersion == adapterVersion else {
+                throw PersistenceError.invalidAssignment
+            }
+            return existing
+        }
+
         let reference = try contentStore.put(baseline)
         try withWrite { database in
             try database.execute(
                 sql: """
-                    INSERT OR REPLACE INTO content_references (digest, byte_count, kind, owner_id)
+                    INSERT INTO content_references (digest, byte_count, kind, owner_id)
                     VALUES (?, ?, 'connection-baseline', ?)
+                    ON CONFLICT(digest) DO UPDATE SET
+                        byte_count = excluded.byte_count,
+                        kind = excluded.kind,
+                        owner_id = excluded.owner_id
                     """,
                 arguments: [reference.digest, reference.byteCount, targetInstanceID.rawValue]
             )
             try database.execute(
                 sql: """
-                    INSERT OR REPLACE INTO connection_baselines
+                    INSERT INTO connection_baselines
                         (target_instance_id, adapter_id, adapter_version, baseline_digest, captured_at)
                     VALUES (?, ?, ?, ?, ?)
                     """,

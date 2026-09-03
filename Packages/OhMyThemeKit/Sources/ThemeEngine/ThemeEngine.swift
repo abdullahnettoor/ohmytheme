@@ -338,6 +338,7 @@ public enum ThemeEngineError: Error, Equatable, Sendable {
 public actor ThemeEngine {
     private let packs: [ThemePack]
     internal let adaptersByID: [String: any ThemeAdapter]
+    internal let connectionAdaptersByID: [String: any ConnectionAdapter]
     private let sourcePolicy: ThemeSourcePolicy
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
     internal let persistenceForOperations: PersistenceStore?
@@ -350,12 +351,22 @@ public actor ThemeEngine {
     public init(
         packs: [ThemePack],
         adapters: [any ThemeAdapter],
+        connectionAdapters: [any ConnectionAdapter] = [],
         sourcePolicy: ThemeSourcePolicy = .preferUpstream,
         upstreamArtifacts: [String: PinnedUpstreamArtifact] = [:],
         persistence: PersistenceStore? = nil
     ) {
         self.packs = packs
         self.adaptersByID = Dictionary(uniqueKeysWithValues: adapters.map { ($0.id, $0) })
+        var connectionAdaptersByID = Dictionary(
+            uniqueKeysWithValues: connectionAdapters.map { ($0.id, $0) }
+        )
+        for adapter in adapters {
+            if let connectionAdapter = adapter as? any ConnectionAdapter {
+                connectionAdaptersByID[adapter.id] = connectionAdapter
+            }
+        }
+        self.connectionAdaptersByID = connectionAdaptersByID
         self.sourcePolicy = sourcePolicy
         self.upstreamArtifacts = upstreamArtifacts
         self.persistenceForOperations = persistence

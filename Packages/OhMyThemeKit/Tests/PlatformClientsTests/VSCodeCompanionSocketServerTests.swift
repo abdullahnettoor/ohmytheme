@@ -288,6 +288,49 @@ struct VSCodeCompanionSocketServerTests {
         #expect(!ack.sessionId.isEmpty)
     }
 
+    @Test("The server exposes the registered edition, profile, and window identity")
+    func exposesRegistrationIdentity() throws {
+        let fixture = try Fixture(launchNonce: "identity-nonce")
+        try fixture.server.start()
+        defer { fixture.server.stop() }
+        Thread.sleep(forTimeInterval: 0.05)
+
+        let identity = CompanionVSCodeIdentity(
+            edition: "vscode",
+            version: "1.95.2",
+            profileName: "Default",
+            profileId: "profile-default",
+            machineId: "machine-1",
+            sessionId: "window-session-1",
+            processId: 42,
+            windowId: "window-session-1"
+        )
+        let client = try TestClient(socketPath: fixture.paths.socketFile.path)
+        try client.send(
+            .register(
+                CompanionRegisterMessage(
+                    protocolVersion: 1,
+                    id: UUID(),
+                    launchNonce: "identity-nonce",
+                    extensionVersion: "0.1.0",
+                    vscode: identity,
+                    capabilities: ["colorTheme"],
+                    currentSettings: ["workbench.colorTheme": "Default Dark+"]
+                )
+            )
+        )
+        guard case .registerAck(let ack) = try client.receive() else {
+            Issue.record("expected register_ack")
+            return
+        }
+
+        let registration = try #require(fixture.server.registrations().first)
+        #expect(registration.serverSessionID == ack.sessionId)
+        #expect(registration.extensionVersion == "0.1.0")
+        #expect(registration.vscode == identity)
+        #expect(registration.currentSettings["workbench.colorTheme"] == "Default Dark+")
+    }
+
     @Test("A register with a stale launch nonce is rejected and the connection is closed")
     func staleLaunchNonceRejected() throws {
         let fixture = try Fixture(launchNonce: "current")

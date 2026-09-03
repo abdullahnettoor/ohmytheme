@@ -79,7 +79,7 @@ extension ThemeEngine {
         try await beginOperationTracking(operation)
 
         defer { try? closeOperationTracking(operation.id) }
-        guard let adapter = self.writableAdapter(for: instance.adapterID) else {
+        guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
             try persistence.journalTransitionState(operationID: operation.id, to: .failed)
             return ConnectionReport(
                 operationID: operation.id,
@@ -98,7 +98,7 @@ extension ThemeEngine {
             )
         }
 
-        let plan: ConnectionPlan
+        var plan: ConnectionPlan
         do {
             plan = try await adapter.prepareConnection(
                 instance: instance,
@@ -127,6 +127,30 @@ extension ThemeEngine {
                 ]
             )
         }
+
+        guard !plan.requiresApproval else {
+            try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
+            return ConnectionReport(
+                operationID: operation.id,
+                outcomes: [
+                    TargetCapabilityOutcome(
+                        targetInstanceID: instance.id,
+                        adapterID: adapter.id,
+                        capabilityID: "connection",
+                        sourceType: .unavailable,
+                        sourceRevision: "n/a",
+                        configurationState: .permissionRequired,
+                        runningInstanceReach: .unavailable,
+                        detail: plan.userActions.first?.detail
+                            ?? "Approve the requested setup before connecting."
+                    )
+                ]
+            )
+        }
+
+        let baselineWasPreviouslyStored =
+            try persistence.journalLoadConnectionBaseline(targetInstanceID: instance.id) != nil
+        plan = plan.recordingStoredBaseline(baselineWasPreviouslyStored)
 
         // Durably persist Connection Plan and captured baseline BEFORE any external mutation.
         let planPayload = try JSONEncoder().encode(plan)
@@ -157,7 +181,8 @@ extension ThemeEngine {
             )
         )
 
-        // Cancellation is possible up to here. After this point, we begin mutation.
+        // Cancellation is possible up to here. After this point, the adapter owns
+        // final write-boundary validation and the external mutation.
         try await checkAndConsumeCancellation(operation.id)
 
         try persistence.journalTransitionState(operationID: operation.id, to: .applying)
@@ -181,10 +206,17 @@ extension ThemeEngine {
 
         let receipt: ConnectionReceipt
         do {
-            try await adapter.revalidateConnection(plan: plan)
             receipt = try await adapter.connect(plan)
         } catch {
-            let failure = Self.capabilityOutcome(for: error, fallbackState: .failed)
+            let mutationNotStarted = error is any ConnectionMutationNotStartedError
+            let failure = Self.capabilityOutcome(
+                for: error,
+                fallbackState: mutationNotStarted ? .conflicted : .failed
+            )
+            if mutationNotStarted {
+                try removeNewConnectionBaseline(for: plan, persistence: persistence)
+            }
+            let recoveryRequired = error is any MutationRecoveryRequiredError
             try persistence.journalSaveRecord(
                 JournaledRecord(
                     operationID: operation.id,
@@ -193,7 +225,7 @@ extension ThemeEngine {
                     adapterID: adapter.id,
                     adapterVersion: adapter.version,
                     capabilityID: "connection",
-                    phase: .failed,
+                    phase: recoveryRequired ? .applying : .failed,
                     intendedChangeDigest: plan.intendedChangeDigest,
                     staleStateToken: plan.staleStateToken,
                     planDigest: planReference.digest,
@@ -201,7 +233,9 @@ extension ThemeEngine {
                     detail: failure.detail
                 )
             )
-            try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+            if !recoveryRequired {
+                try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+            }
             return ConnectionReport(
                 operationID: operation.id,
                 outcomes: [
@@ -589,7 +623,7 @@ extension ThemeEngine {
         else {
             throw DurableOperationError.baselineMissing(instance.id)
         }
-        guard let adapter = self.writableAdapter(for: instance.adapterID) else {
+        guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
             throw DurableOperationError.adapterNotWritable(instance.adapterID)
         }
 
@@ -636,7 +670,7 @@ extension ThemeEngine {
                         capabilityID: "theme",
                         sourceType: .unavailable,
                         sourceRevision: "n/a",
-                        configurationState: .updated,
+                        configurationState: receipt.configurationState,
                         runningInstanceReach: receipt.runningInstanceReach,
                         detail: receipt.detail
                     )
@@ -697,7 +731,7 @@ extension ThemeEngine {
         else {
             throw DurableOperationError.baselineMissing(instance.id)
         }
-        guard let adapter = self.writableAdapter(for: instance.adapterID) else {
+        guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
             throw DurableOperationError.adapterNotWritable(instance.adapterID)
         }
 
@@ -1137,21 +1171,36 @@ extension ThemeEngine {
                     operationKind: operation.kind,
                     persistence: persistence
                 )
-                let recoveredReceipt: AdapterReceipt?
+                let recoveredApplyReceipt: AdapterReceipt?
+                let recoveredReceiptJSON: String?
                 if operation.kind == .apply, classification == .intendedAfterChange {
-                    recoveredReceipt = try await recoverApplyReceipt(
+                    recoveredApplyReceipt = try await recoverApplyReceipt(
                         record: record,
                         persistence: persistence
                     )
+                    recoveredReceiptJSON = try recoveredApplyReceipt.map(encodeReceipt)
+                } else if operation.kind == .connect, classification == .intendedAfterChange {
+                    recoveredApplyReceipt = nil
+                    recoveredReceiptJSON = try await recoverConnectionReceipt(
+                        record: record,
+                        persistence: persistence
+                    ).map(encodeReceipt)
                 } else {
-                    recoveredReceipt = nil
+                    recoveredApplyReceipt = nil
+                    recoveredReceiptJSON = nil
+                }
+                if operation.kind == .connect, classification == .beforeChange {
+                    try removeNewConnectionBaseline(
+                        for: record,
+                        persistence: persistence
+                    )
                 }
                 let newPhase: RecordPhase
                 switch classification {
                 case .beforeChange: newPhase = .reconciledBefore
                 case .intendedAfterChange:
-                    if let recoveredReceipt {
-                        newPhase = applyRecordPhase(for: recoveredReceipt)
+                    if let recoveredApplyReceipt {
+                        newPhase = applyRecordPhase(for: recoveredApplyReceipt)
                     } else {
                         newPhase = .reconciledIntended
                     }
@@ -1169,8 +1218,8 @@ extension ThemeEngine {
                         intendedChangeDigest: record.intendedChangeDigest,
                         staleStateToken: record.staleStateToken,
                         planDigest: record.planDigest,
-                        receiptJSON: try recoveredReceipt.map(encodeReceipt),
-                        detail: recoveredReceipt == nil
+                        receiptJSON: recoveredReceiptJSON,
+                        detail: recoveredReceiptJSON == nil
                             ? "reconciled:\(classification.rawValue)"
                             : "reconciled:\(classification.rawValue):receipt-recovered"
                     )
@@ -1182,6 +1231,48 @@ extension ThemeEngine {
 
     private func applyRecordPhase(for receipt: AdapterReceipt) -> RecordPhase {
         receipt.configurationState == .unchanged ? .skipped : .applied
+    }
+
+    private func removeNewConnectionBaseline(
+        for record: JournaledRecord,
+        persistence: PersistenceStore
+    ) throws {
+        guard let digest = record.planDigest else { return }
+        let bytes = try persistence.journalLoadContent(digest: digest)
+        guard let plan = try? JSONDecoder().decode(ConnectionPlan.self, from: bytes) else {
+            return
+        }
+        try removeNewConnectionBaseline(for: plan, persistence: persistence)
+    }
+
+    private func removeNewConnectionBaseline(
+        for plan: ConnectionPlan,
+        persistence: PersistenceStore
+    ) throws {
+        guard !plan.baselineWasPreviouslyStored,
+            let stored = try persistence.journalLoadConnectionBaseline(
+                targetInstanceID: plan.targetInstanceID
+            ),
+            try persistence.journalLoadContent(digest: stored.baselineReference.digest)
+                == plan.capturedPreChangeState
+        else { return }
+        try persistence.journalDeleteConnectionBaseline(
+            targetInstanceID: plan.targetInstanceID
+        )
+    }
+
+    private func recoverConnectionReceipt(
+        record: JournaledRecord,
+        persistence: PersistenceStore
+    ) async throws -> ConnectionReceipt? {
+        guard let adapter = self.connectionAdapter(for: record.adapterID) as? any RecoverableConnectionAdapter,
+            let digest = record.planDigest
+        else { return nil }
+        let bytes = try persistence.journalLoadContent(digest: digest)
+        guard let plan = try? JSONDecoder().decode(ConnectionPlan.self, from: bytes) else {
+            return nil
+        }
+        return try await adapter.recoverConnectionReceipt(plan: plan)
     }
 
     private func recoverApplyReceipt(plan: AdapterPlan) async -> AdapterReceipt? {
@@ -1208,25 +1299,28 @@ extension ThemeEngine {
         operationKind: OperationKind,
         persistence: PersistenceStore
     ) async throws -> ReconciliationClassification {
-        guard let writable = self.writableAdapter(for: record.adapterID) else {
-            return .conflicting
-        }
         guard let digest = record.planDigest else {
             return .beforeChange
         }
         let bytes = try persistence.journalLoadContent(digest: digest)
         switch operationKind {
         case .connect:
-            if let plan = try? JSONDecoder().decode(ConnectionPlan.self, from: bytes) {
-                return try await writable.classifyConnection(plan: plan)
+            if let adapter = self.connectionAdapter(for: record.adapterID),
+                let plan = try? JSONDecoder().decode(ConnectionPlan.self, from: bytes)
+            {
+                return try await adapter.classifyConnection(plan: plan)
             }
         case .disconnect:
-            if let plan = try? JSONDecoder().decode(DisconnectPlan.self, from: bytes) {
-                return try await writable.classifyDisconnect(plan: plan)
+            if let adapter = self.connectionAdapter(for: record.adapterID),
+                let plan = try? JSONDecoder().decode(DisconnectPlan.self, from: bytes)
+            {
+                return try await adapter.classifyDisconnect(plan: plan)
             }
         case .apply, .undo:
-            if let plan = try? JSONDecoder().decode(AdapterPlan.self, from: bytes) {
-                return try await writable.classifyApply(plan: plan)
+            if let adapter = self.writableAdapter(for: record.adapterID),
+                let plan = try? JSONDecoder().decode(AdapterPlan.self, from: bytes)
+            {
+                return try await adapter.classifyApply(plan: plan)
             }
         case .restore:
             return .conflicting
@@ -1241,6 +1335,10 @@ extension ThemeEngine {
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(receipt)
         return String(decoding: data, as: UTF8.self)
+    }
+
+    fileprivate func connectionAdapter(for id: String) -> (any ConnectionAdapter)? {
+        self.connectionAdaptersByID[id]
     }
 
     fileprivate func writableAdapter(for id: String) -> (any WritableThemeAdapter)? {

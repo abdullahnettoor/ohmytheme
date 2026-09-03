@@ -103,6 +103,7 @@ export class CompanionClient {
     reject: (error: Error) => void;
   };
   private handler: MessageHandler = () => undefined;
+  private disconnectHandler: () => void = () => undefined;
   private seenIncomingIds = new Set<string>();
   private negotiatedProtocolVersion?: number;
 
@@ -110,6 +111,14 @@ export class CompanionClient {
 
   onMessage(handler: MessageHandler): void {
     this.handler = handler;
+  }
+
+  onDisconnect(handler: () => void): void {
+    this.disconnectHandler = handler;
+  }
+
+  get isRegistered(): boolean {
+    return this.registered;
   }
 
   async connect(): Promise<RegisterAckMessage> {
@@ -266,12 +275,14 @@ export class CompanionClient {
   }
 
   private onClose(): void {
+    const wasConnected = this.registered || this.socket !== undefined;
     this.registered = false;
     this.socket = undefined;
     if (this.registerResolvers) {
       this.registerResolvers.reject(new Error("socket closed before register_ack"));
       this.registerResolvers = undefined;
     }
+    if (wasConnected) this.disconnectHandler();
   }
 
   private onError(err: Error): void {

@@ -6,6 +6,10 @@
   "publisher": "ohmytheme",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abdullahnettoor/ohmytheme.git"
+  },
   "engines": {
     "vscode": "^1.90.0",
     "node": ">=18"
@@ -22,15 +26,17 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test:unit": "mocha --recursive --require ts-node/register 'src/test/unit/**/*.test.ts'",
+    "package:vsix": "npm run compile && vsce package --no-yarn --skip-license --out ../../../App/OhMyThemeApp/Resources/oh-my-theme-companion-0.1.0.vsix",
+    "test:unit": "npm run compile && mocha 'out/test/unit/**/*.test.js'",
     "test:host": "node ./out/test/host/runTest.js",
-    "test": "npm run compile && npm run test:unit && npm run test:host"
+    "test": "npm run test:unit && npm run test:host"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
     "@types/node": "^20.11.30",
     "@types/vscode": "^1.90.0",
     "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "3.9.2",
     "glob": "^10.5.0",
     "mocha": "^10.4.0",
     "ts-node": "^10.9.2",

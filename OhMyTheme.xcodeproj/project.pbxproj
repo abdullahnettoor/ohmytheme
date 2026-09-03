@@ -11,6 +11,7 @@
 		A00100000000000000000001 /* BundledThemeCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00100000000000000000002 /* BundledThemeCatalog.swift */; };
 		A00100000000000000000003 /* catppuccin-mocha.json in Resources */ = {isa = PBXBuildFile; fileRef = A00100000000000000000004 /* catppuccin-mocha.json */; };
 		A00100000000000000000005 /* oh-my-theme-aurora.json in Resources */ = {isa = PBXBuildFile; fileRef = A00100000000000000000006 /* oh-my-theme-aurora.json */; };
+		B00100000000000000000001 /* oh-my-theme-companion-0.1.0.vsix in Resources */ = {isa = PBXBuildFile; fileRef = B00100000000000000000002 /* oh-my-theme-companion-0.1.0.vsix */; };
 		6D82B40A11F5923F6AD0194E /* OhMyThemeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */; };
 		882E5CA2392DC65C3FAED330 /* OhMyThemeKit in Frameworks */ = {isa = PBXBuildFile; productRef = 3A816AD2BA05BA84EC058C23 /* OhMyThemeKit */; };
 		8AE004071AA3A2872CA68737 /* MenuBarPresence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E3F5FF97E414F622F085EAF /* MenuBarPresence.swift */; };
@@ -39,6 +40,7 @@
 		A00100000000000000000002 /* BundledThemeCatalog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BundledThemeCatalog.swift; sourceTree = "<group>"; };
 		A00100000000000000000004 /* catppuccin-mocha.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; path = catppuccin-mocha.json; sourceTree = "<group>"; };
 		A00100000000000000000006 /* oh-my-theme-aurora.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; path = oh-my-theme-aurora.json; sourceTree = "<group>"; };
+		B00100000000000000000002 /* oh-my-theme-companion-0.1.0.vsix */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.zip; path = "oh-my-theme-companion-0.1.0.vsix"; sourceTree = "<group>"; };
 		493A5E2DC28F969912BC7DAF /* WorkspaceMenuView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceMenuView.swift; sourceTree = "<group>"; };
 		4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceMenuModelTests.swift; sourceTree = "<group>"; };
 		547A744BB39A61EAF180D92B /* OhMyThemeKit */ = {isa = PBXFileReference; includeInIndex = 1; path = OhMyThemeKit; sourceTree = "<group>"; };
@@ -132,9 +134,19 @@
 				AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */,
 				2A4BABC391C431046E3B0F2B /* AppComposition */,
 				6C32E16D3870C2673D3C0502 /* UI */,
+				B00100000000000000000003 /* Resources */,
 			);
 			name = OhMyThemeApp;
 			path = OhMyThemeApp;
+			sourceTree = "<group>";
+		};
+		B00100000000000000000003 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				B00100000000000000000002 /* oh-my-theme-companion-0.1.0.vsix */,
+			);
+			name = Resources;
+			path = Resources;
 			sourceTree = "<group>";
 		};
 		7CFCD33E76559233CBB6B37E /* Frameworks */ = {
@@ -276,6 +288,7 @@
 			files = (
 				A00100000000000000000003 /* catppuccin-mocha.json in Resources */,
 				A00100000000000000000005 /* oh-my-theme-aurora.json in Resources */,
+				B00100000000000000000001 /* oh-my-theme-companion-0.1.0.vsix in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -96,6 +96,16 @@ rendezvous file for the current launch. The server rejects a register
 message whose nonce does not match with `register_rejected` and closes
 the connection.
 
+VS Code's stable extension API does not expose a profile display name or a
+native window handle. The companion therefore leaves `profileName` empty,
+uses its profile-scoped `ExtensionContext.globalStorageUri` as the opaque
+`profileId`, and reports `vscode.env.sessionId` as both the session and
+window-session identity. The app retains the separately selected CLI profile
+name in its Connection Plan. A profile-scoped Target Instance matches the
+opaque profile identity across window relaunches; a window-scoped Target
+Instance additionally pins its extension-host process or window-session
+identity. It never invents a profile name or native window identifier.
+
 ### `register_ack` (app → extension)
 
 ```json
@@ -228,6 +238,9 @@ the identifier of the offending message so the sender can correlate.
    `apply_theme` itself.
 6. Either side may close the connection cleanly. A closed connection
    discards its request-id history; the next connection starts fresh.
+7. While the extension remains active, it retries the rendezvous periodically.
+   This lets an open window register against a new socket and launch nonce after
+   the app starts or relaunches.
 
 ## Out of scope for this proof
 

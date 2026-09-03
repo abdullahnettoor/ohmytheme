@@ -6,6 +6,9 @@ import { ApplyThemeMessage, CompanionMessage } from "./protocol";
 const EXTENSION_VERSION = "0.1.0";
 
 let activeClient: CompanionClient | undefined;
+let reconnectTimer: NodeJS.Timeout | undefined;
+let connectionAttemptInFlight = false;
+let extensionActive = false;
 
 /**
  * Extension entry point.
@@ -16,20 +19,39 @@ let activeClient: CompanionClient | undefined;
  * absent (the app is not running) the extension stays dormant.
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  extensionActive = true;
   const service = new ThemeService();
   const rendezvousPath = process.env.OMT_RENDEZVOUS_PATH ?? defaultRendezvousPath();
 
-  try {
-    activeClient = await connect(rendezvousPath, service);
-  } catch (error) {
-    // Registration failure or missing rendezvous is expected when the
-    // app is not running. Surface it in the extension log only.
-    console.log(`[oh-my-theme] not connecting: ${(error as Error).message}`);
-    return;
-  }
+  const attemptConnection = async () => {
+    if (!extensionActive || connectionAttemptInFlight || activeClient?.isRegistered) return;
+    connectionAttemptInFlight = true;
+    try {
+      const client = await connect(rendezvousPath, service, context);
+      client.onDisconnect(() => {
+        if (activeClient === client) activeClient = undefined;
+      });
+      if (!extensionActive) {
+        client.disconnect();
+        return;
+      }
+      activeClient = client;
+    } catch (error) {
+      // Missing rendezvous is normal while the app is not running. The timer
+      // retries so an open VS Code window follows a later app launch/relaunch.
+      console.log(`[oh-my-theme] not connecting: ${(error as Error).message}`);
+    } finally {
+      connectionAttemptInFlight = false;
+    }
+  };
 
+  await attemptConnection();
+  reconnectTimer = setInterval(() => void attemptConnection(), 1_000);
   context.subscriptions.push({
     dispose: () => {
+      extensionActive = false;
+      if (reconnectTimer) clearInterval(reconnectTimer);
+      reconnectTimer = undefined;
       activeClient?.disconnect();
       activeClient = undefined;
     },
@@ -37,6 +59,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {
+  extensionActive = false;
+  if (reconnectTimer) clearInterval(reconnectTimer);
+  reconnectTimer = undefined;
   activeClient?.disconnect();
   activeClient = undefined;
 }
@@ -46,9 +71,13 @@ export function deactivate(): void {
  * apply_theme handler. Exported for tests that want to inject a
  * custom rendezvous path.
  */
-export async function connect(rendezvousPath: string, service: ThemeService): Promise<CompanionClient> {
+export async function connect(
+  rendezvousPath: string,
+  service: ThemeService,
+  context?: vscode.ExtensionContext,
+): Promise<CompanionClient> {
   const rendezvous = await readRendezvous(rendezvousPath);
-  const identity = collectIdentity();
+  const identity = collectIdentity(context);
   const client = new CompanionClient({
     socketPath: rendezvous.socketPath,
     launchNonce: rendezvous.launchNonce,
@@ -70,25 +99,21 @@ function makeHandler(service: ThemeService): (message: CompanionMessage, reply: 
   };
 }
 
-function collectIdentity() {
+function collectIdentity(context?: vscode.ExtensionContext) {
   const env = vscode.env;
-  // VS Code's stable Extension API doesn't expose the active profile
-  // (name or id) or a distinct window handle. The wire protocol
-  // (docs/architecture/vscode-companion-protocol.md) defines a
-  // closed `edition` enum, so we map `env.appName` into that enum
-  // and leave the fields we cannot obtain honestly as empty strings
-  // rather than sending misleading values (env.appHost, env.sessionId)
-  // in their place. A future ADR/spec revision can either add
-  // opt-in APIs (e.g. via a proposed API) or drop the missing fields.
+  // VS Code's stable Extension API does not expose the active profile name or id.
+  // The companion therefore leaves the name empty and uses its profile-scoped global
+  // storage URI as an opaque identity. VS Code also does not expose a native window
+  // handle, so `env.sessionId` is the documented per-window-session identity.
   return {
     edition: mapEdition(env.appName),
     version: vscode.version,
-    profileName: "", // no stable API
-    profileId: "", // no stable API
+    profileName: "",
+    profileId: context?.globalStorageUri.toString() ?? "",
     machineId: env.machineId,
     sessionId: env.sessionId,
     processId: process.pid,
-    windowId: "", // no stable API distinct from sessionId
+    windowId: env.sessionId,
   };
 }
 

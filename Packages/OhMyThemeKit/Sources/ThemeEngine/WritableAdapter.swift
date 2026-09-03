@@ -25,6 +25,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
     public let userActions: [UserAction]
     public let opaquePayload: Data?
     public let requiresApproval: Bool
+    public let baselineWasPreviouslyStored: Bool
 
     public init(
         targetInstanceID: TargetInstanceID,
@@ -37,7 +38,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         requiredPermissions: [String] = [],
         userActions: [UserAction] = [],
         opaquePayload: Data? = nil,
-        requiresApproval: Bool = false
+        requiresApproval: Bool = false,
+        baselineWasPreviouslyStored: Bool = false
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
@@ -50,6 +52,24 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         self.userActions = userActions
         self.opaquePayload = opaquePayload
         self.requiresApproval = requiresApproval
+        self.baselineWasPreviouslyStored = baselineWasPreviouslyStored
+    }
+
+    func recordingStoredBaseline(_ wasPreviouslyStored: Bool) -> ConnectionPlan {
+        ConnectionPlan(
+            targetInstanceID: targetInstanceID,
+            adapterID: adapterID,
+            adapterVersion: adapterVersion,
+            capturedPreChangeState: capturedPreChangeState,
+            intendedChangeDigest: intendedChangeDigest,
+            staleStateToken: staleStateToken,
+            expectedSideEffects: expectedSideEffects,
+            requiredPermissions: requiredPermissions,
+            userActions: userActions,
+            opaquePayload: opaquePayload,
+            requiresApproval: requiresApproval,
+            baselineWasPreviouslyStored: wasPreviouslyStored
+        )
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -64,6 +84,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         case userActions
         case opaquePayload
         case requiresApproval
+        case baselineWasPreviouslyStored
     }
 
     public init(from decoder: Decoder) throws {
@@ -79,7 +100,11 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             requiredPermissions: try container.decodeIfPresent([String].self, forKey: .requiredPermissions) ?? [],
             userActions: try container.decodeIfPresent([UserAction].self, forKey: .userActions) ?? [],
             opaquePayload: try container.decodeIfPresent(Data.self, forKey: .opaquePayload),
-            requiresApproval: try container.decodeIfPresent(Bool.self, forKey: .requiresApproval) ?? false
+            requiresApproval: try container.decodeIfPresent(Bool.self, forKey: .requiresApproval) ?? false,
+            baselineWasPreviouslyStored: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .baselineWasPreviouslyStored
+            ) ?? false
         )
     }
 }
@@ -125,8 +150,17 @@ public struct DisconnectPlan: Codable, Equatable, Sendable {
     }
 }
 
+/// Marks an adapter failure that occurred after an external mutation may have
+/// completed. The engine leaves its journal record in `applying` so launch or
+/// pre-operation reconciliation must classify it before proceeding.
+public protocol MutationRecoveryRequiredError: CapabilityOutcomeError {}
+
+/// Marks a connection failure that occurred before the adapter began mutating
+/// external state, allowing a newly captured baseline to be discarded safely.
+public protocol ConnectionMutationNotStartedError: Error {}
+
 /// A conflict raised when write-boundary revalidation detects that the plan is stale.
-public struct WriteBoundaryConflict: Error, Equatable, Sendable {
+public struct WriteBoundaryConflict: ConnectionMutationNotStartedError, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
     public let detail: String
 
@@ -153,12 +187,13 @@ public protocol RecoverableApplyAdapter: WritableThemeAdapter {
     func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt
 }
 
-public protocol WritableThemeAdapter: ThemeAdapter {
-    func prepareApply(
-        instance: ConnectedTargetInstance,
-        theme: PreparedTheme,
-        connectionBaseline: Data?
-    ) async throws -> AdapterPlan
+public protocol RecoverableConnectionAdapter: ConnectionAdapter {
+    func recoverConnectionReceipt(plan: ConnectionPlan) async throws -> ConnectionReceipt
+}
+
+public protocol ConnectionAdapter: Sendable {
+    var id: String { get }
+    var version: String { get }
 
     func prepareConnection(
         instance: ConnectedTargetInstance,
@@ -168,10 +203,6 @@ public protocol WritableThemeAdapter: ThemeAdapter {
     func revalidateConnection(plan: ConnectionPlan) async throws
     func classifyConnection(plan: ConnectionPlan) async throws -> ReconciliationClassification
     func restoreConnection(instance: ConnectedTargetInstance, baseline: Data) async throws -> ConnectionReceipt
-
-    func revalidateApply(plan: AdapterPlan) async throws
-    func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification
-    func rollbackApply(plan: AdapterPlan, receipt: AdapterReceipt) async throws
 
     func prepareDisconnect(
         instance: ConnectedTargetInstance,
@@ -183,15 +214,19 @@ public protocol WritableThemeAdapter: ThemeAdapter {
     func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification
 }
 
-public extension WritableThemeAdapter {
+public protocol WritableThemeAdapter: ThemeAdapter, ConnectionAdapter {
     func prepareApply(
         instance: ConnectedTargetInstance,
         theme: PreparedTheme,
         connectionBaseline: Data?
-    ) async throws -> AdapterPlan {
-        try await prepareApply(instance: instance, theme: theme)
-    }
+    ) async throws -> AdapterPlan
 
+    func revalidateApply(plan: AdapterPlan) async throws
+    func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification
+    func rollbackApply(plan: AdapterPlan, receipt: AdapterReceipt) async throws
+}
+
+public extension ConnectionAdapter {
     func prepareConnection(instance: ConnectedTargetInstance) async throws -> ConnectionPlan {
         try await prepareConnection(instance: instance, approveLinkedSource: false)
     }
@@ -201,5 +236,15 @@ public extension WritableThemeAdapter {
         baseline: StoredConnectionBaseline
     ) async throws -> DisconnectPlan {
         try await prepareDisconnect(instance: instance, baseline: baseline, baselineData: Data())
+    }
+}
+
+public extension WritableThemeAdapter {
+    func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme,
+        connectionBaseline: Data?
+    ) async throws -> AdapterPlan {
+        try await prepareApply(instance: instance, theme: theme)
     }
 }

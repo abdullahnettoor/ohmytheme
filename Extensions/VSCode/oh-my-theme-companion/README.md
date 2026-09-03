@@ -18,6 +18,7 @@ npm install
 npm run compile
 npm run test:unit
 npm run test:host   # downloads a VS Code test host and runs extension tests
+npm run package:vsix # writes the pinned app resource
 ```
 
 The extension does not activate against a live app on startup unless a

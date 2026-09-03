@@ -128,6 +128,16 @@ public final class CompanionSocketServer: @unchecked Sendable {
         queue.sync { stopSynchronously() }
     }
 
+    /// Returns the currently authenticated companion registrations. Closed
+    /// connections disappear from this snapshot.
+    public func registrations() -> [CompanionRegistration] {
+        queue.sync {
+            connections.values.compactMap(\.registration).sorted {
+                $0.serverSessionID < $1.serverSessionID
+            }
+        }
+    }
+
     /// Send an `apply_theme` request to the first registered
     /// connection and await its acknowledgement, or fail if none is
     /// registered.
@@ -386,6 +396,7 @@ final class CompanionConnection: @unchecked Sendable {
     private(set) var sessionID: String?
 
     var isRegistered: Bool { session.isRegistered }
+    var registration: CompanionRegistration? { session.registration }
 
     init(
         fd: Int32,

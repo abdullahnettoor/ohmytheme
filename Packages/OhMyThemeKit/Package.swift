@@ -8,7 +8,7 @@ let package = Package(
     products: [
         .library(
             name: "OhMyThemeKit",
-            targets: ["ThemeModel", "ThemeCompiler", "PlatformClients", "Persistence", "ThemeEngine"]
+            targets: ["ThemeModel", "ThemeCompiler", "PlatformClients", "Persistence", "ThemeEngine", "Adapters"]
         ),
         .executable(name: "ThemeTool", targets: ["ThemeTool"]),
     ],
@@ -32,6 +32,11 @@ let package = Package(
         .target(
             name: "ThemeEngine",
             dependencies: ["ThemeModel", "PlatformClients", "Persistence"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "Adapters",
+            dependencies: ["ThemeEngine", "ThemeModel", "PlatformClients", "Persistence"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .target(
@@ -64,7 +69,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ThemeEngineTests",
-            dependencies: ["ThemeEngine", "ThemeModel", "PlatformClients", "Persistence"],
+            dependencies: ["ThemeEngine", "ThemeModel", "PlatformClients", "Persistence", "Adapters"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
