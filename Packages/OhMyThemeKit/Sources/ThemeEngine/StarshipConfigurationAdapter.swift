@@ -350,6 +350,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     public func classifyConnection(plan: ConnectionPlan) async throws -> ReconciliationClassification {
+        guard plan.adapterID == id, plan.adapterVersion == version else {
+            return .conflicting
+        }
         let baseline = try decode(StarshipConnectionBaseline.self, from: plan.capturedPreChangeState)
         let payload = try connectionPayload(from: plan)
         let current = try managedFiles.inspect(at: payload.details.resolvedConfigURL)
@@ -449,7 +452,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
 
     public func classifyDisconnect(plan: DisconnectPlan) async throws -> ReconciliationClassification {
         guard plan.adapterID == id, plan.adapterVersion == version else {
-            throw StarshipAdapterError.malformedPlan
+            return .conflicting
         }
         let payload = try disconnectPayload(from: plan)
         guard let expected = payload.restorationReceipt?.after ?? payload.fileAfter else {
@@ -614,6 +617,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     public func recoverApplyReceipt(plan: AdapterPlan) async throws -> AdapterReceipt {
+        guard isCurrentApplyPlan(plan) else {
+            throw StarshipAdapterError.malformedPlan
+        }
         let state = try themeState(from: plan)
         let current = try managedFiles.inspect(at: state.before.requestedURL)
         guard managedFiles.matchesMarkedApplication(current, of: state.filePlan) else {
@@ -634,6 +640,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     public func classifyApply(plan: AdapterPlan) async throws -> ReconciliationClassification {
+        guard isCurrentApplyPlan(plan) else {
+            return .conflicting
+        }
         let state = try themeState(from: plan)
         let current = try managedFiles.inspect(at: state.before.requestedURL)
         if current == state.before {
@@ -646,6 +655,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     public func rollbackApply(plan: AdapterPlan, receipt: AdapterReceipt) async throws {
+        guard isCurrentApplyPlan(plan) else {
+            throw StarshipAdapterError.malformedPlan
+        }
         let state = try themeState(from: plan)
         let current = try managedFiles.inspect(at: state.before.requestedURL)
         guard current.snapshot.digest == state.filePlan.intendedDigest else {
@@ -682,6 +694,14 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter {
     }
 
     // MARK: - Helpers
+
+    private func isCurrentApplyPlan(_ plan: AdapterPlan) -> Bool {
+        plan.adapterID == id
+            && plan.adapterVersion == version
+            && plan.payload.adapterID == id
+            && plan.payload.adapterVersion == version
+            && plan.payload.payloadVersion == payloadVersion
+    }
 
     private func restorationReceipt(
         from current: ManagedFileInspection,

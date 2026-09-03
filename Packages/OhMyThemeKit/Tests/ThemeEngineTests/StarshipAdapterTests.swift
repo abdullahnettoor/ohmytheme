@@ -675,6 +675,48 @@ struct StarshipAdapterTests {
         #expect(try Data(contentsOf: fixture.configURL) == original)
     }
 
+    @Test("Recovery conservatively conflicts plans from an older adapter version")
+    func recoveryRejectsOlderAdapterPlans() async throws {
+        let fixture = try Fixture(existingContents: "format = \"before\"\n")
+        let adapter = fixture.adapter()
+        let currentPlan = try await adapter.prepareApply(instance: fixture.instance, theme: fixture.theme())
+        let receipt = try await adapter.apply(currentPlan)
+        let oldPlan = AdapterPlan(
+            targetInstanceID: currentPlan.targetInstanceID,
+            adapterID: currentPlan.adapterID,
+            adapterVersion: "1",
+            capabilityID: currentPlan.capabilityID,
+            payload: currentPlan.payload,
+            intendedChangeDigest: currentPlan.intendedChangeDigest,
+            capturedPreChangeState: currentPlan.capturedPreChangeState,
+            staleStateToken: currentPlan.staleStateToken,
+            expectedSideEffects: currentPlan.expectedSideEffects,
+            requiredPermissions: currentPlan.requiredPermissions,
+            sourceType: currentPlan.sourceType,
+            sourceRevision: currentPlan.sourceRevision,
+            activationReach: currentPlan.activationReach,
+            setupNeeds: currentPlan.setupNeeds,
+            conflicts: currentPlan.conflicts
+        )
+        let oldDisconnect = DisconnectPlan(
+            targetInstanceID: fixture.instance.id,
+            adapterID: "starship",
+            adapterVersion: "1",
+            baselineReference: ContentReference(digest: "legacy", byteCount: 0),
+            staleStateToken: "legacy",
+            opaquePayload: nil
+        )
+
+        #expect(try await adapter.classifyApply(plan: oldPlan) == .conflicting)
+        await #expect(throws: StarshipAdapterError.self) {
+            _ = try await adapter.recoverApplyReceipt(plan: oldPlan)
+        }
+        await #expect(throws: StarshipAdapterError.self) {
+            try await adapter.rollbackApply(plan: oldPlan, receipt: receipt)
+        }
+        #expect(try await adapter.classifyDisconnect(plan: oldDisconnect) == .conflicting)
+    }
+
     @Test("Recovery classifies before, intended, and conflicting states")
     func recoveryClassifiesAllStates() async throws {
         let fixture = try Fixture(existingContents: "format = \"before\"\n")
