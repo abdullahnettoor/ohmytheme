@@ -20,7 +20,7 @@ struct ThemeEngineTests {
             displayName: "My Mac",
             connectedTargetInstances: [
                 ConnectedTargetInstance(
-                    id: TargetInstanceID(rawValue: "recording.preview"),
+                    id: TargetInstanceID(rawValue: "recording.plan"),
                     displayName: "Recording Target",
                     adapterID: "recording"
                 )
@@ -46,8 +46,6 @@ struct ThemeEngineTests {
         let serializedPlan = try JSONEncoder().encode(plan)
         let restoredPlan = try JSONDecoder().decode(ApplyPlan.self, from: serializedPlan)
         #expect(restoredPlan == plan)
-        let restoredLegacyPreview = try JSONDecoder().decode(ThemePreview.self, from: serializedPlan)
-        #expect(restoredLegacyPreview == plan)
     }
 
     @Test("Applying a plan sends the prepared artifact and groups the report by target")
@@ -231,31 +229,6 @@ struct ThemeEngineTests {
             try persistence.loadRestorationContent(forEnvelopeID: envelope.id)
                 == Data("recording-target-before-theme".utf8)
         )
-    }
-    @Test("Legacy ThemePreview typealias and deprecated engine interfaces remain fully backward compatible")
-    func legacyPreviewCompatibility() async throws {
-        let adapter = RecordingThemeAdapter()
-        let engine = ThemeEngine(packs: [testPack], adapters: [adapter])
-        let workspace = Workspace(
-            id: .myMac,
-            displayName: "My Mac",
-            connectedTargetInstances: [
-                ConnectedTargetInstance(
-                    id: TargetInstanceID(rawValue: "recording.legacy"),
-                    displayName: "Recording Target",
-                    adapterID: "recording"
-                )
-            ],
-            themeAssignment: .fixed(variantID: "test-pack/dark")
-        )
-        let legacyPreview: ThemePreview = try await engine.prepare(workspace: workspace)
-        #expect(await engine.previewsInFlight[legacyPreview.id] != nil)
-        #expect(ThemeEngineError.previewNotFound(legacyPreview.id) == ThemeEngineError.planNotFound(legacyPreview.id))
-        #expect(ThemeEngineError.previewWorkspaceChanged(legacyPreview.id) == ThemeEngineError.planWorkspaceChanged(legacyPreview.id))
-
-        let report = try await engine.apply(previewID: legacyPreview.id)
-        #expect(report.outcomes.count == 1)
-        #expect(report.outcomes[0].configurationState == .updated)
     }
 
 }

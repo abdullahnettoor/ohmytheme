@@ -84,11 +84,6 @@ final class WorkspaceMenuModel: ObservableObject {
     @Published private(set) var applicationTargets: [ApplicationTarget]
     @Published private(set) var applyPlan: ApplyPlan?
 
-    @available(*, deprecated, renamed: "applyPlan")
-    public var preview: ApplyPlan? {
-        applyPlan
-    }
-
     @Published private(set) var report: PresentedReport?
     @Published private(set) var canUndoLastThemeChange = false
     @Published private(set) var connectionReview: ConnectionPlan?
@@ -319,24 +314,12 @@ final class WorkspaceMenuModel: ObservableObject {
         return applied
     }
 
-    @available(*, deprecated, renamed: "apply(planID:)")
-    @discardableResult
-    func apply(previewID: UUID) async throws -> DurableApplyReport {
-        try await apply(planID: previewID)
-    }
-
     @discardableResult
     func applyPreparedPlan() async throws -> DurableApplyReport {
         guard let applyPlan else {
             throw ThemeEngineError.planNotFound(UUID())
         }
         return try await apply(planID: applyPlan.id)
-    }
-
-    @available(*, deprecated, renamed: "applyPreparedPlan")
-    @discardableResult
-    func applyPreparedPreview() async throws -> DurableApplyReport {
-        try await applyPreparedPlan()
     }
 
     func restoreAndDisconnect(_ targetInstanceID: TargetInstanceID) async throws {

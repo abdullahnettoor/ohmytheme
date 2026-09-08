@@ -90,7 +90,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
             displayName: "My Mac",
             connectedTargetInstances: [
                 ConnectedTargetInstance(
-                    id: TargetInstanceID(rawValue: "recording.preview"),
+                    id: TargetInstanceID(rawValue: "recording.plan"),
                     displayName: "Recording Target",
                     adapterID: "recording"
                 )
@@ -110,7 +110,6 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertEqual(plan.targetPlans.count, 1)
         XCTAssertEqual(plan.variantID, pack.variants[0].qualifiedID)
         XCTAssertEqual(model.applyPlan?.id, plan.id)
-        XCTAssertEqual(model.preview?.id, plan.id)
     }
 
     func testChangingThemeSelectionInvalidatesAnExistingApplyPlan() async throws {
@@ -119,7 +118,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
             displayName: "My Mac",
             connectedTargetInstances: [
                 ConnectedTargetInstance(
-                    id: TargetInstanceID(rawValue: "recording.preview-reset"),
+                    id: TargetInstanceID(rawValue: "recording.plan-reset"),
                     displayName: "Recording Target",
                     adapterID: "recording"
                 )
@@ -137,12 +136,10 @@ final class WorkspaceMenuModelTests: XCTestCase {
 
         _ = try await model.prepareSelectedTheme()
         XCTAssertNotNil(model.applyPlan)
-        XCTAssertNotNil(model.preview)
 
         model.selectThemeVariant("oh-my-theme/aurora")
 
         XCTAssertNil(model.applyPlan)
-        XCTAssertNil(model.preview)
         XCTAssertNil(model.report)
     }
 

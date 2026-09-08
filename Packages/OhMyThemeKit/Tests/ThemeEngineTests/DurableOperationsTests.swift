@@ -199,8 +199,8 @@ struct DurableOperationsTests {
             ])
     }
 
-    @Test("A preview cannot be applied after its Workspace assignment or target set changes")
-    func previewRejectsChangedWorkspace() async throws {
+    @Test("An Apply Plan cannot be applied after its Workspace assignment or target set changes")
+    func applyPlanRejectsChangedWorkspace() async throws {
         let fixture = try Self.makeFixture()
         let adapter = RecordingWritableAdapter()
         let engine = ThemeEngine(
@@ -235,14 +235,14 @@ struct DurableOperationsTests {
         let plan = try await engine.prepare(workspace: preparedWorkspace)
         let originalWorld = await adapter.currentWorldBytes()
 
-        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(plan.id)) {
+        await #expect(throws: ThemeEngineError.planWorkspaceChanged(plan.id)) {
             _ = try await engine.applyDurable(planID: plan.id, workspace: changedWorkspace)
         }
         #expect(await adapter.currentWorldBytes() == originalWorld)
     }
 
-    @Test("A fixed-assignment preview cannot be applied after the assignment is removed")
-    func fixedAssignmentPreviewRejectsMissingAssignment() async throws {
+    @Test("A fixed-assignment Apply Plan cannot be applied after the assignment is removed")
+    func fixedAssignmentPlanRejectsMissingAssignment() async throws {
         let fixture = try Self.makeFixture()
         let adapter = RecordingWritableAdapter()
         let engine = ThemeEngine(
@@ -266,7 +266,7 @@ struct DurableOperationsTests {
         )
         let plan = try await engine.prepare(workspace: assignedWorkspace)
 
-        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(plan.id)) {
+        await #expect(throws: ThemeEngineError.planWorkspaceChanged(plan.id)) {
             _ = try await engine.applyDurable(
                 planID: plan.id,
                 workspace: unassignedWorkspace
@@ -287,7 +287,7 @@ struct DurableOperationsTests {
         let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
         // Kick off the durable apply and, while it is running, attempt a second one — the actor
         // serializes them, so the second must complete only after the first (and the second must
-        // report `previewNotFound` because the preview was consumed by the first apply).
+        // report `planNotFound` because the plan was consumed by the first apply).
         async let first = engine.applyDurable(planID: plan.id, workspace: workspace)
         _ = try await first
 
@@ -300,7 +300,7 @@ struct DurableOperationsTests {
         #expect(secondFailed)
     }
 
-    @Test("Adapter Plan records are stored in the deterministic preview order")
+    @Test("Adapter Plan records are stored in deterministic Apply Plan order")
     func deterministicOrder() async throws {
         let fixture = try Self.makeFixture()
         let adapter = RecordingWritableAdapter()

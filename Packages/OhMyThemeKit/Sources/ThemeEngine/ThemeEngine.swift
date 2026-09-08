@@ -338,9 +338,6 @@ public struct ApplyPlan: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-@available(*, deprecated, renamed: "ApplyPlan")
-public typealias ThemePreview = ApplyPlan
-
 public protocol ThemeAdapter: Sendable {
     var id: String { get }
     var version: String { get }
@@ -361,16 +358,6 @@ public enum ThemeEngineError: Error, Equatable, Sendable {
     case planWorkspaceChanged(UUID)
     case engineUnavailable
     case applyInProgress
-
-    @available(*, deprecated, renamed: "planNotFound")
-    public static func previewNotFound(_ id: UUID) -> ThemeEngineError {
-        .planNotFound(id)
-    }
-
-    @available(*, deprecated, renamed: "planWorkspaceChanged")
-    public static func previewWorkspaceChanged(_ id: UUID) -> ThemeEngineError {
-        .planWorkspaceChanged(id)
-    }
 }
 
 public actor ThemeEngine {
@@ -381,12 +368,6 @@ public actor ThemeEngine {
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
     internal let persistenceForOperations: PersistenceStore?
     internal var plansInFlight: [UUID: ApplyPlan] = [:]
-
-    @available(*, deprecated, renamed: "plansInFlight")
-    internal var previewsInFlight: [UUID: ApplyPlan] {
-        get { plansInFlight }
-        set { plansInFlight = newValue }
-    }
 
     private var isApplying = false
     internal var currentOperationID: UUID?
@@ -705,11 +686,6 @@ public actor ThemeEngine {
                 )
             })
         return ApplyReport(variantID: plan.variantID, outcomes: outcomes)
-    }
-
-    @available(*, deprecated, renamed: "apply(planID:)")
-    public func apply(previewID: UUID) async throws -> ApplyReport {
-        try await apply(planID: previewID)
     }
 
     private func findVariant(_ qualifiedID: String) -> (ThemePack, ThemeVariant)? {

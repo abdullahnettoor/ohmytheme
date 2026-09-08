@@ -475,11 +475,6 @@ extension ThemeEngine {
         )
     }
 
-    @available(*, deprecated, renamed: "applyDurable(planID:workspace:)")
-    public func applyDurable(previewID: UUID, workspace: Workspace) async throws -> DurableApplyReport {
-        try await applyDurable(planID: previewID, workspace: workspace)
-    }
-
     private func runApplyStep(
         plan: AdapterPlan,
         ordinal: Int,
@@ -1862,11 +1857,6 @@ extension ThemeEngine {
 
     fileprivate func consumePlan(_ id: UUID) -> ApplyPlan? {
         self.plansInFlight.removeValue(forKey: id)
-    }
-
-    @available(*, deprecated, renamed: "consumePlan")
-    fileprivate func consumePreview(_ id: UUID) -> ApplyPlan? {
-        consumePlan(id)
     }
 
     fileprivate func ensureNoOperationInProgress() async throws {

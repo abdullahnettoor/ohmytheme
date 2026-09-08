@@ -328,9 +328,9 @@ struct WorkspaceMenuView: View {
                 "Apply Plan", detail: "Prepared for \(plan.targetInstanceIDs.count) Target Instances.")
 
             VStack(alignment: .leading, spacing: 7) {
-                previewFact("Source", value: plan.sourceType.rawValue.capitalized)
-                previewFact("Expected reach", value: reachLabel(plan.activationReach))
-                previewFact("Revision", value: plan.sourceRevision)
+                planFact("Source", value: plan.sourceType.rawValue.capitalized)
+                planFact("Expected reach", value: reachLabel(plan.activationReach))
+                planFact("Revision", value: plan.sourceRevision)
 
                 ForEach(plan.targetPlans, id: \.targetInstanceID) { targetPlan in
                     ForEach(targetPlan.expectedSideEffects, id: \.self) { sideEffect in
@@ -537,7 +537,7 @@ struct WorkspaceMenuView: View {
         }
     }
 
-    private func previewFact(_ label: String, value: String) -> some View {
+    private func planFact(_ label: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .foregroundStyle(.secondary)

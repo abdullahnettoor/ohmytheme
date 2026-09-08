@@ -118,53 +118,182 @@ struct PersistenceStoreTests {
         #expect(try fixture.store.journalInterruptedOperations().isEmpty)
     }
 
+    @Test("Pre-rename Apply journal rows and recovery content remain readable")
+    func preRenameApplyJournalRemainsReadable() throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oh-my-theme-pre-rename-persistence-\(UUID().uuidString)", isDirectory: true)
+        let databaseURL = directoryURL.appendingPathComponent("state.sqlite")
+        let contentURL = directoryURL.appendingPathComponent("recovery", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
 
-    @Test("Persisted operations and recovery data created before the rename remain readable without losing the Last Apply Transaction or recovery state")
-    func persistedOperationsAndRecoveryDataRemainReadable() throws {
-        let fixture = try Fixture()
-        let operationID = UUID()
-        let targetID = TargetInstanceID(rawValue: "recording.pre-rename")
-        let planDigest = "sha256:legacy-plan-digest"
+        let completedOperationID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let interruptedOperationID = UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        let completedTargetID = "recording.pre-rename-completed"
+        let interruptedTargetID = "recording.pre-rename-interrupted"
+        let completedCreatedAt = 1_700_000_000.0
+        let interruptedCreatedAt = 1_700_000_100.0
+        let completedReceipt =
+            "{\"configurationState\":\"updated\",\"runningInstanceReach\":\"currentInstances\"}"
+        let planPayload = Data("pre-rename-apply-plan".utf8)
         let recoveryData = Data("pre-rename-recovery-state".utf8)
-        let recoveryRef = try fixture.store.saveContent(recoveryData, kind: "restoration", ownerID: "operation-\(operationID.uuidString)")
+        let contentStore = try ContentAddressedStore(rootURL: contentURL)
+        let planReference = try contentStore.put(planPayload)
+        let recoveryReference = try contentStore.put(recoveryData)
 
-        let operation = try fixture.store.journalStartOperation(
-            kind: .apply,
-            workspaceID: .myMac,
-            variantID: "aurora/dark"
-        )
-        let record = JournaledRecord(
-            operationID: operation.id,
-            targetInstanceID: targetID,
-            ordinal: 0,
-            adapterID: "recording",
-            adapterVersion: "1",
-            capabilityID: "theme",
-            phase: .applied,
-            intendedChangeDigest: "sha256:intended",
-            staleStateToken: "token-1",
-            planDigest: planDigest,
-            receiptJSON: "{\"configurationState\":\"updated\",\"runningInstanceReach\":\"currentInstances\"}",
-            detail: nil
-        )
-        try fixture.store.journalSaveRecord(record)
-        try fixture.store.journalTransitionState(operationID: operation.id, to: .applied)
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("initial") { database in
+            try database.create(table: "workspaces") { table in
+                table.column("id", .text).primaryKey()
+                table.column("display_name", .text).notNull()
+            }
+            try database.create(table: "theme_assignments") { table in
+                table.column("workspace_id", .text).primaryKey().references("workspaces", onDelete: .cascade)
+                table.column("kind", .text).notNull()
+                table.column("fixed_variant_id", .text)
+                table.column("light_variant_id", .text)
+                table.column("dark_variant_id", .text)
+            }
+            try database.create(table: "target_instances") { table in
+                table.column("id", .text).primaryKey()
+                table.column("workspace_id", .text).notNull().references("workspaces", onDelete: .cascade)
+                table.column("display_name", .text).notNull()
+                table.column("adapter_id", .text).notNull()
+                table.column("is_connected", .boolean).notNull()
+            }
+            try database.create(table: "content_references") { table in
+                table.column("digest", .text).primaryKey()
+                table.column("byte_count", .integer).notNull()
+                table.column("kind", .text).notNull()
+                table.column("owner_id", .text).notNull()
+            }
+            try database.create(table: "payload_envelopes") { table in
+                table.column("id", .text).primaryKey()
+                table.column("target_instance_id", .text).notNull()
+                table.column("adapter_id", .text).notNull()
+                table.column("adapter_version", .text).notNull()
+                table.column("payload_version", .text).notNull()
+                table.column("payload_digest", .text).notNull().references("content_references")
+                table.column("restoration_digest", .text).references("content_references")
+            }
+            try database.create(table: "operations") { table in
+                table.column("id", .text).primaryKey()
+                table.column("kind", .text).notNull()
+                table.column("state", .text).notNull()
+                table.column("workspace_id", .text).notNull()
+                table.column("variant_id", .text)
+                table.column("created_at", .double).notNull()
+            }
+            try database.create(table: "operation_records") { table in
+                table.column("operation_id", .text).notNull()
+                    .references("operations", onDelete: .cascade)
+                table.column("target_instance_id", .text).notNull()
+                table.column("ordinal", .integer).notNull()
+                table.column("adapter_id", .text).notNull()
+                table.column("adapter_version", .text).notNull()
+                table.column("capability_id", .text).notNull()
+                table.column("phase", .text).notNull()
+                table.column("intended_change_digest", .text).notNull()
+                table.column("stale_state_token", .text)
+                table.column("plan_digest", .text)
+                table.column("receipt_json", .text)
+                table.column("detail", .text)
+                table.primaryKey(["operation_id", "target_instance_id"])
+            }
+            try database.create(table: "connection_baselines") { table in
+                table.column("target_instance_id", .text).primaryKey()
+                table.column("adapter_id", .text).notNull()
+                table.column("adapter_version", .text).notNull()
+                table.column("baseline_digest", .text).notNull()
+                table.column("captured_at", .double).notNull()
+            }
+        }
+        migrator.registerMigration("add-payload-restoration-digest") { _ in }
+        migrator.registerMigration("add-durable-operation-journal") { _ in }
 
-        let lat = try fixture.store.journalFindLastAppliedTransaction(workspaceID: .myMac)
-        #expect(lat != nil)
-        #expect(lat?.id == operation.id)
-        #expect(lat?.variantID == "aurora/dark")
-        let loadedRecords = try fixture.store.journalLoadRecords(operationID: operation.id)
-        #expect(loadedRecords.count == 1)
-        #expect(loadedRecords[0].planDigest == planDigest)
-        #expect(try fixture.store.loadContent(recoveryRef) == recoveryData)
+        let preRenameDatabase = try DatabaseQueue(path: databaseURL.path)
+        try migrator.migrate(preRenameDatabase)
+        try preRenameDatabase.write { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO content_references (digest, byte_count, kind, owner_id)
+                    VALUES (?, ?, 'adapter-plan', ?), (?, ?, 'restoration', ?)
+                    """,
+                arguments: [
+                    planReference.digest,
+                    planReference.byteCount,
+                    "apply.\(interruptedOperationID.uuidString).\(interruptedTargetID)",
+                    recoveryReference.digest,
+                    recoveryReference.byteCount,
+                    "apply.\(interruptedOperationID.uuidString).recovery",
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO operations (id, kind, state, workspace_id, variant_id, created_at)
+                    VALUES (?, 'apply', 'applied', 'my-mac', 'aurora/dark', ?),
+                           (?, 'apply', 'applying', 'my-mac', 'aurora/light', ?)
+                    """,
+                arguments: [
+                    completedOperationID.uuidString,
+                    completedCreatedAt,
+                    interruptedOperationID.uuidString,
+                    interruptedCreatedAt,
+                ]
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO operation_records (
+                        operation_id, target_instance_id, ordinal,
+                        adapter_id, adapter_version, capability_id, phase,
+                        intended_change_digest, stale_state_token,
+                        plan_digest, receipt_json, detail
+                    ) VALUES
+                        (?, ?, 0, 'recording', '1', 'theme', 'applied',
+                         'sha256:completed-intended', 'completed-token', NULL, ?, NULL),
+                        (?, ?, 0, 'recording', '1', 'theme', 'applying',
+                         'sha256:interrupted-intended', 'interrupted-token', ?, NULL, NULL)
+                    """,
+                arguments: [
+                    completedOperationID.uuidString,
+                    completedTargetID,
+                    completedReceipt,
+                    interruptedOperationID.uuidString,
+                    interruptedTargetID,
+                    planReference.digest,
+                ]
+            )
+        }
 
-        let reopened = try PersistenceStore(databaseURL: fixture.databaseURL, contentStoreURL: fixture.contentURL)
-        let reopenedLAT = try reopened.journalFindLastAppliedTransaction(workspaceID: .myMac)
-        #expect(reopenedLAT?.id == operation.id)
-        let reopenedRecords = try reopened.journalLoadRecords(operationID: operation.id)
-        #expect(reopenedRecords[0].planDigest == planDigest)
-        #expect(try reopened.loadContent(recoveryRef) == recoveryData)
+        let store = try PersistenceStore(databaseURL: databaseURL, contentStoreURL: contentURL)
+
+        let lastApply = try store.journalFindLastAppliedTransaction(workspaceID: .myMac)
+        #expect(lastApply?.id == completedOperationID)
+        #expect(lastApply?.kind == .apply)
+        #expect(lastApply?.state == .applied)
+        #expect(lastApply?.variantID == "aurora/dark")
+        #expect(lastApply?.createdAt == Date(timeIntervalSince1970: completedCreatedAt))
+
+        let completedRecords = try store.journalLoadRecords(operationID: completedOperationID)
+        #expect(completedRecords.count == 1)
+        #expect(completedRecords.first?.targetInstanceID.rawValue == completedTargetID)
+        #expect(completedRecords.first?.phase == .applied)
+        #expect(completedRecords.first?.receiptJSON == completedReceipt)
+
+        let interruptedOperations = try store.journalInterruptedOperations()
+        #expect(interruptedOperations.count == 1)
+        #expect(interruptedOperations.first?.id == interruptedOperationID)
+        #expect(interruptedOperations.first?.kind == .apply)
+        #expect(interruptedOperations.first?.state == .applying)
+        #expect(interruptedOperations.first?.variantID == "aurora/light")
+        #expect(interruptedOperations.first?.createdAt == Date(timeIntervalSince1970: interruptedCreatedAt))
+
+        let interruptedRecords = try store.journalLoadRecords(operationID: interruptedOperationID)
+        #expect(interruptedRecords.count == 1)
+        #expect(interruptedRecords.first?.targetInstanceID.rawValue == interruptedTargetID)
+        #expect(interruptedRecords.first?.phase == .applying)
+        #expect(interruptedRecords.first?.planDigest == planReference.digest)
+        #expect(try store.journalLoadPlanPayload(planReference) == planPayload)
+        #expect(try store.journalLoadContent(digest: recoveryReference.digest) == recoveryData)
     }
 
     @Test("Content store uses user-only permissions and rejects tampering")
