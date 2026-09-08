@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import PlatformClients
+import UserNotifications
 
 enum AppActivationPolicy: Equatable {
     case regular
@@ -21,9 +22,10 @@ protocol AppPresencePlatform: AnyObject {
     @discardableResult
     func setActivationPolicy(_ policy: AppActivationPolicy) -> Bool
     func activateApp()
-    func presentMainWindow()
+    func openMainWindow()
+    func focusMainWindow()
     func terminateApp()
-    var notificationPermissionStatus: NotificationPermissionStatus { get }
+    func notificationPermissionStatus() async -> NotificationPermissionStatus
 }
 
 protocol AppPresenceDefaults: AnyObject, MenuBarVisibilityDefaults {
@@ -38,11 +40,16 @@ extension UserDefaults: AppPresenceDefaults {}
 @MainActor
 final class ProductionAppPresencePlatform: AppPresencePlatform {
     private var openWindowAction: (() -> Void)?
+    private weak var mainWindow: NSWindow?
 
     init() {}
 
     func setOpenWindowAction(_ action: @escaping () -> Void) {
         self.openWindowAction = action
+    }
+
+    func setMainWindow(_ window: NSWindow?) {
+        mainWindow = window
     }
 
     var activationPolicy: AppActivationPolicy {
@@ -76,24 +83,35 @@ final class ProductionAppPresencePlatform: AppPresencePlatform {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    func presentMainWindow() {
-        if let openWindowAction {
-            openWindowAction()
-        } else {
-            let mainWindow = NSApplication.shared.windows.first { window in
-                window.canBecomeMain && !(window is NSPanel)
-            }
-            if let mainWindow {
-                mainWindow.makeKeyAndOrderFront(nil)
-            }
+    func openMainWindow() {
+        openWindowAction?()
+    }
+
+    func focusMainWindow() {
+        guard let mainWindow else {
+            openMainWindow()
+            return
         }
+        mainWindow.makeKeyAndOrderFront(nil)
     }
 
     func terminateApp() {
         NSApplication.shared.terminate(nil)
     }
 
-    var notificationPermissionStatus: NotificationPermissionStatus {
-        .notDetermined
+    func notificationPermissionStatus() async -> NotificationPermissionStatus {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            return .notDetermined
+        case .denied:
+            return .denied
+        case .authorized:
+            return .authorized
+        case .provisional:
+            return .provisional
+        @unknown default:
+            return .notDetermined
+        }
     }
 }

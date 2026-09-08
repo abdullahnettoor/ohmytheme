@@ -2,7 +2,7 @@ import SwiftUI
 import ThemeModel
 
 struct AppsView: View {
-    @ObservedObject var model: WorkspaceMenuModel
+    @ObservedObject var model: WorkspacePresentationModel
 
     var body: some View {
         ScrollView {
@@ -10,7 +10,7 @@ struct AppsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Apps")
                         .font(.title2.weight(.bold))
-                    Text("Manage connected and discovered applications on this Mac.")
+                    Text("Manage apps and macOS capabilities that can join My Mac.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

@@ -1,11 +1,10 @@
-import AppKit
 import Combine
-import PlatformClients
+import Foundation
 import ThemeEngine
 import ThemeModel
 
 @MainActor
-final class WorkspaceMenuModel: ObservableObject {
+final class WorkspacePresentationModel: ObservableObject {
     enum ReportKind: Equatable {
         case apply
         case undo
@@ -15,7 +14,7 @@ final class WorkspaceMenuModel: ObservableObject {
 
     struct ApplicationTarget: Equatable, Identifiable {
         enum State: String, Equatable {
-            case ready = "Ready"
+            case connected = "Connected"
             case setupNeeded = "Setup Needed"
             case unavailable = "Unavailable"
         }
@@ -91,23 +90,11 @@ final class WorkspaceMenuModel: ObservableObject {
     @Published private(set) var operationError: String?
     @Published private(set) var isBusy = false
     @Published private(set) var isReady = true
-    @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus
-    @Published private(set) var isChangingLaunchAtLogin = false
-    @Published private(set) var launchAtLoginError: String?
 
     private let runtime: any WorkspaceRuntime
-    private let launchAtLogin: any LaunchAtLoginPlatform
-    private let quitAction: @MainActor () -> Void
 
-    init(
-        runtime: any WorkspaceRuntime,
-        launchAtLogin: any LaunchAtLoginPlatform = LaunchAtLoginClient(),
-        quitAction: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
-    ) {
+    init(runtime: any WorkspaceRuntime) {
         self.runtime = runtime
-        self.launchAtLogin = launchAtLogin
-        self.launchAtLoginStatus = launchAtLogin.status
-        self.quitAction = quitAction
         self.workspace = runtime.workspace
         self.applicationTargets = Self.connectedApplicationTargets(in: runtime.workspace)
         self.isReady = true
@@ -149,27 +136,6 @@ final class WorkspaceMenuModel: ObservableObject {
         }
     }
 
-    var isLaunchAtLoginSelected: Bool {
-        launchAtLoginStatus == .enabled || launchAtLoginStatus == .requiresApproval
-    }
-
-    var canChangeLaunchAtLogin: Bool {
-        launchAtLoginStatus != .unavailable && !isChangingLaunchAtLogin
-    }
-
-    var launchAtLoginDetail: String {
-        switch launchAtLoginStatus {
-        case .disabled:
-            "Open Oh My Theme automatically after you log in."
-        case .enabled:
-            "Oh My Theme will open automatically after you log in."
-        case .requiresApproval:
-            "Allow Oh My Theme in System Settings > General > Login Items & Extensions."
-        case .unavailable:
-            "Launch at Login is unavailable for this copy of the app."
-        }
-    }
-
     var canApplyThemes: Bool {
         runtime.canApplyThemes && persistenceError == nil && isReady
             && !workspace.connectedTargetInstances.isEmpty
@@ -180,27 +146,7 @@ final class WorkspaceMenuModel: ObservableObject {
         return variantID
     }
 
-    func quit() {
-        quitAction()
-    }
-
-    func setLaunchAtLoginEnabled(_ enabled: Bool) async {
-        guard !isChangingLaunchAtLogin else { return }
-        isChangingLaunchAtLogin = true
-        launchAtLoginError = nil
-        defer { isChangingLaunchAtLogin = false }
-
-        do {
-            try await launchAtLogin.setEnabled(enabled)
-        } catch {
-            launchAtLoginError =
-                "macOS couldn't update Launch at Login. \(error.localizedDescription) Try the toggle again."
-        }
-        launchAtLoginStatus = launchAtLogin.status
-    }
-
     func start() async {
-        launchAtLoginStatus = launchAtLogin.status
         isReady = false
         operationError = nil
         do {
@@ -447,7 +393,7 @@ final class WorkspaceMenuModel: ObservableObject {
                 id: applicationID,
                 name: applicationName(applicationID),
                 systemImage: systemImage(applicationID),
-                state: .ready,
+                state: .connected,
                 summary: instances.count == 1 ? "Connected" : "\(instances.count) Target Instances connected",
                 instanceDetails: instances.map(\.displayName),
                 connectionOptions: []

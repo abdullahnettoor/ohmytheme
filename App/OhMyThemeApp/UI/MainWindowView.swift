@@ -22,7 +22,7 @@ enum NavigationSection: String, CaseIterable, Identifiable, Hashable {
 
 struct MainWindowView: View {
     @ObservedObject var presenceController: AppPresenceController
-    @ObservedObject var model: WorkspaceMenuModel
+    @ObservedObject var model: WorkspacePresentationModel
     @State private var selectedSection: NavigationSection? = .overview
 
     var body: some View {

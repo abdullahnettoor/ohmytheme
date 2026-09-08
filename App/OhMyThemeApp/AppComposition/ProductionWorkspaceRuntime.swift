@@ -361,7 +361,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private func macOSTarget(
         workspace: Workspace,
         wallpaper: Result<MacOSWallpaperDiscoveryReport, Error>
-    ) -> WorkspaceMenuModel.ApplicationTarget {
+    ) -> WorkspacePresentationModel.ApplicationTarget {
         let instances = workspace.connectedTargetInstances.filter { $0.adapterID.hasPrefix("macos.") }
         let appearanceConnected = instances.contains { $0.adapterID == "macos.appearance" }
         let displaySummary: String
@@ -375,18 +375,18 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             displaySummary = "Wallpaper discovery failed: \(error)"
         }
         let option = candidates[MacOSAppearanceAdapter.systemTargetInstanceID].map {
-            WorkspaceMenuModel.ConnectionOption(
+            WorkspacePresentationModel.ConnectionOption(
                 id: $0.instance.id,
                 name: $0.instance.displayName,
                 detail: nil,
                 permissionDisclosure: MacOSAppearanceAdapter.automationPermissionDescription
             )
         }
-        return WorkspaceMenuModel.ApplicationTarget(
+        return WorkspacePresentationModel.ApplicationTarget(
             id: "macos",
             name: "macOS",
             systemImage: "macbook",
-            state: appearanceConnected ? .ready : .setupNeeded,
+            state: appearanceConnected ? .connected : .setupNeeded,
             summary: appearanceConnected
                 ? "System Appearance connected. \(displaySummary)"
                 : "Connect optional Light/Dark automation. \(displaySummary)",
@@ -398,7 +398,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private func ghosttyTarget(
         workspace: Workspace,
         discovery: Result<GhosttyDiscoveryReport, Error>
-    ) -> WorkspaceMenuModel.ApplicationTarget {
+    ) -> WorkspacePresentationModel.ApplicationTarget {
         let connected = workspace.connectedTargetInstances.filter { $0.adapterID == "ghostty" }
         if !connected.isEmpty {
             return readyTarget(id: "ghostty", name: "Ghostty", image: "terminal", instances: connected)
@@ -406,7 +406,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         switch discovery {
         case .success(let report):
             if let candidate = candidates[GhosttyConfigurationAdapter.defaultTargetInstanceID] {
-                return WorkspaceMenuModel.ApplicationTarget(
+                return WorkspacePresentationModel.ApplicationTarget(
                     id: "ghostty",
                     name: "Ghostty",
                     systemImage: "terminal",
@@ -440,7 +440,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private func vscodeTarget(
         workspace: Workspace,
         discovery: Result<VSCodeDiscoveryReport, Error>
-    ) -> WorkspaceMenuModel.ApplicationTarget {
+    ) -> WorkspacePresentationModel.ApplicationTarget {
         let connected = workspace.connectedTargetInstances.filter { $0.adapterID == "vscode" }
         if !connected.isEmpty {
             return readyTarget(
@@ -465,7 +465,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                 let expectation = vscodeExpectation(for: installation)
                 let id = VSCodeConnectionAdapter.targetInstanceID(for: expectation)
                 return candidates[id].map { _ in
-                    WorkspaceMenuModel.ConnectionOption(
+                    WorkspacePresentationModel.ConnectionOption(
                         id: id,
                         name: "\(installation.edition.displayName), Default profile",
                         detail: "\(installation.version) at \(installation.bundleURL.path)"
@@ -473,7 +473,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                 }
             }
             if !options.isEmpty {
-                return WorkspaceMenuModel.ApplicationTarget(
+                return WorkspacePresentationModel.ApplicationTarget(
                     id: "vscode",
                     name: "Visual Studio Code",
                     systemImage: "chevron.left.forwardslash.chevron.right",
@@ -509,7 +509,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private func starshipTarget(
         workspace: Workspace,
         discovery: Result<StarshipDiscoveryReport, Error>
-    ) -> WorkspaceMenuModel.ApplicationTarget {
+    ) -> WorkspacePresentationModel.ApplicationTarget {
         let connected = workspace.connectedTargetInstances.filter { $0.adapterID == "starship" }
         if !connected.isEmpty {
             return readyTarget(id: "starship", name: "Starship", image: "sparkles", instances: connected)
@@ -517,7 +517,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         switch discovery {
         case .success(let report):
             if let candidate = candidates[StarshipConfigurationAdapter.defaultTargetInstanceID] {
-                return WorkspaceMenuModel.ApplicationTarget(
+                return WorkspacePresentationModel.ApplicationTarget(
                     id: "starship",
                     name: "Starship",
                     systemImage: "sparkles",
@@ -552,12 +552,12 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         image: String,
         instances: [ConnectedTargetInstance],
         summary: String = "Connected"
-    ) -> WorkspaceMenuModel.ApplicationTarget {
-        WorkspaceMenuModel.ApplicationTarget(
+    ) -> WorkspacePresentationModel.ApplicationTarget {
+        WorkspacePresentationModel.ApplicationTarget(
             id: id,
             name: name,
             systemImage: image,
-            state: .ready,
+            state: .connected,
             summary: summary,
             instanceDetails: instances.map(\.displayName),
             connectionOptions: []
@@ -570,8 +570,8 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         image: String,
         detail: String,
         instances: [String] = []
-    ) -> WorkspaceMenuModel.ApplicationTarget {
-        WorkspaceMenuModel.ApplicationTarget(
+    ) -> WorkspacePresentationModel.ApplicationTarget {
+        WorkspacePresentationModel.ApplicationTarget(
             id: id,
             name: name,
             systemImage: image,

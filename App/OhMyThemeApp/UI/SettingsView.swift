@@ -1,5 +1,5 @@
-import SwiftUI
 import PlatformClients
+import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var presenceController: AppPresenceController
@@ -7,17 +7,28 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle(
-                    "Show menu bar item",
-                    isOn: presenceController.isMenuBarVisibleBinding
-                )
-                .accessibilityIdentifier("settings-menu-bar-toggle")
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(
+                        "Show menu bar item",
+                        isOn: presenceController.isMenuBarVisibleBinding
+                    )
+                    .disabled(presenceController.isChangingAppPresencePreference)
+                    .accessibilityIdentifier("settings-menu-bar-toggle")
+
+                    if let error = presenceController.menuBarVisibilityError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings-menu-bar-error")
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle(
                         "Launch at login",
                         isOn: Binding(
-                            get: { presenceController.launchAtLoginStatus == .enabled },
+                            get: { presenceController.isLaunchAtLoginSelected },
                             set: { newValue in
                                 Task {
                                     try? await presenceController.setLaunchAtLoginEnabled(newValue)
@@ -25,7 +36,10 @@ struct SettingsView: View {
                             }
                         )
                     )
-                    .disabled(!presenceController.isLaunchAtLoginEligible)
+                    .disabled(
+                        !presenceController.isLaunchAtLoginEligible
+                            || presenceController.isChangingAppPresencePreference
+                    )
                     .accessibilityIdentifier("settings-launch-at-login-toggle")
 
                     if let explanation = presenceController.launchAtLoginExplanation {
@@ -33,6 +47,14 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("settings-launch-at-login-explanation")
+                    }
+
+                    if let error = presenceController.launchAtLoginError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings-launch-at-login-error")
                     }
                 }
             } header: {
@@ -50,6 +72,10 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 260)
+        .frame(width: 460, height: 300)
+        .task {
+            presenceController.refreshLaunchAtLoginStatus()
+            await presenceController.refreshNotificationPermissionStatus()
+        }
     }
 }

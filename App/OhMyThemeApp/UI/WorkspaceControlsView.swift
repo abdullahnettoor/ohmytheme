@@ -2,7 +2,7 @@ import SwiftUI
 import ThemeEngine
 import ThemeModel
 
-struct WorkspaceMenuView: View {
+struct WorkspaceControlsView: View {
     private struct PendingRestoreAndDisconnectAction: Identifiable {
         let targetInstanceID: TargetInstanceID
         let targetName: String
@@ -14,7 +14,7 @@ struct WorkspaceMenuView: View {
         }
     }
 
-    @ObservedObject var model: WorkspaceMenuModel
+    @ObservedObject var model: WorkspacePresentationModel
     @State private var pendingConnectionAction: PendingRestoreAndDisconnectAction?
 
     var body: some View {
@@ -27,7 +27,6 @@ struct WorkspaceMenuView: View {
                         connectionManagementSection
                     }
                     themeSection
-                    startupSection
 
                     if let plan = model.applyPlan {
                         applyPlanSection(plan)
@@ -58,7 +57,7 @@ struct WorkspaceMenuView: View {
             Divider()
             footer
         }
-        .frame(width: 380, height: 640)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .confirmationDialog(
             pendingConnectionAction?.title ?? "Manage Target",
             isPresented: Binding(
@@ -181,7 +180,7 @@ struct WorkspaceMenuView: View {
         }
     }
 
-    private func targetRow(_ target: WorkspaceMenuModel.ApplicationTarget) -> some View {
+    private func targetRow(_ target: WorkspacePresentationModel.ApplicationTarget) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: target.systemImage)
                 .font(.system(size: 14, weight: .medium))
@@ -403,7 +402,7 @@ struct WorkspaceMenuView: View {
         .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
     }
 
-    private func reportSection(_ report: WorkspaceMenuModel.PresentedReport) -> some View {
+    private func reportSection(_ report: WorkspacePresentationModel.PresentedReport) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(report.title)
@@ -463,46 +462,6 @@ struct WorkspaceMenuView: View {
         .accessibilityIdentifier("theme-apply-report")
     }
 
-    private var startupSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionHeading("Startup", detail: "Choose whether Oh My Theme opens when you log in.")
-
-            Toggle(
-                isOn: Binding(
-                    get: { model.isLaunchAtLoginSelected },
-                    set: { enabled in
-                        Task {
-                            await model.setLaunchAtLoginEnabled(enabled)
-                        }
-                    }
-                )
-            ) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Launch at Login")
-                        .font(.callout.weight(.medium))
-                    Text(model.launchAtLoginDetail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .toggleStyle(.switch)
-            .disabled(!model.canChangeLaunchAtLogin)
-            .accessibilityIdentifier("launch-at-login")
-
-            if let error = model.launchAtLoginError {
-                messageRow(
-                    title: "Couldn't change Launch at Login",
-                    detail: error,
-                    systemImage: "exclamationmark.triangle.fill",
-                    color: .red
-                )
-            }
-        }
-        .padding(14)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
-    }
-
     private var footer: some View {
         HStack(spacing: 10) {
             Button {
@@ -515,13 +474,6 @@ struct WorkspaceMenuView: View {
             .disabled(!model.canUndoLastThemeChange || model.isBusy)
             .accessibilityIdentifier("undo-last-theme-change")
 
-            Spacer()
-
-            Button("Quit") {
-                model.quit()
-            }
-            .keyboardShortcut("q")
-            .accessibilityIdentifier("quit-oh-my-theme")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -568,9 +520,9 @@ struct WorkspaceMenuView: View {
         }
     }
 
-    private func targetColor(_ state: WorkspaceMenuModel.ApplicationTarget.State) -> Color {
+    private func targetColor(_ state: WorkspacePresentationModel.ApplicationTarget.State) -> Color {
         switch state {
-        case .ready: .green
+        case .connected: .green
         case .setupNeeded: .orange
         case .unavailable: .secondary
         }
@@ -588,13 +540,12 @@ struct WorkspaceMenuView: View {
 }
 
 #Preview {
-    WorkspaceMenuView(
-        model: WorkspaceMenuModel(
+    WorkspaceControlsView(
+        model: WorkspacePresentationModel(
             runtime: FakeWorkspaceRuntime(
                 workspace: WorkspaceStore().workspace,
                 themePacks: (try? BundledThemeCatalog().load()) ?? []
-            ),
-            quitAction: {}
+            )
         )
     )
 }

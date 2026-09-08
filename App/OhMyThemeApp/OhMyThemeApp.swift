@@ -1,5 +1,5 @@
-import SwiftUI
 import PlatformClients
+import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -14,19 +14,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         presenceController?.handleReopen(hasVisibleWindows: flag) ?? true
     }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard let presenceController else { return }
+        presenceController.refreshLaunchAtLoginStatus()
+        Task {
+            await presenceController.refreshNotificationPermissionStatus()
+        }
+    }
 }
 
 @main
 struct OhMyThemeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var presenceController: AppPresenceController
-    @StateObject private var menuModel: WorkspaceMenuModel
+    @StateObject private var workspaceModel: WorkspacePresentationModel
     private let platform: ProductionAppPresencePlatform
 
     init() {
         let runtime = ProductionWorkspaceRuntime()
-        let menuModel = WorkspaceMenuModel(runtime: runtime)
-        _menuModel = StateObject(wrappedValue: menuModel)
+        let workspaceModel = WorkspacePresentationModel(runtime: runtime)
+        _workspaceModel = StateObject(wrappedValue: workspaceModel)
 
         let platform = ProductionAppPresencePlatform()
         self.platform = platform
@@ -45,11 +53,11 @@ struct OhMyThemeApp: App {
         Window("Oh My Theme", id: "main") {
             MainWindowView(
                 presenceController: presenceController,
-                model: menuModel
+                model: workspaceModel
             )
             .background(WindowBridge(platform: platform))
             .task {
-                await menuModel.start()
+                await workspaceModel.start()
             }
             .onAppear {
                 appDelegate.presenceController = presenceController
@@ -71,17 +79,43 @@ struct OhMyThemeApp: App {
     }
 }
 
-private struct WindowBridge: View {
+private struct WindowBridge: NSViewRepresentable {
     @Environment(\.openWindow) private var openWindow
     let platform: ProductionAppPresencePlatform
 
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onAppear {
-                platform.setOpenWindowAction {
-                    openWindow(id: "main")
-                }
-            }
+    func makeNSView(context: Context) -> MainWindowTrackingView {
+        configureOpenWindowAction()
+        return MainWindowTrackingView { window in
+            platform.setMainWindow(window)
+        }
+    }
+
+    func updateNSView(_ nsView: MainWindowTrackingView, context: Context) {
+        configureOpenWindowAction()
+    }
+
+    private func configureOpenWindowAction() {
+        platform.setOpenWindowAction {
+            openWindow(id: "main")
+        }
+    }
+}
+
+private final class MainWindowTrackingView: NSView {
+    private let windowDidChange: (NSWindow?) -> Void
+
+    init(windowDidChange: @escaping (NSWindow?) -> Void) {
+        self.windowDidChange = windowDidChange
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowDidChange(window)
     }
 }

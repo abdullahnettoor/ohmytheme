@@ -292,15 +292,15 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         return undoAvailabilityResult
     }
 
-    private func defaultTargets(for workspace: Workspace) -> [WorkspaceMenuModel.ApplicationTarget] {
-        var targets: [WorkspaceMenuModel.ApplicationTarget] = []
+    private func defaultTargets(for workspace: Workspace) -> [WorkspacePresentationModel.ApplicationTarget] {
+        var targets: [WorkspacePresentationModel.ApplicationTarget] = []
         for instance in workspace.connectedTargetInstances {
             targets.append(
-                WorkspaceMenuModel.ApplicationTarget(
+                WorkspacePresentationModel.ApplicationTarget(
                     id: instance.adapterID,
                     name: instance.displayName,
                     systemImage: "app",
-                    state: .ready,
+                    state: .connected,
                     summary: "Connected",
                     instanceDetails: [instance.displayName],
                     connectionOptions: []

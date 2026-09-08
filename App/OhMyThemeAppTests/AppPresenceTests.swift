@@ -47,19 +47,22 @@ final class AppPresenceTests: XCTestCase {
         let controller = makeController()
 
         XCTAssertFalse(controller.isMainWindowOpen)
-        XCTAssertEqual(platform.presentMainWindowCallCount, 0)
+        XCTAssertEqual(platform.openMainWindowCallCount, 0)
+        XCTAssertEqual(platform.focusMainWindowCallCount, 0)
 
         // Initial launch / presentation
         let handled1 = controller.handleReopen(hasVisibleWindows: false)
         XCTAssertTrue(handled1)
         XCTAssertTrue(controller.isMainWindowOpen)
-        XCTAssertEqual(platform.presentMainWindowCallCount, 1)
+        XCTAssertEqual(platform.openMainWindowCallCount, 1)
+        XCTAssertEqual(platform.focusMainWindowCallCount, 0)
 
-        // Repeated reopen does not create another window, just presents / focuses existing
+        // Repeated reopen focuses the reusable window instead of asking SwiftUI to open another one.
         let handled2 = controller.handleReopen(hasVisibleWindows: true)
         XCTAssertTrue(handled2)
         XCTAssertTrue(controller.isMainWindowOpen)
-        XCTAssertEqual(platform.presentMainWindowCallCount, 2)
+        XCTAssertEqual(platform.openMainWindowCallCount, 1)
+        XCTAssertEqual(platform.focusMainWindowCallCount, 1)
     }
 
     func testOpeningMainWindowExplicitlyActivatesAppAndPresentsWindow() {
@@ -68,7 +71,8 @@ final class AppPresenceTests: XCTestCase {
         controller.openMainWindow()
 
         XCTAssertTrue(controller.isMainWindowOpen)
-        XCTAssertEqual(platform.presentMainWindowCallCount, 1)
+        XCTAssertEqual(platform.openMainWindowCallCount, 1)
+        XCTAssertEqual(platform.focusMainWindowCallCount, 0)
         XCTAssertEqual(platform.activateAppCallCount, 1)
         XCTAssertEqual(platform.activationPolicy, .regular)
     }
@@ -87,7 +91,6 @@ final class AppPresenceTests: XCTestCase {
         controller.mainWindowDidOpen()
 
         XCTAssertTrue(controller.isMainWindowOpen)
-        XCTAssertEqual(controller.openMainWindowCount, 1)
         XCTAssertEqual(platform.activationPolicy, .regular)
         XCTAssertEqual(platform.activationPolicyChanges, [.regular])
     }
@@ -101,28 +104,8 @@ final class AppPresenceTests: XCTestCase {
         controller.mainWindowDidClose()
 
         XCTAssertFalse(controller.isMainWindowOpen)
-        XCTAssertEqual(controller.openMainWindowCount, 0)
         XCTAssertEqual(platform.activationPolicy, .accessory)
         XCTAssertEqual(platform.activationPolicyChanges, [.regular, .accessory])
-    }
-
-    func testMultipleWindowsClosingKeepsRegularUntilLastWindowCloses() {
-        let controller = makeController()
-
-        controller.mainWindowDidOpen() // Window 1
-        controller.mainWindowDidOpen() // Window 2
-        XCTAssertEqual(controller.openMainWindowCount, 2)
-        XCTAssertEqual(platform.activationPolicy, .regular)
-
-        controller.mainWindowDidClose() // Window 2 closes, 1 remains
-        XCTAssertTrue(controller.isMainWindowOpen)
-        XCTAssertEqual(controller.openMainWindowCount, 1)
-        XCTAssertEqual(platform.activationPolicy, .regular)
-
-        controller.mainWindowDidClose() // Window 1 closes
-        XCTAssertFalse(controller.isMainWindowOpen)
-        XCTAssertEqual(controller.openMainWindowCount, 0)
-        XCTAssertEqual(platform.activationPolicy, .accessory)
     }
 
     // MARK: - 3. Menu Bar Item Visibility Default & Customization
@@ -138,6 +121,14 @@ final class AppPresenceTests: XCTestCase {
 
         let visibleController = makeController(storedMenuBarVisible: true)
         XCTAssertTrue(visibleController.isMenuBarVisible)
+    }
+
+    func testStartupRestoresMenuBarWhenLaunchAtLoginIsStillActive() {
+        let controller = makeController(launchStatus: .enabled, storedMenuBarVisible: false)
+
+        XCTAssertTrue(controller.isMenuBarVisible)
+        XCTAssertTrue(defaults.bool(forKey: AppPresenceDefaultsKeys.isMenuBarVisible))
+        XCTAssertNotNil(controller.menuBarVisibilityError)
     }
 
     func testTogglingMenuBarVisibilityPersistsToDefaults() async {
@@ -181,6 +172,18 @@ final class AppPresenceTests: XCTestCase {
         XCTAssertTrue(launchAtLogin.requestedValues.contains(false))
     }
 
+    func testMenuBarRemainsVisibleWhenLaunchAtLoginCannotBeDisabled() async {
+        launchAtLogin.failure = FakeLaunchAtLoginError.denied
+        let controller = makeController(launchStatus: .enabled, storedMenuBarVisible: true)
+
+        await controller.setMenuBarVisible(false)
+
+        XCTAssertTrue(controller.isMenuBarVisible)
+        XCTAssertTrue(defaults.bool(forKey: AppPresenceDefaultsKeys.isMenuBarVisible))
+        XCTAssertEqual(controller.launchAtLoginStatus, .enabled)
+        XCTAssertNotNil(controller.menuBarVisibilityError)
+    }
+
     func testSettingLaunchAtLoginWhileIneligibleThrowsError() async {
         let controller = makeController()
         await controller.setMenuBarVisible(false)
@@ -198,6 +201,68 @@ final class AppPresenceTests: XCTestCase {
         }
     }
 
+    func testAppPresencePreferenceUpdatesAreSerialized() async {
+        launchAtLogin.status = .enabled
+        launchAtLogin.shouldSuspendNextRequest = true
+        let controller = makeController(launchStatus: .enabled)
+        let hideTask = Task { @MainActor in
+            await controller.setMenuBarVisible(false)
+        }
+        await Task.yield()
+
+        XCTAssertTrue(controller.isChangingAppPresencePreference)
+        do {
+            try await controller.setLaunchAtLoginEnabled(false)
+            XCTFail("Expected the overlapping preference update to be rejected")
+        } catch let error as AppPresenceError {
+            XCTAssertEqual(error, .preferenceUpdateInProgress)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+
+        launchAtLogin.resumePendingRequest()
+        await hideTask.value
+        XCTAssertFalse(controller.isChangingAppPresencePreference)
+        XCTAssertEqual(launchAtLogin.requestedValues, [false])
+    }
+
+    func testLaunchAtLoginCanBeEnabledAndDisabled() async throws {
+        let controller = makeController()
+
+        try await controller.setLaunchAtLoginEnabled(true)
+        XCTAssertTrue(controller.isLaunchAtLoginSelected)
+        XCTAssertEqual(launchAtLogin.requestedValues, [true])
+
+        try await controller.setLaunchAtLoginEnabled(false)
+        XCTAssertFalse(controller.isLaunchAtLoginSelected)
+        XCTAssertEqual(launchAtLogin.requestedValues, [true, false])
+    }
+
+    func testRefreshingLaunchAtLoginStatusReadsExternalChanges() {
+        let controller = makeController()
+        launchAtLogin.status = .enabled
+
+        controller.refreshLaunchAtLoginStatus()
+
+        XCTAssertTrue(controller.isLaunchAtLoginSelected)
+    }
+
+    func testLaunchAtLoginFailureKeepsCurrentStateAndShowsAnError() async {
+        launchAtLogin.failure = FakeLaunchAtLoginError.denied
+        let controller = makeController()
+
+        do {
+            try await controller.setLaunchAtLoginEnabled(true)
+            XCTFail("Expected Launch at Login to fail")
+        } catch {
+            XCTAssertEqual(controller.launchAtLoginStatus, .disabled)
+            XCTAssertEqual(
+                controller.launchAtLoginError,
+                "macOS couldn't update Launch at Login. Registration was denied. Try again."
+            )
+        }
+    }
+
     func testReenablingMenuBarRestoresLaunchAtLoginEligibility() async {
         let controller = makeController()
         await controller.setMenuBarVisible(false)
@@ -211,11 +276,32 @@ final class AppPresenceTests: XCTestCase {
     func testLaunchAtLoginRequiresApprovalPresentsExplanation() {
         let controller = makeController(launchStatus: .requiresApproval)
 
+        XCTAssertTrue(controller.isLaunchAtLoginSelected)
         XCTAssertTrue(controller.isLaunchAtLoginEligible)
         XCTAssertEqual(
             controller.launchAtLoginExplanation,
             "Launch at Login requires approval in System Settings > General > Login Items."
         )
+    }
+
+    func testUnavailableLaunchAtLoginIsIneligible() {
+        let controller = makeController(launchStatus: .unavailable)
+
+        XCTAssertFalse(controller.isLaunchAtLoginSelected)
+        XCTAssertFalse(controller.isLaunchAtLoginEligible)
+        XCTAssertEqual(
+            controller.launchAtLoginExplanation,
+            "Launch at Login is unavailable for this copy of the app."
+        )
+    }
+
+    func testRefreshingNotificationPermissionReadsThePlatform() async {
+        platform.currentNotificationPermissionStatus = .denied
+        let controller = makeController()
+
+        await controller.refreshNotificationPermissionStatus()
+
+        XCTAssertEqual(controller.notificationPermissionStatus, .denied)
     }
 
     // MARK: - 5. Workspace Health & Quitting
@@ -245,9 +331,10 @@ final class FakeAppPresencePlatform: AppPresencePlatform {
     var activationPolicy: AppActivationPolicy = .accessory
     private(set) var activationPolicyChanges: [AppActivationPolicy] = []
     private(set) var activateAppCallCount: Int = 0
-    private(set) var presentMainWindowCallCount: Int = 0
+    private(set) var openMainWindowCallCount: Int = 0
+    private(set) var focusMainWindowCallCount: Int = 0
     private(set) var terminateAppCallCount: Int = 0
-    var notificationPermissionStatus: NotificationPermissionStatus = .notDetermined
+    var currentNotificationPermissionStatus: NotificationPermissionStatus = .notDetermined
 
     func setActivationPolicy(_ policy: AppActivationPolicy) -> Bool {
         activationPolicy = policy
@@ -259,12 +346,20 @@ final class FakeAppPresencePlatform: AppPresencePlatform {
         activateAppCallCount += 1
     }
 
-    func presentMainWindow() {
-        presentMainWindowCallCount += 1
+    func openMainWindow() {
+        openMainWindowCallCount += 1
+    }
+
+    func focusMainWindow() {
+        focusMainWindowCallCount += 1
     }
 
     func terminateApp() {
         terminateAppCallCount += 1
+    }
+
+    func notificationPermissionStatus() async -> NotificationPermissionStatus {
+        currentNotificationPermissionStatus
     }
 }
 
@@ -273,6 +368,9 @@ final class FakeLaunchAtLoginPlatform: LaunchAtLoginPlatform {
     var status: LaunchAtLoginStatus
     private(set) var setEnabledCalled = false
     private(set) var requestedValues: [Bool] = []
+    var failure: (any Error)?
+    var shouldSuspendNextRequest = false
+    private var pendingContinuation: CheckedContinuation<Void, Never>?
 
     init(status: LaunchAtLoginStatus = .disabled) {
         self.status = status
@@ -281,7 +379,29 @@ final class FakeLaunchAtLoginPlatform: LaunchAtLoginPlatform {
     func setEnabled(_ enabled: Bool) async throws {
         setEnabledCalled = true
         requestedValues.append(enabled)
+        if shouldSuspendNextRequest {
+            shouldSuspendNextRequest = false
+            await withCheckedContinuation { continuation in
+                pendingContinuation = continuation
+            }
+        }
+        if let failure {
+            throw failure
+        }
         status = enabled ? .enabled : .disabled
+    }
+
+    func resumePendingRequest() {
+        pendingContinuation?.resume()
+        pendingContinuation = nil
+    }
+}
+
+private enum FakeLaunchAtLoginError: LocalizedError {
+    case denied
+
+    var errorDescription: String? {
+        "Registration was denied."
     }
 }
 

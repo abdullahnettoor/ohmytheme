@@ -27,7 +27,7 @@ protocol WorkspaceRuntime: AnyObject {
 
 struct WorkspaceTargetSnapshot: Equatable {
     let workspace: Workspace
-    let targets: [WorkspaceMenuModel.ApplicationTarget]
+    let targets: [WorkspacePresentationModel.ApplicationTarget]
 }
 
 struct WorkspaceConnectionResult: Equatable {

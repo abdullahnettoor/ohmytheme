@@ -1,6 +1,6 @@
 import Foundation
-import SwiftUI
 import PlatformClients
+import SwiftUI
 import ThemeEngine
 import ThemeModel
 
@@ -10,11 +10,14 @@ enum AppPresenceDefaultsKeys {
 
 enum AppPresenceError: LocalizedError, Equatable {
     case launchAtLoginIneligible(String)
+    case preferenceUpdateInProgress
 
     var errorDescription: String? {
         switch self {
         case .launchAtLoginIneligible(let reason):
             return reason
+        case .preferenceUpdateInProgress:
+            return "Another app preference is still being updated."
         }
     }
 }
@@ -29,13 +32,15 @@ final class AppPresenceController: ObservableObject {
     private let defaults: AppPresenceDefaults
     private let runtime: (any WorkspaceRuntime)?
 
-    @Published private(set) var isMainWindowOpen: Bool = false
-    @Published private(set) var openMainWindowCount: Int = 0
+    @Published private(set) var isMainWindowOpen = false
     @Published private(set) var isMenuBarVisible: Bool
-    @Published private(set) var isLaunchAtLoginEligible: Bool = true
+    @Published private(set) var isLaunchAtLoginEligible = true
     @Published private(set) var launchAtLoginStatus: LaunchAtLoginStatus
     @Published private(set) var launchAtLoginExplanation: String?
-    @Published private(set) var notificationPermissionStatus: NotificationPermissionStatus
+    @Published private(set) var launchAtLoginError: String?
+    @Published private(set) var menuBarVisibilityError: String?
+    @Published private(set) var notificationPermissionStatus: NotificationPermissionStatus = .notDetermined
+    @Published private(set) var isChangingAppPresencePreference = false
 
     var isMenuBarVisibleBinding: Binding<Bool> {
         Binding(
@@ -59,12 +64,20 @@ final class AppPresenceController: ObservableObject {
         self.defaults = defaults
         self.runtime = runtime
         self.launchAtLoginStatus = launchAtLoginPlatform.status
-        self.notificationPermissionStatus = platform.notificationPermissionStatus
 
         if defaults.object(forKey: AppPresenceDefaultsKeys.isMenuBarVisible) != nil {
             self.isMenuBarVisible = defaults.bool(forKey: AppPresenceDefaultsKeys.isMenuBarVisible)
         } else {
             self.isMenuBarVisible = true
+        }
+
+        if !self.isMenuBarVisible,
+            launchAtLoginStatus == .enabled || launchAtLoginStatus == .requiresApproval
+        {
+            self.isMenuBarVisible = true
+            defaults.set(true, forKey: AppPresenceDefaultsKeys.isMenuBarVisible)
+            self.menuBarVisibilityError =
+                "The menu bar item was restored because Launch at Login is active. Turn off Launch at Login before hiding it."
         }
 
         updateLaunchAtLoginEligibility()
@@ -78,6 +91,10 @@ final class AppPresenceController: ObservableObject {
         platform.activationPolicy
     }
 
+    var isLaunchAtLoginSelected: Bool {
+        launchAtLoginStatus == .enabled || launchAtLoginStatus == .requiresApproval
+    }
+
     var workspaceHealth: String {
         if runtime?.persistenceError != nil {
             return "My Mac: Recovery storage unavailable"
@@ -87,61 +104,100 @@ final class AppPresenceController: ObservableObject {
 
     // MARK: - Window Lifecycle
     func mainWindowDidOpen() {
-        openMainWindowCount += 1
         isMainWindowOpen = true
+        refreshLaunchAtLoginStatus()
         platform.setActivationPolicy(.regular)
         platform.activateApp()
     }
 
     func mainWindowDidClose() {
-        openMainWindowCount = max(0, openMainWindowCount - 1)
-        if openMainWindowCount == 0 {
-            isMainWindowOpen = false
-            platform.setActivationPolicy(.accessory)
-        }
+        isMainWindowOpen = false
+        platform.setActivationPolicy(.accessory)
     }
 
     func openMainWindow() {
-        platform.presentMainWindow()
-        if !isMainWindowOpen {
+        if isMainWindowOpen {
+            platform.focusMainWindow()
+        } else {
+            platform.openMainWindow()
             isMainWindowOpen = true
-            platform.setActivationPolicy(.regular)
-            platform.activateApp()
         }
+        platform.setActivationPolicy(.regular)
+        platform.activateApp()
     }
 
     @discardableResult
     func handleReopen(hasVisibleWindows: Bool) -> Bool {
+        if hasVisibleWindows {
+            isMainWindowOpen = true
+        }
         openMainWindow()
         return true
     }
 
     // MARK: - Menu Bar Visibility
     func setMenuBarVisible(_ visible: Bool) async {
+        guard !isChangingAppPresencePreference else { return }
+        isChangingAppPresencePreference = true
+        menuBarVisibilityError = nil
+        defer { isChangingAppPresencePreference = false }
+
+        if !visible,
+            launchAtLoginPlatform.status == .enabled || launchAtLoginPlatform.status == .requiresApproval
+        {
+            do {
+                try await launchAtLoginPlatform.setEnabled(false)
+                refreshLaunchAtLoginStatus()
+            } catch {
+                refreshLaunchAtLoginStatus()
+                menuBarVisibilityError =
+                    "Oh My Theme couldn't hide the menu bar item because macOS couldn't disable Launch at Login. \(error.localizedDescription)"
+                return
+            }
+
+            guard launchAtLoginStatus == .disabled else {
+                menuBarVisibilityError =
+                    "Oh My Theme couldn't hide the menu bar item because Launch at Login is still active. Try again."
+                return
+            }
+        }
+
         isMenuBarVisible = visible
         defaults.set(visible, forKey: AppPresenceDefaultsKeys.isMenuBarVisible)
 
-        if !visible {
-            if launchAtLoginPlatform.status == .enabled || launchAtLoginPlatform.status == .requiresApproval {
-                try? await launchAtLoginPlatform.setEnabled(false)
-                refreshLaunchAtLoginStatus()
-            }
-            updateLaunchAtLoginEligibility()
-        } else {
+        if visible {
             MenuBarPresence.clearHiddenStatusItemPreferences(in: defaults)
-            updateLaunchAtLoginEligibility()
         }
+        updateLaunchAtLoginEligibility()
     }
 
     // MARK: - Launch at Login
     func setLaunchAtLoginEnabled(_ enabled: Bool) async throws {
+        guard !isChangingAppPresencePreference else {
+            throw AppPresenceError.preferenceUpdateInProgress
+        }
+        isChangingAppPresencePreference = true
+        launchAtLoginError = nil
+        defer { isChangingAppPresencePreference = false }
+
         guard isLaunchAtLoginEligible else {
             throw AppPresenceError.launchAtLoginIneligible(
                 launchAtLoginExplanation ?? Self.launchAtLoginDisabledExplanation
             )
         }
-        try await launchAtLoginPlatform.setEnabled(enabled)
-        refreshLaunchAtLoginStatus()
+        do {
+            try await launchAtLoginPlatform.setEnabled(enabled)
+            refreshLaunchAtLoginStatus()
+        } catch {
+            refreshLaunchAtLoginStatus()
+            launchAtLoginError =
+                "macOS couldn't update Launch at Login. \(error.localizedDescription) Try again."
+            throw error
+        }
+    }
+
+    func refreshNotificationPermissionStatus() async {
+        notificationPermissionStatus = await platform.notificationPermissionStatus()
     }
 
     func refreshLaunchAtLoginStatus() {
@@ -153,10 +209,14 @@ final class AppPresenceController: ObservableObject {
         if !isMenuBarVisible {
             isLaunchAtLoginEligible = false
             launchAtLoginExplanation = Self.launchAtLoginDisabledExplanation
+        } else if launchAtLoginStatus == .unavailable {
+            isLaunchAtLoginEligible = false
+            launchAtLoginExplanation = "Launch at Login is unavailable for this copy of the app."
         } else {
             isLaunchAtLoginEligible = true
             if launchAtLoginStatus == .requiresApproval {
-                launchAtLoginExplanation = "Launch at Login requires approval in System Settings > General > Login Items."
+                launchAtLoginExplanation =
+                    "Launch at Login requires approval in System Settings > General > Login Items."
             } else {
                 launchAtLoginExplanation = nil
             }

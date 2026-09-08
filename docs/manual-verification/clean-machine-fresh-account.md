@@ -41,15 +41,15 @@ APP="$HOME/Applications/OhMyTheme.app"
 open "$APP"
 ```
 
-- [ ] Confirm the app appears only in the menu bar.
-- [ ] Confirm no Dock icon and no ordinary app window appears.
-- [ ] Open the menu and confirm the Workspace name is `My Mac`.
-- [ ] Confirm Launch at Login is off.
+- [ ] Confirm one main window opens and the Dock icon is visible.
+- [ ] Confirm the sidebar contains Overview, Themes, and Apps.
+- [ ] Confirm Overview identifies the Workspace as `My Mac` and the menu bar item is present.
+- [ ] Open Settings and confirm Launch at Login is off.
 - [ ] Confirm no Apply Report exists on first launch.
-- [ ] Confirm the target rows are macOS, Ghostty, Visual Studio Code, and Starship.
+- [ ] Confirm the Target rows are macOS, Ghostty, Visual Studio Code, and Starship.
 - [ ] Confirm the macOS row gives the number of discovered displays and says wallpaper stays unchanged.
 - [ ] Confirm the Theme Variant picker lists `Catppuccin Mocha` as upstream and `Oh My Theme Aurora` as generated.
-- [ ] Confirm neither variant preview lists a wallpaper change.
+- [ ] Confirm neither Theme Variant's Apply Plan lists a wallpaper change.
 
 ## 4. Review and connect each Target
 
@@ -110,9 +110,9 @@ This case starts with System Appearance already connected, so a later denial app
    /usr/bin/tccutil reset AppleEvents com.ohmytheme.OhMyTheme
    ```
 
-3. Select `Oh My Theme Aurora`, then select `Preview workspace change`.
+3. Select `Oh My Theme Aurora`, then select `Prepare Apply Plan`.
 4. When macOS asks whether Oh My Theme may control System Events, choose `Don't Allow`.
-5. Confirm the preview identifies an Automation permission need for System Appearance and still contains ready plans for independent Targets.
+5. Confirm the Apply Plan identifies an Automation permission need for System Appearance and still contains plans for independent Targets that are ready to apply.
 6. Select `Apply to ready Targets`.
 7. Confirm the report title is `Theme applied with remaining work`.
 8. Confirm the System Appearance group contains `Appearance`, `Permission required`, no reach line, and `No rollback needed`.
@@ -123,7 +123,7 @@ This case starts with System Appearance already connected, so a later denial app
 13. Confirm every wallpaper on every observed display and Space is unchanged.
 14. Select `Undo Last Theme Change`. Confirm the successful Ghostty, VS Code, and Starship changes return to their pre-apply state while the unchanged Appearance outcome needs no rollback.
 15. Complete the required Ghostty reload and Starship next-prompt checks for that Undo.
-16. In System Settings, grant Automation access before the full-switch sequence. Reopen the menu and prepare a new preview so it does not reuse the denied preview.
+16. In System Settings, grant Automation access before the full-switch sequence. Reopen the main window and prepare a new Apply Plan so it does not reuse the denied plan.
 
 If any successful Target is rolled back only because Appearance was denied, or if Appearance says `Already set`, `Failed`, or `Current windows`, mark this check failed.
 

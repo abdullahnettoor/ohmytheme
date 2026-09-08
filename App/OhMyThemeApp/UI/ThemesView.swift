@@ -2,7 +2,7 @@ import SwiftUI
 import ThemeModel
 
 struct ThemesView: View {
-    @ObservedObject var model: WorkspaceMenuModel
+    @ObservedObject var model: WorkspacePresentationModel
 
     var body: some View {
         ScrollView {
