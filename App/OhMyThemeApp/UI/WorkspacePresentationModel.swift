@@ -10,6 +10,7 @@ final class WorkspacePresentationModel: ObservableObject {
         case undo
         case connection
         case disconnect
+        case setup
     }
 
     struct ApplicationTarget: Equatable, Identifiable {
@@ -136,6 +137,7 @@ final class WorkspacePresentationModel: ObservableObject {
             case .undo: "Latest Undo Result"
             case .connection: "Latest Connection Result"
             case .disconnect: "Latest Disconnect Result"
+            case .setup: "Latest Setup Report"
             }
         }
     }
@@ -172,6 +174,10 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var setupPlan: SetupPlan?
     @Published private(set) var setupPlanInvalidationReason: String?
     @Published private(set) var isPreparingSetupPlan = false
+    @Published private(set) var setupProgress: SetupProgress?
+    @Published private(set) var isExecutingSetup = false
+    @Published private(set) var isCancellingRemainingSetup = false
+    @Published private(set) var latestSetupReport: SetupReport?
 
     @Published private(set) var report: PresentedReport?
     @Published private(set) var canUndoLastThemeChange = false
@@ -251,6 +257,10 @@ final class WorkspacePresentationModel: ObservableObject {
 
     var isSetupPlanInvalidated: Bool {
         setupPlanInvalidationReason != nil
+    }
+
+    var canRetryRemainingSetup: Bool {
+        latestSetupReport != nil && hasUnresolvedOptedInTargets && !isBusy
     }
 
     var selectedThemeVariantID: String? { desiredThemePresentation.variantID }
@@ -356,12 +366,12 @@ final class WorkspacePresentationModel: ObservableObject {
         await revalidateSetupPlan()
     }
 
-    func prepareSetupPlan() async {
+    func prepareSetupPlan(retrySourceOperationID: UUID? = nil) async {
         isPreparingSetupPlan = true
         operationError = nil
         defer { isPreparingSetupPlan = false }
         do {
-            setupPlan = try await runtime.prepareSetupPlan()
+            setupPlan = try await runtime.prepareSetupPlan(retrySourceOperationID: retrySourceOperationID)
             setupPlanInvalidationReason = nil
         } catch {
             operationError = Self.describe(error)
@@ -372,6 +382,7 @@ final class WorkspacePresentationModel: ObservableObject {
     func dismissSetupPlan() {
         setupPlan = nil
         setupPlanInvalidationReason = nil
+        setupProgress = nil
     }
 
     func revalidateSetupPlan() async {
@@ -387,6 +398,65 @@ final class WorkspacePresentationModel: ObservableObject {
         await revalidateSetupPlan()
         guard !isSetupPlanInvalidated else { return false }
         return true
+    }
+
+    func retryRemainingSetup() async {
+        guard !isBusy,
+            hasUnresolvedOptedInTargets,
+            let latestSetupReport
+        else { return }
+        await prepareSetupPlan(retrySourceOperationID: latestSetupReport.operationID)
+    }
+
+    func cancelRemainingSetup() async {
+        guard isExecutingSetup,
+            !isCancellingRemainingSetup,
+            let operationID = setupProgress?.operationID
+        else { return }
+        isCancellingRemainingSetup = true
+        defer { isCancellingRemainingSetup = false }
+        do {
+            try await runtime.cancelRemainingSetup(operationID: operationID)
+        } catch {
+            operationError = Self.describe(error)
+        }
+    }
+
+    @discardableResult
+    func executeSetupPlan() async throws -> SetupReport? {
+        guard let plan = setupPlan else { return nil }
+        await revalidateSetupPlan()
+        guard !isSetupPlanInvalidated else { return nil }
+        guard !isBusy else { return nil }
+
+        isExecutingSetup = true
+        isBusy = true
+        operationError = nil
+        defer {
+            isExecutingSetup = false
+            isBusy = false
+        }
+
+        do {
+            let result = try await runtime.executeSetupPlan(plan) { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.setupProgress = progress
+                }
+            }
+            replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+            setupPlan = nil
+            setupPlanInvalidationReason = nil
+            setupProgress = nil
+            latestSetupReport = result.report
+            report = present(outcomes: result.report.outcomes, kind: .setup)
+            return result.report
+        } catch {
+            if case ProductionWorkspaceRuntimeError.setupPlanInvalidated(let reason) = error {
+                setupPlanInvalidationReason = reason
+            }
+            operationError = Self.describe(error)
+            throw error
+        }
     }
 
     func selectThemeVariant(_ variantID: String?) {
@@ -516,6 +586,11 @@ final class WorkspacePresentationModel: ObservableObject {
         case (.disconnect, true, false): title = "Target restored and disconnected"
         case (.disconnect, true, true): title = "Target disconnected with remaining work"
         case (.disconnect, false, _): title = "Target not disconnected"
+        case (.setup, true, false) where hasUpdate: title = "Setup complete"
+        case (.setup, true, true) where hasUpdate: title = "Setup complete with remaining work"
+        case (.setup, true, false): title = "Apps already configured"
+        case (.setup, true, true): title = "Setup unchanged with remaining work"
+        case (.setup, false, _): title = "Setup not completed"
         }
         return PresentedReport(kind: kind, title: title, groups: groups)
     }
@@ -658,6 +733,12 @@ final class WorkspacePresentationModel: ObservableObject {
             String(describing: error)
         }
     }
+
+    #if DEBUG
+    func setBusyForTesting(_ busy: Bool) {
+        self.isBusy = busy
+    }
+    #endif
 
     struct BundledThemeVariant: Equatable, Identifiable {
         let preview: ThemePreviewData

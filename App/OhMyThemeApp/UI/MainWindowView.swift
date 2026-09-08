@@ -46,6 +46,14 @@ struct MainWindowView: View {
             }
         }
         .frame(minWidth: 700, idealWidth: 800, minHeight: 480, idealHeight: 560)
+        .sheet(
+            item: Binding(
+                get: { model.setupPlan },
+                set: { if $0 == nil { model.dismissSetupPlan() } }
+            )
+        ) { plan in
+            SetupPlanReviewView(model: model, plan: plan)
+        }
         .onAppear {
             presenceController.mainWindowDidOpen()
         }

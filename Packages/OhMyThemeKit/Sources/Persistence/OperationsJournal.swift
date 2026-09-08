@@ -8,6 +8,7 @@ public enum OperationKind: String, Codable, Sendable {
     case restore
     case disconnect
     case undo
+    case setup
 }
 
 public enum OperationState: String, Codable, Sendable {
@@ -38,6 +39,7 @@ public struct JournaledOperation: Codable, Equatable, Sendable, Identifiable {
     public var state: OperationState
     public let workspaceID: WorkspaceID
     public let variantID: String?
+    public let parentOperationID: UUID?
     public let createdAt: Date
 
     public init(
@@ -46,6 +48,7 @@ public struct JournaledOperation: Codable, Equatable, Sendable, Identifiable {
         state: OperationState,
         workspaceID: WorkspaceID,
         variantID: String?,
+        parentOperationID: UUID? = nil,
         createdAt: Date
     ) {
         self.id = id
@@ -53,6 +56,7 @@ public struct JournaledOperation: Codable, Equatable, Sendable, Identifiable {
         self.state = state
         self.workspaceID = workspaceID
         self.variantID = variantID
+        self.parentOperationID = parentOperationID
         self.createdAt = createdAt
     }
 }
@@ -126,7 +130,8 @@ extension PersistenceStore {
     public func journalStartOperation(
         kind: OperationKind,
         workspaceID: WorkspaceID,
-        variantID: String? = nil
+        variantID: String? = nil,
+        parentOperationID: UUID? = nil
     ) throws -> JournaledOperation {
         let operation = JournaledOperation(
             id: UUID(),
@@ -134,13 +139,14 @@ extension PersistenceStore {
             state: .prepared,
             workspaceID: workspaceID,
             variantID: variantID,
+            parentOperationID: parentOperationID,
             createdAt: Date()
         )
         try withWrite { database in
             try database.execute(
                 sql: """
-                    INSERT INTO operations (id, kind, state, workspace_id, variant_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO operations (id, kind, state, workspace_id, variant_id, parent_operation_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     operation.id.uuidString,
@@ -148,6 +154,7 @@ extension PersistenceStore {
                     operation.state.rawValue,
                     operation.workspaceID.rawValue,
                     operation.variantID,
+                    operation.parentOperationID?.uuidString,
                     operation.createdAt.timeIntervalSince1970,
                 ]
             )
@@ -202,7 +209,7 @@ extension PersistenceStore {
                 let row = try Row.fetchOne(
                     database,
                     sql: """
-                        SELECT id, kind, state, workspace_id, variant_id, created_at
+                        SELECT id, kind, state, workspace_id, variant_id, parent_operation_id, created_at
                         FROM operations WHERE id = ?
                         """,
                     arguments: [id.uuidString]
@@ -222,7 +229,7 @@ extension PersistenceStore {
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.created_at
+                    SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.parent_operation_id, o.created_at
                     FROM operations o
                     WHERE o.kind = 'apply'
                       AND o.state IN ('applied', 'reconciled')
@@ -263,7 +270,7 @@ extension PersistenceStore {
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT id, kind, state, workspace_id, variant_id, created_at
+                    SELECT id, kind, state, workspace_id, variant_id, parent_operation_id, created_at
                     FROM operations WHERE state IN ('prepared', 'applying')
                     ORDER BY created_at
                     """
@@ -395,7 +402,7 @@ extension PersistenceStore {
         guard let id = UUID(uuidString: idString) else {
             throw PersistenceError.invalidAssignment
         }
-        let created: Double = row["created_at"]
+
         let kindString: String = row["kind"]
         let stateString: String = row["state"]
         guard let kind = OperationKind(rawValue: kindString),
@@ -403,13 +410,23 @@ extension PersistenceStore {
         else {
             throw PersistenceError.invalidAssignment
         }
+        let parentOperationID: UUID?
+        if let parentID: String = row["parent_operation_id"] {
+            guard let parsedID = UUID(uuidString: parentID) else {
+                throw PersistenceError.invalidAssignment
+            }
+            parentOperationID = parsedID
+        } else {
+            parentOperationID = nil
+        }
         return JournaledOperation(
             id: id,
             kind: kind,
             state: state,
             workspaceID: WorkspaceID(rawValue: row["workspace_id"]),
             variantID: row["variant_id"],
-            createdAt: Date(timeIntervalSince1970: created)
+            parentOperationID: parentOperationID,
+            createdAt: Date(timeIntervalSince1970: row["created_at"])
         )
     }
 

@@ -27,6 +27,22 @@ public struct DurableApplyReport: Codable, Equatable, Sendable {
     }
 }
 
+public struct SetupReport: Codable, Equatable, Sendable {
+    public let operationID: UUID
+    public let retrySourceOperationID: UUID?
+    public let outcomes: [TargetCapabilityOutcome]
+
+    public init(
+        operationID: UUID,
+        retrySourceOperationID: UUID? = nil,
+        outcomes: [TargetCapabilityOutcome]
+    ) {
+        self.operationID = operationID
+        self.retrySourceOperationID = retrySourceOperationID
+        self.outcomes = outcomes
+    }
+}
+
 // MARK: - Errors
 
 public enum DurableOperationError: Error, Equatable, Sendable {
@@ -68,7 +84,8 @@ extension ThemeEngine {
 
     public func prepareSetup(
         workspace: Workspace,
-        instances: [ConnectedTargetInstance]
+        instances: [ConnectedTargetInstance],
+        retrySourceOperationID: UUID? = nil
     ) async throws -> SetupPlan {
         let orderedInstances = WorkspaceTargetOrder.ordered(instances)
         var targetPlans: [ConnectionPlan] = []
@@ -180,7 +197,7 @@ extension ThemeEngine {
             targetPlans: targetPlans
         )
 
-        return SetupPlan(
+        let plan = SetupPlan(
             id: UUID(),
             workspaceID: workspace.id,
             targetInstanceIDs: orderedInstances.map(\.id),
@@ -194,8 +211,11 @@ extension ThemeEngine {
             recoveryBehavior:
                 "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
             discoveryAndSelectionDigest: digest,
-            sharedEffects: sharedEffectResult.effects
+            sharedEffects: sharedEffectResult.effects,
+            retrySourceOperationID: retrySourceOperationID
         )
+        self.setupPlansInFlight[plan.id] = plan
+        return plan
     }
 
     private static func deriveSharedEffects(
@@ -368,6 +388,593 @@ extension ThemeEngine {
 }
 
 extension ThemeEngine {
+    // MARK: - Setup Transaction
+
+    public func executeSetup(
+        planID: UUID,
+        workspace: Workspace,
+        instances: [ConnectedTargetInstance] = [],
+        onProgress: (@Sendable (SetupProgress) -> Void)? = nil
+    ) async throws -> SetupReport {
+        guard let plan = setupPlansInFlight.removeValue(forKey: planID) else {
+            throw ThemeEngineError.planNotFound(planID)
+        }
+        return try await executeSetup(plan: plan, workspace: workspace, instances: instances, onProgress: onProgress)
+    }
+
+    public func executeSetup(
+        plan: SetupPlan,
+        workspace: Workspace,
+        instances: [ConnectedTargetInstance] = [],
+        onProgress: (@Sendable (SetupProgress) -> Void)? = nil
+    ) async throws -> SetupReport {
+        guard let persistence = self.persistenceStore else {
+            throw DurableOperationError.persistenceRequired
+        }
+        try await ensureNoOperationInProgress()
+        try reserveOperationStart()
+        var trackingStarted = false
+        defer {
+            if !trackingStarted {
+                releaseOperationStart()
+            }
+        }
+        try await reconcileInterruptedOperations()
+
+        guard plan.workspaceID == workspace.id else {
+            throw ThemeEngineError.planWorkspaceChanged(plan.id)
+        }
+
+        setupPlansInFlight.removeValue(forKey: plan.id)
+
+        let operation = try persistence.journalStartOperation(
+            kind: .setup,
+            workspaceID: workspace.id,
+            variantID: nil,
+            parentOperationID: plan.retrySourceOperationID
+        )
+        try await beginOperationTracking(operation)
+        trackingStarted = true
+        defer { try? closeOperationTracking(operation.id) }
+
+        var instanceMap: [TargetInstanceID: ConnectedTargetInstance] = [:]
+        for instance in instances {
+            instanceMap[instance.id] = instance
+        }
+        for instance in workspace.connectedTargetInstances {
+            if instanceMap[instance.id] == nil {
+                instanceMap[instance.id] = instance
+            }
+        }
+
+        var planReferences: [TargetInstanceID: ContentReference] = [:]
+        var baselineWasPreviouslyStored: [TargetInstanceID: Bool] = [:]
+
+        let originalPlansByID = Dictionary(uniqueKeysWithValues: plan.targetPlans.map { ($0.targetInstanceID, $0) })
+        let failuresByID = Dictionary(uniqueKeysWithValues: plan.preparationFailures.map { ($0.targetInstanceID, $0) })
+
+        // Persist every reviewed Connection Plan before the first external mutation.
+        // Deferred baselines are added to this target's journal record immediately
+        // before it executes, after the progress UI discloses the permission request.
+        for (ordinal, targetID) in plan.targetInstanceIDs.enumerated() {
+            if let targetPlan = originalPlansByID[targetID] {
+                let reference = try persistence.journalStorePlanPayload(
+                    JSONEncoder().encode(targetPlan),
+                    ownerID: "setup.\(operation.id.uuidString).\(targetID.rawValue)"
+                )
+                planReferences[targetID] = reference
+                baselineWasPreviouslyStored[targetID] =
+                    try persistence.journalLoadConnectionBaseline(
+                        targetInstanceID: targetID
+                    ) != nil
+
+                let preparedRecord = JournaledRecord(
+                    operationID: operation.id,
+                    targetInstanceID: targetID,
+                    ordinal: ordinal,
+                    adapterID: targetPlan.adapterID,
+                    adapterVersion: targetPlan.adapterVersion,
+                    capabilityID: "connection",
+                    phase: .prepared,
+                    intendedChangeDigest: targetPlan.intendedChangeDigest,
+                    staleStateToken: targetPlan.staleStateToken,
+                    planDigest: reference.digest,
+                    receiptJSON: nil,
+                    detail: nil
+                )
+                if targetPlan.baselineCaptureTiming == .immediatelyBeforeExecution {
+                    try persistence.saveConnectionPreparation(record: preparedRecord)
+                } else {
+                    try persistence.saveConnectionPreparation(
+                        record: preparedRecord,
+                        baseline: targetPlan.capturedPreChangeState
+                    )
+                }
+            } else if let failure = failuresByID[targetID] {
+                try persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operation.id,
+                        targetInstanceID: targetID,
+                        ordinal: ordinal,
+                        adapterID: failure.adapterID,
+                        adapterVersion: "n/a",
+                        capabilityID: "connection",
+                        phase: .failed,
+                        intendedChangeDigest: "n/a",
+                        staleStateToken: nil,
+                        planDigest: nil,
+                        receiptJSON: nil,
+                        detail: failure.detail
+                    )
+                )
+            }
+        }
+
+        try await checkAndConsumeCancellation(operation.id)
+
+        try persistence.journalTransitionState(operationID: operation.id, to: .applying)
+
+        var steps: [SetupProgress.TargetStep] = []
+        for targetID in plan.targetInstanceIDs {
+            let displayName = instanceMap[targetID]?.displayName ?? targetID.rawValue
+            if let targetPlan = originalPlansByID[targetID] {
+                steps.append(
+                    SetupProgress.TargetStep(
+                        targetInstanceID: targetID,
+                        displayName: displayName,
+                        adapterID: targetPlan.adapterID,
+                        status: .waiting
+                    )
+                )
+            } else if let failure = failuresByID[targetID] {
+                steps.append(
+                    SetupProgress.TargetStep(
+                        targetInstanceID: targetID,
+                        displayName: displayName,
+                        adapterID: failure.adapterID,
+                        status: .failed(detail: failure.detail)
+                    )
+                )
+            }
+        }
+        var currentProgress = SetupProgress(
+            operationID: operation.id,
+            steps: steps,
+            currentTargetID: nil
+        )
+        onProgress?(currentProgress)
+
+        var outcomes: [TargetCapabilityOutcome] = []
+        var anyMutated = false
+        var cancellationRequested = false
+
+        setupLoop: for (ordinal, targetID) in plan.targetInstanceIDs.enumerated() {
+            if consumeSetupCancellation(operation.id) {
+                cancellationRequested = true
+                break setupLoop
+            }
+            currentProgress.currentTargetID = targetID
+
+            if let failure = failuresByID[targetID] {
+                outcomes.append(
+                    TargetCapabilityOutcome(
+                        targetInstanceID: targetID,
+                        adapterID: failure.adapterID,
+                        capabilityID: "connection",
+                        sourceType: .unavailable,
+                        sourceRevision: "n/a",
+                        configurationState: .failed,
+                        runningInstanceReach: .unavailable,
+                        detail: failure.detail
+                    )
+                )
+                continue
+            }
+
+            guard let targetPlan = originalPlansByID[targetID] else {
+                continue
+            }
+
+            let instance =
+                instanceMap[targetID]
+                ?? ConnectedTargetInstance(
+                    id: targetID,
+                    displayName: targetID.rawValue,
+                    adapterID: targetPlan.adapterID
+                )
+
+            guard let adapter = self.connectionAdapter(for: targetPlan.adapterID) else {
+                let failureOutcome = TargetCapabilityOutcome(
+                    targetInstanceID: targetID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .unavailable,
+                    runningInstanceReach: .unavailable,
+                    detail: "The adapter is unavailable or does not support connect."
+                )
+                outcomes.append(failureOutcome)
+                try persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operation.id,
+                        targetInstanceID: targetID,
+                        ordinal: ordinal,
+                        adapterID: targetPlan.adapterID,
+                        adapterVersion: targetPlan.adapterVersion,
+                        capabilityID: "connection",
+                        phase: .failed,
+                        intendedChangeDigest: targetPlan.intendedChangeDigest,
+                        staleStateToken: targetPlan.staleStateToken,
+                        planDigest: planReferences[targetID]?.digest,
+                        receiptJSON: nil,
+                        detail: failureOutcome.detail
+                    )
+                )
+                currentProgress.steps[ordinal].status = .failed(detail: failureOutcome.detail ?? "Adapter unavailable")
+                onProgress?(currentProgress)
+                continue
+            }
+
+            if !targetPlan.requiredPermissions.isEmpty {
+                currentProgress.steps[ordinal].status = .configuring
+                currentProgress.steps[ordinal].currentAction =
+                    "Waiting for permission: \(targetPlan.requiredPermissions.joined(separator: ", "))"
+            } else {
+                currentProgress.steps[ordinal].status = .configuring
+                currentProgress.steps[ordinal].currentAction = "Configuring..."
+            }
+            onProgress?(currentProgress)
+            if targetPlan.baselineCaptureTiming == .immediatelyBeforeExecution {
+                await Task.yield()
+            }
+
+            var executionPlan = targetPlan
+            if targetPlan.baselineCaptureTiming == .immediatelyBeforeExecution {
+                guard let capturingAdapter = adapter as? any DeferredConnectionBaselineCapturing else {
+                    let detail = "The adapter cannot capture its deferred Connection Baseline."
+                    try persistence.journalSaveRecord(
+                        JournaledRecord(
+                            operationID: operation.id,
+                            targetInstanceID: targetID,
+                            ordinal: ordinal,
+                            adapterID: adapter.id,
+                            adapterVersion: adapter.version,
+                            capabilityID: "connection",
+                            phase: .failed,
+                            intendedChangeDigest: targetPlan.intendedChangeDigest,
+                            staleStateToken: targetPlan.staleStateToken,
+                            planDigest: planReferences[targetID]?.digest,
+                            receiptJSON: nil,
+                            detail: detail
+                        )
+                    )
+                    outcomes.append(
+                        TargetCapabilityOutcome(
+                            targetInstanceID: targetID,
+                            adapterID: adapter.id,
+                            capabilityID: "connection",
+                            sourceType: .unavailable,
+                            sourceRevision: "n/a",
+                            configurationState: .failed,
+                            runningInstanceReach: .unavailable,
+                            detail: detail
+                        )
+                    )
+                    currentProgress.steps[ordinal].status = .failed(detail: detail)
+                    currentProgress.steps[ordinal].currentAction = nil
+                    onProgress?(currentProgress)
+                    continue
+                }
+
+                do {
+                    let capture = try await capturingAdapter.captureConnectionBaseline(for: targetPlan)
+                    executionPlan = targetPlan.recordingExecutionBaseline(capture)
+                    let hadStoredBaseline = baselineWasPreviouslyStored[targetID] ?? false
+                    executionPlan = executionPlan.recordingStoredBaseline(hadStoredBaseline)
+                    let reference = try persistence.journalStorePlanPayload(
+                        JSONEncoder().encode(executionPlan),
+                        ownerID: "setup.\(operation.id.uuidString).\(targetID.rawValue)"
+                    )
+                    planReferences[targetID] = reference
+                    try persistence.saveConnectionPreparation(
+                        record: JournaledRecord(
+                            operationID: operation.id,
+                            targetInstanceID: targetID,
+                            ordinal: ordinal,
+                            adapterID: executionPlan.adapterID,
+                            adapterVersion: executionPlan.adapterVersion,
+                            capabilityID: "connection",
+                            phase: .prepared,
+                            intendedChangeDigest: executionPlan.intendedChangeDigest,
+                            staleStateToken: executionPlan.staleStateToken,
+                            planDigest: reference.digest,
+                            receiptJSON: nil,
+                            detail: nil
+                        ),
+                        baseline: executionPlan.capturedPreChangeState
+                    )
+                } catch {
+                    let failure = Self.capabilityOutcome(
+                        for: error,
+                        fallbackState: .failed,
+                        fallbackDetail: "Execution preparation failed: \(error)"
+                    )
+                    try persistence.journalSaveRecord(
+                        JournaledRecord(
+                            operationID: operation.id,
+                            targetInstanceID: targetID,
+                            ordinal: ordinal,
+                            adapterID: adapter.id,
+                            adapterVersion: adapter.version,
+                            capabilityID: "connection",
+                            phase: .failed,
+                            intendedChangeDigest: targetPlan.intendedChangeDigest,
+                            staleStateToken: targetPlan.staleStateToken,
+                            planDigest: planReferences[targetID]?.digest,
+                            receiptJSON: nil,
+                            detail: failure.detail
+                        )
+                    )
+                    outcomes.append(
+                        TargetCapabilityOutcome(
+                            targetInstanceID: targetID,
+                            adapterID: adapter.id,
+                            capabilityID: "connection",
+                            sourceType: .unavailable,
+                            sourceRevision: "n/a",
+                            configurationState: failure.configurationState,
+                            runningInstanceReach: failure.activationReach,
+                            detail: failure.detail,
+                            userActions: failure.configurationState == .permissionRequired
+                                ? Self.permissionActions(
+                                    setupNeeds: targetPlan.userActions,
+                                    requiredPermissions: targetPlan.requiredPermissions
+                                )
+                                : []
+                        )
+                    )
+                    currentProgress.steps[ordinal].status =
+                        failure.configurationState == .permissionRequired
+                        ? .needsPermission(detail: failure.detail)
+                        : .failed(detail: failure.detail)
+                    currentProgress.steps[ordinal].currentAction = nil
+                    onProgress?(currentProgress)
+                    continue
+                }
+            } else {
+                executionPlan = executionPlan.recordingStoredBaseline(
+                    baselineWasPreviouslyStored[targetID] ?? false
+                )
+            }
+
+            if executionPlan.requiresApproval, let approvingAdapter = adapter as? any ReviewedConnectionApproving {
+                executionPlan = try await approvingAdapter.approveReviewedConnection(executionPlan)
+            } else if executionPlan.requiresApproval {
+                executionPlan = executionPlan.approvingReviewedSetup()
+            }
+            let executionPlanReference = try persistence.journalStorePlanPayload(
+                JSONEncoder().encode(executionPlan),
+                ownerID: "setup.\(operation.id.uuidString).\(targetID.rawValue)"
+            )
+            planReferences[targetID] = executionPlanReference
+            try persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operation.id,
+                    targetInstanceID: targetID,
+                    ordinal: ordinal,
+                    adapterID: executionPlan.adapterID,
+                    adapterVersion: executionPlan.adapterVersion,
+                    capabilityID: "connection",
+                    phase: .prepared,
+                    intendedChangeDigest: executionPlan.intendedChangeDigest,
+                    staleStateToken: executionPlan.staleStateToken,
+                    planDigest: executionPlanReference.digest,
+                    receiptJSON: nil,
+                    detail: nil
+                )
+            )
+
+            if !anyMutated {
+                await markMutationBegun(operation.id)
+                anyMutated = true
+            }
+
+            try persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operation.id,
+                    targetInstanceID: targetID,
+                    ordinal: ordinal,
+                    adapterID: adapter.id,
+                    adapterVersion: adapter.version,
+                    capabilityID: "connection",
+                    phase: .applying,
+                    intendedChangeDigest: executionPlan.intendedChangeDigest,
+                    staleStateToken: executionPlan.staleStateToken,
+                    planDigest: planReferences[targetID]?.digest,
+                    receiptJSON: nil,
+                    detail: nil
+                )
+            )
+
+            do {
+                let receipt = try await adapter.connect(executionPlan)
+                let receiptJSON = try encodeReceipt(receipt)
+                let appliedRecord = JournaledRecord(
+                    operationID: operation.id,
+                    targetInstanceID: targetID,
+                    ordinal: ordinal,
+                    adapterID: adapter.id,
+                    adapterVersion: adapter.version,
+                    capabilityID: "connection",
+                    phase: .applied,
+                    intendedChangeDigest: executionPlan.intendedChangeDigest,
+                    staleStateToken: executionPlan.staleStateToken,
+                    planDigest: planReferences[targetID]?.digest,
+                    receiptJSON: receiptJSON,
+                    detail: receipt.detail
+                )
+                try persistence.recordSetupConnectionReceipt(
+                    record: appliedRecord,
+                    instance: instance,
+                    workspace: workspace
+                )
+                let outcome = TargetCapabilityOutcome(
+                    targetInstanceID: targetID,
+                    adapterID: adapter.id,
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: receipt.configurationState,
+                    runningInstanceReach: receipt.runningInstanceReach,
+                    detail: receipt.detail,
+                    userActions: Self.activationActions(
+                        for: receipt.runningInstanceReach,
+                        adapterID: adapter.id
+                    )
+                )
+                outcomes.append(outcome)
+                if receipt.configurationState == .unchanged {
+                    currentProgress.steps[ordinal].status = .unchanged(
+                        detail: receipt.detail ?? "Target configuration unchanged")
+                } else {
+                    currentProgress.steps[ordinal].status = .connected(reach: receipt.runningInstanceReach)
+                }
+                currentProgress.steps[ordinal].currentAction = nil
+                onProgress?(currentProgress)
+            } catch {
+                let mutationNotStarted = error is any ConnectionMutationNotStartedError
+                let failureOutcome = Self.capabilityOutcome(
+                    for: error,
+                    fallbackState: mutationNotStarted ? .conflicted : .failed
+                )
+                if mutationNotStarted {
+                    try removeNewConnectionBaseline(for: executionPlan, persistence: persistence)
+                }
+                let recoveryRequired = error is any MutationRecoveryRequiredError
+                try persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operation.id,
+                        targetInstanceID: targetID,
+                        ordinal: ordinal,
+                        adapterID: adapter.id,
+                        adapterVersion: adapter.version,
+                        capabilityID: "connection",
+                        phase: recoveryRequired ? .applying : .failed,
+                        intendedChangeDigest: executionPlan.intendedChangeDigest,
+                        staleStateToken: executionPlan.staleStateToken,
+                        planDigest: planReferences[targetID]?.digest,
+                        receiptJSON: nil,
+                        detail: failureOutcome.detail
+                    )
+                )
+                let outcome = TargetCapabilityOutcome(
+                    targetInstanceID: targetID,
+                    adapterID: adapter.id,
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: failureOutcome.configurationState,
+                    runningInstanceReach: failureOutcome.activationReach,
+                    detail: failureOutcome.detail,
+                    rollbackState: recoveryRequired
+                        ? .recoveryRequired
+                        : mutationNotStarted ? .blocked : .notNeeded,
+                    userActions: recoveryRequired
+                        ? [Self.recoveryRequiredAction]
+                        : failureOutcome.configurationState == .permissionRequired
+                            ? Self.permissionActions(
+                                setupNeeds: targetPlan.userActions,
+                                requiredPermissions: targetPlan.requiredPermissions
+                            )
+                            : mutationNotStarted ? [Self.reviewExternalChangeAction] : []
+                )
+                outcomes.append(outcome)
+                let detailString = failureOutcome.detail
+                if recoveryRequired {
+                    currentProgress.steps[ordinal].status = .recoveryRequired(detail: detailString)
+                } else if failureOutcome.configurationState == .permissionRequired {
+                    currentProgress.steps[ordinal].status = .needsPermission(detail: detailString)
+                } else if mutationNotStarted {
+                    currentProgress.steps[ordinal].status = .conflict(detail: detailString)
+                } else {
+                    currentProgress.steps[ordinal].status = .failed(detail: detailString)
+                }
+                currentProgress.steps[ordinal].currentAction = nil
+                onProgress?(currentProgress)
+            }
+        }
+
+        if cancellationRequested {
+            let completedTargetIDs = Set(outcomes.map(\.targetInstanceID))
+            for (ordinal, targetID) in plan.targetInstanceIDs.enumerated() where !completedTargetIDs.contains(targetID)
+            {
+                if let failure = failuresByID[targetID] {
+                    outcomes.append(
+                        TargetCapabilityOutcome(
+                            targetInstanceID: targetID,
+                            adapterID: failure.adapterID,
+                            capabilityID: "connection",
+                            sourceType: .unavailable,
+                            sourceRevision: "n/a",
+                            configurationState: .failed,
+                            runningInstanceReach: .unavailable,
+                            detail: failure.detail
+                        )
+                    )
+                    continue
+                }
+                guard let targetPlan = originalPlansByID[targetID] else { continue }
+                let detail = "Skipped after Cancel Remaining."
+                try persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operation.id,
+                        targetInstanceID: targetID,
+                        ordinal: ordinal,
+                        adapterID: targetPlan.adapterID,
+                        adapterVersion: targetPlan.adapterVersion,
+                        capabilityID: "connection",
+                        phase: .skipped,
+                        intendedChangeDigest: targetPlan.intendedChangeDigest,
+                        staleStateToken: targetPlan.staleStateToken,
+                        planDigest: planReferences[targetID]?.digest,
+                        receiptJSON: nil,
+                        detail: detail
+                    )
+                )
+                outcomes.append(
+                    TargetCapabilityOutcome(
+                        targetInstanceID: targetID,
+                        adapterID: targetPlan.adapterID,
+                        capabilityID: "connection",
+                        sourceType: .unavailable,
+                        sourceRevision: "n/a",
+                        configurationState: .unchanged,
+                        runningInstanceReach: .unavailable,
+                        detail: detail
+                    )
+                )
+                currentProgress.steps[ordinal].status = .unchanged(detail: detail)
+            }
+            try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
+        }
+
+        currentProgress.currentTargetID = nil
+        onProgress?(currentProgress)
+
+        let records = try persistence.journalLoadRecords(operationID: operation.id)
+        if !cancellationRequested && !records.contains(where: { $0.phase == .applying }) {
+            let allFailed = records.allSatisfy { $0.phase == .failed }
+            try persistence.journalTransitionState(operationID: operation.id, to: allFailed ? .failed : .applied)
+        }
+
+        return SetupReport(
+            operationID: operation.id,
+            retrySourceOperationID: plan.retrySourceOperationID,
+            outcomes: outcomes
+        )
+    }
+
     // MARK: Connect
 
     public func prepareConnection(
@@ -1403,6 +2010,23 @@ extension ThemeEngine {
 
     // MARK: Cancellation
 
+    /// Requests that a running Setup Transaction stop before its next target boundary.
+    /// The current adapter call always completes and any untouched targets are recorded as skipped.
+    public func cancelRemainingSetup(operationID: UUID) async throws -> Bool {
+        guard let persistence = self.persistenceStore else {
+            throw DurableOperationError.persistenceRequired
+        }
+        guard currentOperationID == operationID,
+            let operation = try persistence.journalLoadOperation(id: operationID),
+            operation.kind == .setup,
+            operation.state == .applying
+        else {
+            throw DurableOperationError.cancellationRefused
+        }
+        recordCancellationRequest(operationID)
+        return true
+    }
+
     /// Request cancellation of an in-flight operation. Only permitted before the first mutation.
     public func cancel(operationID: UUID) async throws -> Bool {
         guard let persistence = self.persistenceStore else {
@@ -1809,7 +2433,9 @@ extension ThemeEngine {
                         persistence: persistence
                     )
                     recoveredReceiptJSON = try recoveredAdapterReceipt.map(encodeReceipt)
-                } else if operation.kind == .connect, classification == .intendedAfterChange {
+                } else if (operation.kind == .connect || operation.kind == .setup),
+                    classification == .intendedAfterChange
+                {
                     recoveredAdapterReceipt = nil
                     recoveredReceiptJSON = try await recoverConnectionReceipt(
                         record: record,
@@ -1821,10 +2447,16 @@ extension ThemeEngine {
                 }
                 if operation.kind == .connect, classification == .intendedAfterChange {
                     reconciledConnectionState = (record.targetInstanceID, true)
+                } else if operation.kind == .setup, classification == .intendedAfterChange {
+                    try persistence.recordRecoveredSetupConnection(
+                        targetInstanceID: record.targetInstanceID,
+                        adapterID: record.adapterID,
+                        workspaceID: operation.workspaceID
+                    )
                 } else if operation.kind == .disconnect, classification == .intendedAfterChange {
                     reconciledConnectionState = (record.targetInstanceID, false)
                 }
-                if operation.kind == .connect, classification == .beforeChange {
+                if (operation.kind == .connect || operation.kind == .setup), classification == .beforeChange {
                     try removeNewConnectionBaseline(
                         for: record,
                         persistence: persistence
@@ -1875,7 +2507,7 @@ extension ThemeEngine {
                     reconciledConnectionState = (intendedRecord.targetInstanceID, true)
                 case .disconnect:
                     reconciledConnectionState = (intendedRecord.targetInstanceID, false)
-                case .apply, .undo, .restore:
+                case .apply, .undo, .restore, .setup:
                     break
                 }
             }
@@ -2019,7 +2651,7 @@ extension ThemeEngine {
         }
         let bytes = try persistence.journalLoadContent(digest: digest)
         switch operationKind {
-        case .connect:
+        case .connect, .setup:
             if let adapter = self.connectionAdapter(for: record.adapterID),
                 let plan = try? JSONDecoder().decode(ConnectionPlan.self, from: bytes)
             {
@@ -2221,10 +2853,22 @@ extension ThemeEngine {
         }
     }
 
+    fileprivate func reserveOperationStart() throws {
+        if currentOperationID != nil || isStartingOperation {
+            throw DurableOperationError.operationInProgress
+        }
+        isStartingOperation = true
+    }
+
+    fileprivate func releaseOperationStart() {
+        isStartingOperation = false
+    }
+
     fileprivate func beginOperationTracking(_ operation: JournaledOperation) async throws {
         if self.currentOperationID != nil {
             throw DurableOperationError.operationInProgress
         }
+        isStartingOperation = false
         self.currentOperationID = operation.id
         self.mutationBegun.remove(operation.id)
     }
@@ -2246,6 +2890,10 @@ extension ThemeEngine {
             self.pendingCancellations.remove(operationID)
             throw DurableOperationError.cancellationRefused
         }
+    }
+
+    fileprivate func consumeSetupCancellation(_ operationID: UUID) -> Bool {
+        pendingCancellations.remove(operationID) != nil
     }
 
     fileprivate func markMutationBegun(_ operationID: UUID) async {

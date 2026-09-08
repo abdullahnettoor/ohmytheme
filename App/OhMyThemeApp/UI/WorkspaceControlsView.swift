@@ -499,6 +499,16 @@ struct WorkspaceControlsView: View {
                     }
                 }
             }
+
+            if report.kind == .setup, model.canRetryRemainingSetup {
+                Button("Retry Remaining") {
+                    Task {
+                        await model.retryRemainingSetup()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("retry-remaining-setup-button")
+            }
         }
         .padding(14)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))

@@ -121,6 +121,8 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
     public let recoveryBehavior: String
     public let discoveryAndSelectionDigest: String
     public let sharedEffects: [SetupSharedEffect]
+    /// The completed Setup Transaction whose unresolved targets this fresh plan retries.
+    public let retrySourceOperationID: UUID?
 
     public init(
         id: UUID = UUID(),
@@ -136,7 +138,8 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
         recoveryBehavior: String =
             "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
         discoveryAndSelectionDigest: String,
-        sharedEffects: [SetupSharedEffect] = []
+        sharedEffects: [SetupSharedEffect] = [],
+        retrySourceOperationID: UUID? = nil
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -151,6 +154,7 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
         self.recoveryBehavior = recoveryBehavior
         self.discoveryAndSelectionDigest = discoveryAndSelectionDigest
         self.sharedEffects = sharedEffects
+        self.retrySourceOperationID = retrySourceOperationID
     }
 
     public var requiresApproval: Bool {
@@ -167,5 +171,90 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
 
     public var isFullyReady: Bool {
         preparationFailures.isEmpty && hasReadyTargets
+    }
+}
+
+/// Progress and live state of a Setup Transaction across its selected target instances.
+public struct SetupProgress: Codable, Equatable, Sendable {
+    public enum StepStatus: Codable, Equatable, Sendable {
+        case waiting
+        case configuring
+        case needsPermission(detail: String)
+        case needsAction(detail: String)
+        case connected(reach: ActivationReach)
+        case unchanged(detail: String)
+        case conflict(detail: String)
+        case failed(detail: String)
+        case recoveryRequired(detail: String)
+    }
+
+    public struct TargetStep: Codable, Equatable, Identifiable, Sendable {
+        public var id: TargetInstanceID { targetInstanceID }
+        public let targetInstanceID: TargetInstanceID
+        public let displayName: String
+        public let adapterID: String
+        public var status: StepStatus
+        public var currentAction: String?
+
+        public init(
+            targetInstanceID: TargetInstanceID,
+            displayName: String,
+            adapterID: String,
+            status: StepStatus = .waiting,
+            currentAction: String? = nil
+        ) {
+            self.targetInstanceID = targetInstanceID
+            self.displayName = displayName
+            self.adapterID = adapterID
+            self.status = status
+            self.currentAction = currentAction
+        }
+    }
+
+    public let operationID: UUID
+    public var steps: [TargetStep]
+    public var currentTargetID: TargetInstanceID?
+
+    public init(
+        operationID: UUID,
+        steps: [TargetStep],
+        currentTargetID: TargetInstanceID? = nil
+    ) {
+        self.operationID = operationID
+        self.steps = steps
+        self.currentTargetID = currentTargetID
+    }
+
+    public var completedCount: Int {
+        steps.filter { step in
+            switch step.status {
+            case .waiting, .configuring:
+                return false
+            case .needsPermission, .needsAction, .connected, .unchanged, .conflict, .failed, .recoveryRequired:
+                return true
+            }
+        }.count
+    }
+
+    public var totalCount: Int {
+        steps.count
+    }
+
+    public var fractionCompleted: Double {
+        totalCount == 0 ? 1.0 : Double(completedCount) / Double(totalCount)
+    }
+
+    public var isComplete: Bool {
+        completedCount == totalCount && totalCount > 0
+    }
+
+    public var activeStepName: String? {
+        guard let currentTargetID else { return nil }
+        return steps.first(where: { $0.targetInstanceID == currentTargetID })?.displayName
+    }
+
+    public var currentAction: String? {
+        guard let currentTargetID else { return nil }
+        return steps.first(where: { $0.targetInstanceID == currentTargetID })?.currentAction
     }
 }

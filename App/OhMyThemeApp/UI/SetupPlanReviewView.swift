@@ -18,6 +18,10 @@ struct SetupPlanReviewView: View {
                         invalidationBanner(reason: invalidationReason)
                     }
 
+                    if let progress = model.setupProgress {
+                        progressBanner(progress: progress)
+                    }
+
                     executionOrderSection
 
                     if !plan.sharedEffects.isEmpty {
@@ -40,7 +44,9 @@ struct SetupPlanReviewView: View {
             await model.revalidateSetupPlan()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                await model.revalidateSetupPlan()
+                if !model.isExecutingSetup {
+                    await model.revalidateSetupPlan()
+                }
             }
         }
     }
@@ -152,7 +158,9 @@ struct SetupPlanReviewView: View {
 
                             Spacer()
 
-                            if failure != nil {
+                            if let step = model.setupProgress?.steps.first(where: { $0.targetInstanceID == targetID }) {
+                                stepBadge(status: step.status)
+                            } else if failure != nil {
                                 Label("Preparation Failed", systemImage: "xmark.circle.fill")
                                     .font(.caption2.weight(.semibold))
                                     .foregroundStyle(.red)
@@ -379,28 +387,146 @@ struct SetupPlanReviewView: View {
 
             Spacer()
 
-            if model.isSetupPlanInvalidated {
+            if model.isExecutingSetup {
+                Button(model.isCancellingRemainingSetup ? "Cancelling Remaining..." : "Cancel Remaining") {
+                    Task {
+                        await model.cancelRemainingSetup()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isCancellingRemainingSetup)
+                .accessibilityIdentifier("cancel-remaining-setup-button")
+            } else if model.isSetupPlanInvalidated {
                 Button("Update Plan") {
                     Task {
                         await model.prepareSetupPlan()
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(model.isExecutingSetup || model.isBusy)
                 .accessibilityIdentifier("revalidate-setup-plan-button")
             } else {
-                Button("Configure Selected Apps") {
+                Button(model.isExecutingSetup ? "Configuring Apps..." : "Configure Selected Apps") {
                     Task {
                         let isValid = await model.confirmSetupPlan()
                         guard isValid else { return }
-                        // Issue #32 handles execution of durable Setup Transaction
+                        do {
+                            _ = try await model.executeSetupPlan()
+                        } catch {
+                            // Captured on model.operationError
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!plan.hasReadyTargets || model.isSetupPlanInvalidated)
+                .disabled(
+                    !plan.hasReadyTargets || model.isSetupPlanInvalidated || model.isExecutingSetup || model.isBusy
+                )
                 .accessibilityIdentifier("confirm-setup-plan-button")
             }
         }
         .padding(18)
+    }
+
+    private func progressBanner(progress: SetupProgress) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(progress.isComplete ? "Setup Complete" : "Configuring Apps...")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(progress.completedCount) of \(progress.totalCount)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: progress.fractionCompleted)
+            if !progress.isComplete {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(
+                        progress.currentAction ?? progress.activeStepName.map { "Configuring \($0)..." }
+                            ?? "Preparing..."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("setup-progress-banner")
+    }
+
+    @ViewBuilder
+    private func stepBadge(status: SetupProgress.StepStatus) -> some View {
+        switch status {
+        case .waiting:
+            Label("Waiting", systemImage: "clock")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+        case .configuring:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Configuring")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.accentColor.opacity(0.12), in: Capsule())
+        case .connected:
+            Label("Connected", systemImage: "checkmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.green)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.1), in: Capsule())
+        case .unchanged:
+            Label("Unchanged", systemImage: "checkmark.circle")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.blue)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.blue.opacity(0.1), in: Capsule())
+        case .needsPermission:
+            Label("Permission Needed", systemImage: "lock.shield.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange.opacity(0.12), in: Capsule())
+        case .needsAction:
+            Label("Action Required", systemImage: "hand.tap.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange.opacity(0.12), in: Capsule())
+        case .conflict:
+            Label("Conflict", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.yellow)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.yellow.opacity(0.15), in: Capsule())
+        case .failed:
+            Label("Failed", systemImage: "xmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.red)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.red.opacity(0.1), in: Capsule())
+        case .recoveryRequired:
+            Label("Recovery Required", systemImage: "shield.slash.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.red)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.red.opacity(0.12), in: Capsule())
+        }
     }
 
     private func userActionRow(_ action: UserAction) -> some View {

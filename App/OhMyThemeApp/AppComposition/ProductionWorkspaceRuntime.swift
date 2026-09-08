@@ -294,7 +294,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         return discovery
     }
 
-    func prepareSetupPlan() async throws -> SetupPlan {
+    func prepareSetupPlan(retrySourceOperationID: UUID? = nil) async throws -> SetupPlan {
         let themeEngine = try requiredThemeEngine()
         let discovery = await discoverAndRememberTargets()
         let snapshot = makeSnapshot(discovery: discovery)
@@ -332,7 +332,8 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
         return try await themeEngine.prepareSetup(
             workspace: workspace,
-            instances: instancesToPrepare
+            instances: instancesToPrepare,
+            retrySourceOperationID: retrySourceOperationID
         )
     }
 
@@ -363,6 +364,64 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             workspace: workspace,
             currentInstances: currentInstances,
             availableTargetInstanceIDs: Set(candidates.keys)
+        )
+    }
+
+    func cancelRemainingSetup(operationID: UUID) async throws {
+        try await requiredThemeEngine().cancelRemainingSetup(operationID: operationID)
+    }
+
+    func executeSetupPlan(
+        _ plan: SetupPlan,
+        onProgress: (@Sendable (SetupProgress) -> Void)?
+    ) async throws -> WorkspaceSetupResult {
+        let validation = await validateSetupPlanPreconditions(plan)
+        if case .invalidated(let reason) = validation {
+            throw ProductionWorkspaceRuntimeError.setupPlanInvalidated(reason)
+        }
+        let themeEngine = try requiredThemeEngine()
+        let discovery = await currentOrDiscoveredTargets()
+        let snapshot = makeSnapshot(discovery: discovery)
+        let snapshotItems = Dictionary(
+            uniqueKeysWithValues: snapshot.targets.flatMap(\.instances).map { ($0.id, $0) }
+        )
+
+        var instancesToExecute: [ConnectedTargetInstance] = []
+        for optionID in plan.targetInstanceIDs {
+            if let candidate = candidates[optionID] {
+                if let installation = candidate.vscodeInstallation {
+                    await themeEngine.register(adapter: try makeVSCodeAdapter(for: installation))
+                }
+                instancesToExecute.append(candidate.instance)
+            } else if let item = snapshotItems[optionID] {
+                instancesToExecute.append(
+                    ConnectedTargetInstance(
+                        id: item.id,
+                        displayName: item.displayName,
+                        adapterID: item.adapterID
+                    )
+                )
+            } else {
+                instancesToExecute.append(
+                    ConnectedTargetInstance(
+                        id: optionID,
+                        displayName: optionID.rawValue,
+                        adapterID: "unknown"
+                    )
+                )
+            }
+        }
+
+        let report = try await themeEngine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: instancesToExecute,
+            onProgress: onProgress
+        )
+        let refreshedDiscovery = await discoverAndRememberTargets()
+        return WorkspaceSetupResult(
+            snapshot: makeSnapshot(discovery: refreshedDiscovery),
+            report: report
         )
     }
 
@@ -1342,6 +1401,7 @@ enum ProductionWorkspaceRuntimeError: Error, Equatable {
     case targetNotOptedIn(TargetInstanceID)
     case engineUnavailable(String)
     case cannotOptOutConnectedTarget(TargetInstanceID)
+    case setupPlanInvalidated(String)
 }
 
 private extension String {

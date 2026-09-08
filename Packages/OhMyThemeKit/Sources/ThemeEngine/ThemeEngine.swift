@@ -392,9 +392,11 @@ public actor ThemeEngine {
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
     internal let persistenceForOperations: PersistenceStore?
     internal var plansInFlight: [UUID: ApplyPlan] = [:]
+    internal var setupPlansInFlight: [UUID: SetupPlan] = [:]
 
     private var isApplying = false
     internal var currentOperationID: UUID?
+    internal var isStartingOperation = false
     internal var pendingCancellations: Set<UUID> = []
     internal var mutationBegun: Set<UUID> = []
 

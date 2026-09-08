@@ -20,8 +20,13 @@ protocol WorkspaceRuntime: AnyObject {
     func restoreAndDisconnect(
         targetInstanceID: TargetInstanceID
     ) async throws -> WorkspaceConnectionResult
-    func prepareSetupPlan() async throws -> SetupPlan
+    func prepareSetupPlan(retrySourceOperationID: UUID?) async throws -> SetupPlan
     func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation
+    func cancelRemainingSetup(operationID: UUID) async throws
+    func executeSetupPlan(
+        _ plan: SetupPlan,
+        onProgress: (@Sendable (SetupProgress) -> Void)?
+    ) async throws -> WorkspaceSetupResult
     func prepareApplyPlan() async throws -> ApplyPlan
     func apply(planID: UUID) async throws -> DurableApplyReport
     func undoLast() async throws -> UndoReport
@@ -45,4 +50,9 @@ struct WorkspaceTargetSnapshot: Equatable {
 struct WorkspaceConnectionResult: Equatable {
     let snapshot: WorkspaceTargetSnapshot
     let report: ConnectionReport
+}
+
+struct WorkspaceSetupResult: Equatable {
+    let snapshot: WorkspaceTargetSnapshot
+    let report: SetupReport
 }

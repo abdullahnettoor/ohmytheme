@@ -23,6 +23,10 @@ struct AppsView: View {
                         }
                     }
                 }
+
+                if let report = model.report, report.kind == .setup {
+                    setupReportSection(report)
+                }
             }
             .padding(24)
         }
@@ -37,14 +41,43 @@ struct AppsView: View {
                 try await model.refreshTargets()
             }
         }
-        .sheet(
-            item: Binding(
-                get: { model.setupPlan },
-                set: { if $0 == nil { model.dismissSetupPlan() } }
-            )
-        ) { plan in
-            SetupPlanReviewView(model: model, plan: plan)
+    }
+
+    private func setupReportSection(_ report: WorkspacePresentationModel.PresentedReport) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(report.sectionTitle)
+                .font(.headline)
+            Text(report.title)
+                .font(.subheadline.weight(.semibold))
+            ForEach(report.groups) { group in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(group.targetName)
+                        .font(.caption.weight(.semibold))
+                    ForEach(Array(group.outcomes.enumerated()), id: \.offset) { _, outcome in
+                        Text("\(outcome.capability): \(outcome.configuration)")
+                            .font(.caption)
+                            .foregroundStyle(outcome.isProblem ? .orange : .secondary)
+                        if let detail = outcome.detail {
+                            Text(detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            if model.canRetryRemainingSetup {
+                Button("Retry Remaining") {
+                    Task {
+                        await model.retryRemainingSetup()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("retry-remaining-setup-button")
+            }
         }
+        .padding(14)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityIdentifier("setup-report")
     }
 
     private var header: some View {

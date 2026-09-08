@@ -27,6 +27,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var setupPlanToReturn: SetupPlan?
     var setupPlanError: (any Error)?
     var setupPlanValidationResult: SetupPlanPreconditionValidation = .valid
+    var executeSetupPlanResult: WorkspaceSetupResult?
+    var executeSetupPlanError: (any Error)?
+    private(set) var executeSetupPlanCalls: [SetupPlan] = []
 
     var prepareApplyPlanResult: ApplyPlan?
     var prepareApplyPlanError: (any Error)?
@@ -46,7 +49,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     private(set) var connectCalls = 0
     private(set) var disconnectCalls = 0
     private(set) var prepareSetupPlanCalls = 0
+    private(set) var prepareSetupPlanRetrySources: [UUID?] = []
     private(set) var validateSetupPlanCalls = 0
+    private(set) var cancelRemainingSetupOperationIDs: [UUID] = []
     private(set) var prepareCalls = 0
     private(set) var applyCalls: [UUID] = []
     private(set) var undoCalls = 0
@@ -198,8 +203,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         )
     }
 
-    func prepareSetupPlan() async throws -> SetupPlan {
+    func prepareSetupPlan(retrySourceOperationID: UUID? = nil) async throws -> SetupPlan {
         prepareSetupPlanCalls += 1
+        prepareSetupPlanRetrySources.append(retrySourceOperationID)
         if let setupPlanError {
             throw setupPlanError
         }
@@ -211,7 +217,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             workspaceID: workspace.id,
             targetInstanceIDs: Array(unresolvedIDs),
             targetPlans: [],
-            discoveryAndSelectionDigest: "fake-digest"
+            discoveryAndSelectionDigest: "fake-digest",
+            retrySourceOperationID: retrySourceOperationID
         )
     }
 
@@ -222,6 +229,64 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             return .invalidated(reason: "Target Opt-ins changed since the plan was prepared.")
         }
         return setupPlanValidationResult
+    }
+
+    func cancelRemainingSetup(operationID: UUID) async throws {
+        cancelRemainingSetupOperationIDs.append(operationID)
+    }
+
+    func executeSetupPlan(
+        _ plan: SetupPlan,
+        onProgress: (@Sendable (SetupProgress) -> Void)? = nil
+    ) async throws -> WorkspaceSetupResult {
+        executeSetupPlanCalls.append(plan)
+        if let executeSetupPlanError {
+            throw executeSetupPlanError
+        }
+        if let executeSetupPlanResult {
+            return executeSetupPlanResult
+        }
+        var newConnected = workspace.connectedTargetInstances
+        var outcomes: [TargetCapabilityOutcome] = []
+        for targetID in plan.targetInstanceIDs {
+            let instance = ConnectedTargetInstance(
+                id: targetID,
+                displayName: targetID.rawValue,
+                adapterID: "recording"
+            )
+            if !newConnected.contains(where: { $0.id == targetID }) {
+                newConnected.append(instance)
+            }
+            outcomes.append(
+                TargetCapabilityOutcome(
+                    targetInstanceID: targetID,
+                    adapterID: "recording",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Connected via setup."
+                )
+            )
+        }
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: newConnected,
+            targetOptIns: workspace.targetOptIns.union(plan.targetInstanceIDs),
+            themeAssignment: workspace.themeAssignment
+        )
+        return WorkspaceSetupResult(
+            snapshot: WorkspaceTargetSnapshot(
+                workspace: workspace,
+                targets: defaultTargets(for: workspace)
+            ),
+            report: SetupReport(
+                operationID: UUID(),
+                outcomes: outcomes
+            )
+        )
     }
 
     func prepareApplyPlan() async throws -> ApplyPlan {

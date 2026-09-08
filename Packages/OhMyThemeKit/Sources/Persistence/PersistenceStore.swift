@@ -174,6 +174,17 @@ public final class PersistenceStore: @unchecked Sendable {
                         """)
             }
         }
+        migrator.registerMigration("add-operation-parent") { database in
+            guard try database.tableExists("operations") else { return }
+            let hasParentOperationID = try database.columns(in: "operations").contains {
+                $0.name == "parent_operation_id"
+            }
+            if !hasParentOperationID {
+                try database.alter(table: "operations") { table in
+                    table.add(column: "parent_operation_id", .text)
+                }
+            }
+        }
         try migrator.migrate(database)
     }
 
@@ -185,6 +196,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("state", .text).notNull()
                 table.column("workspace_id", .text).notNull()
                 table.column("variant_id", .text)
+                table.column("parent_operation_id", .text)
                 table.column("created_at", .double).notNull()
             }
         }
@@ -518,6 +530,62 @@ public final class PersistenceStore: @unchecked Sendable {
             }
         }
         didCommit(.connectionFinalized)
+    }
+
+    public func recordSetupConnectionReceipt(
+        record: JournaledRecord,
+        instance: ConnectedTargetInstance,
+        workspace: Workspace
+    ) throws {
+        try database.write { database in
+            try Self.save(record, in: database)
+            try Self.upsertWorkspace(workspace, in: database)
+            try Self.insert(
+                PersistedTargetInstance(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: true,
+                    isOptedIn: true
+                ),
+                workspaceID: workspace.id,
+                in: database
+            )
+            if try database.tableExists("target_opt_ins") {
+                try database.execute(
+                    sql: "INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id) VALUES (?, ?)",
+                    arguments: [workspace.id.rawValue, instance.id.rawValue]
+                )
+            }
+        }
+        didCommit(.targetMembershipSaved)
+    }
+
+    public func recordRecoveredSetupConnection(
+        targetInstanceID: TargetInstanceID,
+        adapterID: String,
+        workspaceID: WorkspaceID
+    ) throws {
+        try database.write { database in
+            try Self.insert(
+                PersistedTargetInstance(
+                    id: targetInstanceID,
+                    displayName: targetInstanceID.rawValue,
+                    adapterID: adapterID,
+                    isConnected: true,
+                    isOptedIn: true
+                ),
+                workspaceID: workspaceID,
+                in: database
+            )
+            if try database.tableExists("target_opt_ins") {
+                try database.execute(
+                    sql: "INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id) VALUES (?, ?)",
+                    arguments: [workspaceID.rawValue, targetInstanceID.rawValue]
+                )
+            }
+        }
+        didCommit(.targetMembershipSaved)
     }
 
     public func transitionOperation(

@@ -27,7 +27,7 @@ public struct InterruptionRequested: Error, Equatable, Sendable {
 /// It maintains an in-process "world state" that stands in for real user configuration.
 /// Tests can force an interruption at every named transition point and verify that
 /// the durable journal accurately classifies the resulting state.
-public actor RecordingWritableAdapter: WritableThemeAdapter {
+public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionBaselineCapturing {
     public let id: String
     public let version = "1"
     public let payloadVersion = "1"
@@ -36,10 +36,13 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
     private let reportsUnchangedForSameBytes: Bool
     private var interruptions: Set<InterruptionPoint> = []
     private var connectedInstances: Set<TargetInstanceID> = []
+    private var beforeConnectHook: (@Sendable (ConnectionPlan) async throws -> Void)? = nil
     private let configuredReach: ActivationReach
     private let configuredSideEffects: [String]
     private let configuredPermissions: [String]
     private let configuredSharedSetupEffects: [ConnectionSharedSetupEffect]
+    private let baselineCaptureTiming: ConnectionBaselineCaptureTiming
+    private let deniesDeferredBaselineCapture: Bool
 
     public init(
         id: String = "recording",
@@ -48,7 +51,9 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
         activationReach: ActivationReach = .currentInstances,
         expectedSideEffects: [String] = ["recording-world:include"],
         requiredPermissions: [String] = [],
-        sharedSetupEffects: [ConnectionSharedSetupEffect] = []
+        sharedSetupEffects: [ConnectionSharedSetupEffect] = [],
+        baselineCaptureTiming: ConnectionBaselineCaptureTiming = .duringPlanPreparation,
+        deniesDeferredBaselineCapture: Bool = false
     ) {
         self.id = id
         self.worldState = WorldState(bytes: initialWorld, revision: "rev-0")
@@ -57,6 +62,12 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
         self.configuredSideEffects = expectedSideEffects
         self.configuredPermissions = requiredPermissions
         self.configuredSharedSetupEffects = sharedSetupEffects
+        self.baselineCaptureTiming = baselineCaptureTiming
+        self.deniesDeferredBaselineCapture = deniesDeferredBaselineCapture
+    }
+
+    public func setBeforeConnectHook(_ hook: (@Sendable (ConnectionPlan) async throws -> Void)?) {
+        self.beforeConnectHook = hook
     }
 
     public func setInterruption(_ point: InterruptionPoint, enabled: Bool) {
@@ -154,19 +165,36 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             targetInstanceID: instance.id,
             adapterID: id,
             adapterVersion: version,
-            capturedPreChangeState: worldState.bytes,
+            capturedPreChangeState: baselineCaptureTiming == .duringPlanPreparation ? worldState.bytes : Data(),
             intendedChangeDigest: "connect.\(instance.id.rawValue)",
-            staleStateToken: worldState.revision,
+            staleStateToken: baselineCaptureTiming == .duringPlanPreparation ? worldState.revision : nil,
             expectedSideEffects: configuredSideEffects,
             requiredPermissions: configuredPermissions,
             activationReach: configuredReach,
             ownershipDetail: ownership,
-            sharedSetupEffects: configuredSharedSetupEffects
+            sharedSetupEffects: configuredSharedSetupEffects,
+            baselineCaptureTiming: baselineCaptureTiming
+        )
+    }
+
+    public func captureConnectionBaseline(
+        for reviewedPlan: ConnectionPlan
+    ) async throws -> ConnectionBaselineCapture {
+        guard !deniesDeferredBaselineCapture else {
+            throw RecordingDeferredBaselineError.permissionDenied
+        }
+        return ConnectionBaselineCapture(
+            capturedPreChangeState: worldState.bytes,
+            staleStateToken: worldState.revision
         )
     }
 
     public func connect(_ plan: ConnectionPlan) async throws -> ConnectionReceipt {
         try trigger(.beforeConnect)
+
+        if let beforeConnectHook {
+            try await beforeConnectHook(plan)
+        }
         guard plan.staleStateToken == worldState.revision else {
             throw WriteBoundaryConflict(
                 targetInstanceID: plan.targetInstanceID,
@@ -309,6 +337,14 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             throw InterruptionRequested(point: point)
         }
     }
+}
+
+public enum RecordingDeferredBaselineError: CapabilityOutcomeError, Equatable, Sendable {
+    case permissionDenied
+
+    public var capabilityConfigurationState: ConfigurationState { .permissionRequired }
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+    public var capabilityOutcomeDetail: String { "Permission was denied while capturing the Connection Baseline." }
 }
 
 public enum RecordingWritableAdapterError: Error, Equatable, Sendable {

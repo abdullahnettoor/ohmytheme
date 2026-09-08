@@ -1,0 +1,637 @@
+import Foundation
+import Persistence
+import Testing
+import ThemeModel
+
+@testable import ThemeEngine
+
+@Suite("Setup Transaction (Issue #32)")
+struct SetupTransactionTests {
+    private static func makeFixture() throws -> (directory: URL, store: PersistenceStore) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oh-my-theme-setuptransaction-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = try PersistenceStore(
+            databaseURL: directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+        return (directory, store)
+    }
+
+    actor OrderTracker {
+        var order: [TargetInstanceID] = []
+        func record(_ id: TargetInstanceID) {
+            order.append(id)
+        }
+    }
+
+    actor SetupGate {
+        private var hasArrived = false
+        private var isOpen = false
+
+        func wait() async {
+            hasArrived = true
+            while !isOpen {
+                await Task.yield()
+            }
+        }
+
+        func arrived() -> Bool { hasArrived }
+        func open() { isOpen = true }
+    }
+
+    final class ProgressCollector: @unchecked Sendable {
+        private var _updates: [SetupProgress] = []
+        private let lock = NSLock()
+
+        var updates: [SetupProgress] {
+            lock.lock()
+            defer { lock.unlock() }
+            return _updates
+        }
+
+        func add(_ p: SetupProgress) {
+            lock.lock()
+            _updates.append(p)
+            lock.unlock()
+        }
+    }
+
+    // AC 1: The engine persists the Setup Transaction and all selected Connection Plans before the first external mutation.
+    @Test("Persists Setup Transaction and all selected Connection Plans before first external mutation")
+    func persistsTransactionAndPlansBeforeFirstExternalMutation() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let secondID = TargetInstanceID(rawValue: "starship.default")
+
+        let appearanceInstance = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let starshipInstance = ConnectedTargetInstance(id: secondID, displayName: "Starship", adapterID: "starship")
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "starship")
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1, adapter2],
+            persistence: fixture.store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID, secondID],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        actor HookState {
+            var checked = false
+            var foundOperationID: UUID?
+            func markChecked(opID: UUID) {
+                checked = true
+                foundOperationID = opID
+            }
+        }
+        let hookState = HookState()
+
+        await adapter1.setBeforeConnectHook { _ in
+            // When the first adapter is called, verify:
+            // 1. The setup transaction record exists in the operations journal in prepared/applying phase.
+            let inFlightOps = try fixture.store.journalInterruptedOperations()
+            let setupOp = inFlightOps.first(where: { $0.kind == .setup })
+            #expect(setupOp != nil)
+            #expect(setupOp?.state == .prepared || setupOp?.state == .applying)
+
+            // 2. Both targets have their connection baselines already persisted before this mutation!
+            let baseline1 = try fixture.store.journalLoadConnectionBaseline(targetInstanceID: firstID)
+            let baseline2 = try fixture.store.journalLoadConnectionBaseline(targetInstanceID: secondID)
+            #expect(baseline1 != nil)
+            #expect(baseline2 != nil)
+
+            if let id = setupOp?.id {
+                await hookState.markChecked(opID: id)
+            }
+        }
+
+        let report = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        let checked = await hookState.checked
+        let foundOpID = await hookState.foundOperationID
+        #expect(checked)
+        #expect(foundOpID == report.operationID)
+        #expect(report.outcomes.count == 2)
+    }
+
+    // AC 2: Selected instances execute sequentially in the same stable order shown during review.
+    @Test("Selected instances execute sequentially in the exact stable order shown during review")
+    func sequentialExecutionInReviewedOrder() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let tracker = OrderTracker()
+
+        let appearanceInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "macos.appearance"),
+            displayName: "System Appearance",
+            adapterID: "macos.appearance"
+        )
+        let wallpaperInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "macos.wallpaper.1"),
+            displayName: "Wallpaper (Display 1)",
+            adapterID: "macos.wallpaper"
+        )
+        let starshipInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "starship.default"),
+            displayName: "Starship",
+            adapterID: "starship"
+        )
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "macos.wallpaper")
+        let adapter3 = RecordingWritableAdapter(id: "starship")
+
+        await adapter1.setBeforeConnectHook { plan in
+            await tracker.record(plan.targetInstanceID)
+        }
+        await adapter2.setBeforeConnectHook { plan in
+            await tracker.record(plan.targetInstanceID)
+        }
+        await adapter3.setBeforeConnectHook { plan in
+            await tracker.record(plan.targetInstanceID)
+        }
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1, adapter2, adapter3],
+            persistence: fixture.store
+        )
+
+        // Pass instances scrambled: starship, wallpaper, appearance
+        let scrambled = [starshipInstance, wallpaperInstance, appearanceInstance]
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: Set(scrambled.map(\.id)),
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: scrambled
+        )
+
+        // Reviewed order is stable: appearance (0), wallpaper (1), starship (4)
+        #expect(plan.targetInstanceIDs == [appearanceInstance.id, wallpaperInstance.id, starshipInstance.id])
+
+        _ = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: scrambled
+        )
+
+        let executedOrder = await tracker.order
+        #expect(executedOrder == plan.targetInstanceIDs)
+    }
+
+    // AC 3: Each instance receives its own durable Connection Baseline, outcome, and recovery record.
+    @Test("Each instance receives its own durable Connection Baseline, outcome, and recovery record")
+    func durableBaselinesOutcomesAndRecoveryRecords() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let secondID = TargetInstanceID(rawValue: "starship.default")
+
+        let appearanceInstance = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let starshipInstance = ConnectedTargetInstance(id: secondID, displayName: "Starship", adapterID: "starship")
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "starship")
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1, adapter2],
+            persistence: fixture.store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID, secondID],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        let report = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        #expect(report.outcomes.count == 2)
+
+        let loaded = try fixture.store.loadWorkspace()
+
+        for id in [firstID, secondID] {
+            // Durable baseline exists
+            let baseline = try fixture.store.journalLoadConnectionBaseline(targetInstanceID: id)
+            #expect(baseline != nil)
+
+            // Distinct outcome exists
+            let outcome = report.outcomes.first { $0.targetInstanceID == id }
+            #expect(outcome != nil)
+            #expect(outcome?.configurationState == .updated)
+            #expect(outcome?.capabilityID == "connection")
+
+            // Recovery record exists in target instances table
+            let persistedTarget = loaded.targetInstances.first { $0.id == id }
+            #expect(persistedTarget != nil)
+            #expect(persistedTarget?.isConnected == true)
+        }
+    }
+
+    // AC 4: A target is marked connected only after its successful connection receipt is durable.
+    @Test("Target is marked connected only after its successful connection receipt is durable")
+    func targetMarkedConnectedOnlyAfterReceiptIsDurable() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let successID = TargetInstanceID(rawValue: "macos.appearance")
+        let failID = TargetInstanceID(rawValue: "starship.default")
+
+        let appearanceInstance = ConnectedTargetInstance(
+            id: successID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let starshipInstance = ConnectedTargetInstance(id: failID, displayName: "Starship", adapterID: "starship")
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "starship")
+
+        struct TestAdapterError: Error, LocalizedError {
+            var errorDescription: String? { "Failed to connect starship" }
+        }
+
+        await adapter2.setBeforeConnectHook { _ in
+            throw TestAdapterError()
+        }
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1, adapter2],
+            persistence: fixture.store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [successID, failID],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        let report = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        let loaded = try fixture.store.loadWorkspace()
+
+        // The successful target is marked connected in persistence and journal
+        let persistedSuccess = loaded.targetInstances.first { $0.id == successID }
+        #expect(persistedSuccess?.isConnected == true)
+
+        let successOutcome = report.outcomes.first { $0.targetInstanceID == successID }
+        #expect(successOutcome?.configurationState == .updated)
+
+        // The failed target is NOT marked connected in persistence
+        let persistedFail = loaded.targetInstances.first { $0.id == failID }
+        #expect(persistedFail == nil || persistedFail?.isConnected == false)
+
+        let failOutcome = report.outcomes.first { $0.targetInstanceID == failID }
+        #expect(failOutcome?.configurationState == .failed)
+    }
+
+    // AC 5: The runtime exposes one operation identity, progress model, and grouped Setup Report.
+    @Test("Exposes one operation identity, progressive progress model, and grouped Setup Report")
+    func oneOperationIdentityAndProgressModel() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let secondID = TargetInstanceID(rawValue: "starship.default")
+
+        let appearanceInstance = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let starshipInstance = ConnectedTargetInstance(id: secondID, displayName: "Starship", adapterID: "starship")
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "starship")
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1, adapter2],
+            persistence: fixture.store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID, secondID],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance]
+        )
+
+        let collector = ProgressCollector()
+
+        let report = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: [appearanceInstance, starshipInstance],
+            onProgress: { progress in
+                collector.add(progress)
+            }
+        )
+
+        let updates = collector.updates
+        #expect(!updates.isEmpty)
+        // All progress updates share the exact same operation identity matching the final report
+        for update in updates {
+            #expect(update.operationID == report.operationID)
+            #expect(update.totalCount == 2)
+        }
+
+        // Final progress update is complete
+        let last = updates.last
+        #expect(last?.isComplete == true)
+        #expect(last?.completedCount == 2)
+    }
+
+    // AC 6: Only one mutating Workspace operation can run, and conflicting operations are rejected.
+    @Test("Only one mutating Workspace operation can run concurrently")
+    func concurrentMutatingOperationIsRejected() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let appearanceInstance = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1],
+            persistence: fixture.store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [appearanceInstance]
+        )
+
+        actor ErrorCollector {
+            var error: Error?
+            func set(_ err: Error) { self.error = err }
+        }
+        let errCollector = ErrorCollector()
+
+        await adapter1.setBeforeConnectHook { _ in
+            // While adapter1 is executing within executeSetup, attempt another mutating operation
+            do {
+                _ = try await engine.executeSetup(
+                    plan: plan,
+                    workspace: workspace,
+                    instances: [appearanceInstance]
+                )
+            } catch {
+                await errCollector.set(error)
+            }
+        }
+
+        _ = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: [appearanceInstance]
+        )
+
+        let captured = await errCollector.error
+        #expect(captured != nil)
+        if let durableError = captured as? DurableOperationError {
+            #expect(durableError == .operationInProgress)
+        }
+    }
+
+    @Test("A denied deferred permission affects only that target and is disclosed in progress")
+    func deferredPermissionDenialDoesNotStopSiblingTargets() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let deniedID = TargetInstanceID(rawValue: "macos.appearance")
+        let readyID = TargetInstanceID(rawValue: "starship.default")
+        let denied = ConnectedTargetInstance(
+            id: deniedID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let ready = ConnectedTargetInstance(id: readyID, displayName: "Starship", adapterID: "starship")
+        let deniedAdapter = RecordingWritableAdapter(
+            id: "macos.appearance",
+            requiredPermissions: ["Allow Automation"],
+            baselineCaptureTiming: .immediatelyBeforeExecution,
+            deniesDeferredBaselineCapture: true
+        )
+        let readyAdapter = RecordingWritableAdapter(id: "starship")
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [deniedAdapter, readyAdapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [deniedID, readyID],
+            themeAssignment: nil
+        )
+        let plan = try await engine.prepareSetup(workspace: workspace, instances: [denied, ready])
+        let progress = ProgressCollector()
+
+        let report = try await engine.executeSetup(
+            plan: plan,
+            workspace: workspace,
+            instances: [denied, ready],
+            onProgress: { progress.add($0) }
+        )
+
+        #expect(report.outcomes.map(\.targetInstanceID) == [deniedID, readyID])
+        #expect(report.outcomes[0].configurationState == .permissionRequired)
+        #expect(report.outcomes[1].configurationState == .updated)
+        #expect(progress.updates.contains { $0.currentAction == "Waiting for permission: Allow Automation" })
+        #expect(try fixture.store.journalLoadConnectionBaseline(targetInstanceID: deniedID) == nil)
+        #expect(try fixture.store.journalLoadConnectionBaseline(targetInstanceID: readyID) != nil)
+    }
+
+    @Test("Cancel Remaining skips untouched targets after the current target boundary")
+    func cancelRemainingSetupSkipsUntouchedTargets() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let secondID = TargetInstanceID(rawValue: "starship.default")
+        let first = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let second = ConnectedTargetInstance(id: secondID, displayName: "Starship", adapterID: "starship")
+        let firstAdapter = RecordingWritableAdapter(id: "macos.appearance")
+        let secondAdapter = RecordingWritableAdapter(id: "starship")
+        let gate = SetupGate()
+        await firstAdapter.setBeforeConnectHook { _ in
+            await gate.wait()
+        }
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [firstAdapter, secondAdapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID, secondID],
+            themeAssignment: nil
+        )
+        let plan = try await engine.prepareSetup(workspace: workspace, instances: [first, second])
+        let progress = ProgressCollector()
+        let execution = Task {
+            try await engine.executeSetup(
+                plan: plan,
+                workspace: workspace,
+                instances: [first, second],
+                onProgress: { progress.add($0) }
+            )
+        }
+
+        while !(await gate.arrived()) {
+            await Task.yield()
+        }
+        let operationID = progress.updates.last?.operationID
+        #expect(operationID != nil)
+        guard let operationID else { return }
+        #expect(try await engine.cancelRemainingSetup(operationID: operationID))
+        await gate.open()
+
+        let report = try await execution.value
+        #expect(report.outcomes.map(\.targetInstanceID) == [firstID, secondID])
+        #expect(report.outcomes[0].configurationState == .updated)
+        #expect(report.outcomes[1].detail == "Skipped after Cancel Remaining.")
+        #expect(try fixture.store.journalLoadRecords(operationID: operationID).last?.phase == .skipped)
+        #expect(try fixture.store.journalLoadOperation(id: operationID)?.state == .cancelled)
+    }
+
+    @Test("Retry Setup Transactions retain their durable source operation")
+    func retrySetupTransactionLinksToThePriorOperation() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let targetID = TargetInstanceID(rawValue: "starship.default")
+        let target = ConnectedTargetInstance(id: targetID, displayName: "Starship", adapterID: "starship")
+        let adapter = RecordingWritableAdapter(id: "starship")
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: fixture.store)
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [targetID],
+            themeAssignment: nil
+        )
+        let sourcePlan = try await engine.prepareSetup(workspace: workspace, instances: [target])
+        let sourceReport = try await engine.executeSetup(
+            plan: sourcePlan,
+            workspace: workspace,
+            instances: [target]
+        )
+
+        let retryPlan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [target],
+            retrySourceOperationID: sourceReport.operationID
+        )
+        let retryReport = try await engine.executeSetup(
+            plan: retryPlan,
+            workspace: workspace,
+            instances: [target]
+        )
+
+        #expect(retryReport.retrySourceOperationID == sourceReport.operationID)
+        #expect(
+            try fixture.store.journalLoadOperation(id: retryReport.operationID)?.parentOperationID
+                == sourceReport.operationID
+        )
+    }
+
+    // Recovery reconciliation for interrupted setup
+    @Test("Interrupted setup operation is reconciled cleanly on engine startup")
+    func interruptedSetupIsReconciled() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1],
+            persistence: fixture.store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID],
+            themeAssignment: nil
+        )
+
+        // Inject an interrupted setup operation directly into the journal
+        let op = try fixture.store.journalStartOperation(kind: .setup, workspaceID: workspace.id)
+        try fixture.store.journalTransitionState(operationID: op.id, to: .applying)
+
+        // Calling reconcileInterruptedOperations should reconcile and transition state
+        try await engine.reconcileInterruptedOperations()
+
+        let reloaded = try fixture.store.journalLoadOperation(id: op.id)
+        #expect(reloaded?.state == .failed || reloaded?.state == .applied || reloaded?.state == .reconciled)
+    }
+}

@@ -661,4 +661,123 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNil(model.setupPlan)
         XCTAssertNil(model.setupPlanInvalidationReason)
     }
+
+    func testExecuteSetupPlanPresentsReportAndRefreshesWorkspace() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        await model.prepareSetupPlan()
+        XCTAssertNotNil(model.setupPlan)
+
+        let connectedInstance = ConnectedTargetInstance(
+            id: instanceID,
+            displayName: "Ghostty",
+            adapterID: "ghostty"
+        )
+        let outcome = TargetCapabilityOutcome(
+            targetInstanceID: instanceID,
+            adapterID: "ghostty",
+            capabilityID: "connection",
+            sourceType: .generated,
+            sourceRevision: "1",
+            configurationState: .updated,
+            runningInstanceReach: .reloadRequired,
+            detail: "Configured Ghostty",
+            rollbackState: .notNeeded
+        )
+        let setupReport = SetupReport(
+            operationID: UUID(),
+            outcomes: [outcome]
+        )
+        let updatedWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [connectedInstance],
+            targetOptIns: [instanceID]
+        )
+        runtime.executeSetupPlanResult = WorkspaceSetupResult(
+            snapshot: WorkspaceTargetSnapshot(workspace: updatedWorkspace, targets: []),
+            report: setupReport
+        )
+
+        let returnedReport = try await model.executeSetupPlan()
+
+        XCTAssertEqual(returnedReport?.operationID, setupReport.operationID)
+        XCTAssertEqual(runtime.executeSetupPlanCalls.count, 1)
+        XCTAssertNil(model.setupPlan)
+        XCTAssertNil(model.setupProgress)
+        XCTAssertFalse(model.isExecutingSetup)
+        XCTAssertFalse(model.isBusy)
+        XCTAssertEqual(model.report?.kind, .setup)
+        XCTAssertEqual(model.report?.title, "Setup complete")
+        XCTAssertEqual(model.workspace.connectedTargetInstances.map(\.id), [instanceID])
+    }
+
+    func testRetryRemainingSetupPreparesFreshPlanLinkedToLatestSetupReport() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+        let failedReport = SetupReport(
+            operationID: UUID(),
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: instanceID,
+                    adapterID: "ghostty",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .failed,
+                    runningInstanceReach: .unavailable,
+                    detail: "Connection failed."
+                )
+            ]
+        )
+        runtime.executeSetupPlanResult = WorkspaceSetupResult(
+            snapshot: WorkspaceTargetSnapshot(workspace: workspace, targets: []),
+            report: failedReport
+        )
+
+        await model.prepareSetupPlan()
+        _ = try await model.executeSetupPlan()
+        await model.retryRemainingSetup()
+
+        XCTAssertEqual(runtime.prepareSetupPlanCalls, 2)
+        XCTAssertEqual(runtime.prepareSetupPlanRetrySources.last!, failedReport.operationID)
+    }
+
+    func testExecuteSetupPlanBlocksConcurrentExecution() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        await model.prepareSetupPlan()
+        XCTAssertNotNil(model.setupPlan)
+
+        // Simulate busy state
+        model.setBusyForTesting(true)
+        XCTAssertTrue(model.isBusy)
+
+        let report = try await model.executeSetupPlan()
+        XCTAssertNil(report)
+        XCTAssertEqual(runtime.executeSetupPlanCalls.count, 0)
+    }
 }
