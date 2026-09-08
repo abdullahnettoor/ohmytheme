@@ -9,6 +9,10 @@ import XCTest
 
 @MainActor
 final class ProductionWorkspaceRuntimeTests: XCTestCase {
+    private enum DiscoveryUnavailable: Error {
+        case expectedInTest
+    }
+
     private var temporaryDirectory: URL!
     private var persistence: PersistenceStore!
     private var store: WorkspaceStore!
@@ -28,14 +32,18 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        packs = nil
+        store = nil
+        persistence = nil
         if let temporaryDirectory {
             try? FileManager.default.removeItem(at: temporaryDirectory)
         }
+        temporaryDirectory = nil
         try await super.tearDown()
     }
 
     func testRuntimeExposesCurrentWorkspaceCatalogAndDiscoveredTargets() async throws {
-        let runtime = ProductionWorkspaceRuntime(store: store, themePacks: packs)
+        let runtime = makeRuntime()
 
         XCTAssertEqual(runtime.workspace.displayName, "My Mac")
         XCTAssertEqual(runtime.themePacks.map(\.displayName), ["Catppuccin", "Oh My Theme"])
@@ -49,7 +57,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
     }
 
     func testRuntimeSelectFixedThemeVariantPersistsThemeAssignment() throws {
-        let runtime = ProductionWorkspaceRuntime(store: store, themePacks: packs)
+        let runtime = makeRuntime()
 
         runtime.selectFixedThemeVariant("oh-my-theme/aurora")
 
@@ -62,11 +70,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
 
     func testRuntimeConnectionReviewAndConnectRegistersBaselineAndUpdatesWorkspace() async throws {
         let adapter = RecordingWritableAdapter(id: "recording")
-        let runtime = ProductionWorkspaceRuntime(
-            store: store,
-            themePacks: packs,
-            additionalAdapters: [adapter]
-        )
+        let runtime = makeRuntime(additionalAdapters: [adapter])
 
         _ = try await runtime.start()
 
@@ -89,11 +93,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
 
     func testRuntimePreparesAndAppliesPlanDurablyWithRealEngineOrchestration() async throws {
         let adapter = RecordingWritableAdapter(id: "recording")
-        let runtime = ProductionWorkspaceRuntime(
-            store: store,
-            themePacks: packs,
-            additionalAdapters: [adapter]
-        )
+        let runtime = makeRuntime(additionalAdapters: [adapter])
 
         _ = try await runtime.start()
         runtime.selectFixedThemeVariant("catppuccin/mocha")
@@ -132,11 +132,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
     func testRuntimeUndoRestoresPreviousBaselineWithRealEngineOrchestration() async throws {
         let initialWorld = Data("baseline-before-theme".utf8)
         let adapter = RecordingWritableAdapter(id: "recording", initialWorld: initialWorld)
-        let runtime = ProductionWorkspaceRuntime(
-            store: store,
-            themePacks: packs,
-            additionalAdapters: [adapter]
-        )
+        let runtime = makeRuntime(additionalAdapters: [adapter])
 
         _ = try await runtime.start()
         runtime.selectFixedThemeVariant("catppuccin/mocha")
@@ -164,11 +160,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
     func testRuntimeRestoreAndDisconnectRemovesTargetAndRestoresBaseline() async throws {
         let initialWorld = Data("baseline-before-connect".utf8)
         let adapter = RecordingWritableAdapter(id: "recording", initialWorld: initialWorld)
-        let runtime = ProductionWorkspaceRuntime(
-            store: store,
-            themePacks: packs,
-            additionalAdapters: [adapter]
-        )
+        let runtime = makeRuntime(additionalAdapters: [adapter])
 
         _ = try await runtime.start()
 
@@ -183,28 +175,83 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         XCTAssertEqual(disconnectResult.report.outcomes.first?.configurationState, .updated)
         XCTAssertFalse(runtime.workspace.connectedTargetInstances.contains { $0.id == candidateID })
         XCTAssertFalse(store.workspace.connectedTargetInstances.contains { $0.id == candidateID })
+        let restoredWorld = await adapter.currentWorldBytes()
+        XCTAssertEqual(restoredWorld, initialWorld)
     }
 
-    func testRuntimeStartupRecoveryReconcilesInterruptedOperations() async throws {
-        let runtime = ProductionWorkspaceRuntime(store: store, themePacks: packs)
+    func testRuntimeStartupRecoveryClassifiesInterruptedAdapterMutation() async throws {
+        let adapter = RecordingWritableAdapter(id: "recording")
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        runtime.selectFixedThemeVariant("catppuccin/mocha")
 
-        // Seed an operation in progress
-        let interruptedOp = try persistence.journalStartOperation(
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+        let reviewPlan = try await runtime.reviewConnection(optionID: candidateID)
+        _ = try await runtime.connect(optionID: candidateID, reviewedPlan: reviewPlan)
+        let applyPlan = try await runtime.prepareApplyPlan()
+        let targetPlan = try XCTUnwrap(applyPlan.targetPlans.first)
+
+        _ = try await adapter.apply(targetPlan)
+        let mutatedWorld = await adapter.currentWorldBytes()
+        XCTAssertEqual(mutatedWorld, targetPlan.payload.payload)
+
+        let interruptedOperation = try persistence.journalStartOperation(
             kind: .apply,
             workspaceID: store.workspace.id,
-            variantID: "catppuccin/mocha"
+            variantID: applyPlan.variantID
         )
-        try persistence.journalTransitionState(operationID: interruptedOp.id, to: .applying)
-        let beforeOp = try persistence.journalLoadOperation(id: interruptedOp.id)
-        XCTAssertEqual(beforeOp?.state, .applying)
+        let encodedPlan = try JSONEncoder().encode(targetPlan)
+        let planReference = try persistence.journalStorePlanPayload(
+            encodedPlan,
+            ownerID: "operation:\(interruptedOperation.id.uuidString):recording"
+        )
+        try persistence.journalSaveRecord(
+            JournaledRecord(
+                operationID: interruptedOperation.id,
+                targetInstanceID: candidateID,
+                ordinal: 0,
+                adapterID: targetPlan.adapterID,
+                adapterVersion: targetPlan.adapterVersion,
+                capabilityID: targetPlan.capabilityID,
+                phase: .applying,
+                intendedChangeDigest: targetPlan.intendedChangeDigest,
+                staleStateToken: targetPlan.staleStateToken,
+                planDigest: planReference.digest,
+                receiptJSON: nil,
+                detail: nil
+            )
+        )
+        try persistence.journalTransitionState(operationID: interruptedOperation.id, to: .applying)
 
-        // Calling start() must reconcile interrupted operations
-        let snapshot = try await runtime.start()
+        let recoveringRuntime = makeRuntime(additionalAdapters: [adapter])
+        let snapshot = try await recoveringRuntime.start()
 
         XCTAssertEqual(snapshot.workspace.id, .myMac)
+        XCTAssertEqual(
+            try persistence.journalLoadOperation(id: interruptedOperation.id)?.state,
+            .reconciled
+        )
+        let records = try persistence.journalLoadRecords(operationID: interruptedOperation.id)
+        XCTAssertEqual(records.first?.phase, .reconciledIntended)
+        XCTAssertEqual(records.first?.detail, "reconciled:intendedAfterChange")
+    }
 
-        // The operation should now be marked reconciled in the journal
-        let loaded = try persistence.journalLoadOperation(id: interruptedOp.id)
-        XCTAssertEqual(loaded?.state, .reconciled)
+    private func makeRuntime(
+        additionalAdapters: [any ThemeAdapter] = []
+    ) -> ProductionWorkspaceRuntime {
+        ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: packs,
+            additionalAdapters: additionalAdapters,
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .failure(DiscoveryUnavailable.expectedInTest),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
     }
 }

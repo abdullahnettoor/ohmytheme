@@ -182,9 +182,10 @@ The first UI exposes fixed assignment. The model keeps paired assignment so late
 
 ```mermaid
 flowchart TD
-    UI[Main window and optional menu bar UI] --> Engine[Theme engine]
-    Themes[Theme catalog and resolver] --> Engine
-    Workspace[Workspace store] --> Engine
+    UI[Main window and optional menu bar UI] --> Runtime[Workspace runtime]
+    Themes[Theme catalog and resolver] --> Runtime
+    Workspace[Workspace store] --> Runtime
+    Runtime --> Engine[Theme engine]
     Engine --> Journal[Transaction journal]
     Engine --> Baselines[Connection baseline store]
     Engine --> Adapters[Compiled adapter registry]
@@ -195,9 +196,11 @@ flowchart TD
     VSCode --> Extension[Companion extension]
 ```
 
-### Theme engine
+### Workspace runtime and theme engine
 
-The UI talks to one deep module:
+The UI talks only to `WorkspaceRuntime`, the deep app-facing module for Workspace state, discovery, and workflows. Its production implementation delegates durable mutation and recovery to `ThemeEngine`; presentation code never receives or coordinates the engine directly.
+
+The runtime exposes the product workflow:
 
 ```text
 prepareSetup(targetInstances, workspace) -> SetupPlan
@@ -208,7 +211,7 @@ undoLast(workspace) -> ApplyReport
 restoreAndDisconnect(targetInstances) -> ApplyReport
 ```
 
-The engine owns orchestration, serialization, immutable plans, durable journal transitions, recovery on launch, and report aggregation. The UI does not discover apps, edit files, send Apple Events, launch target commands, or coordinate rollback.
+The runtime owns presentation-facing workflow coordination and discovery. The engine owns mutation orchestration, serialization, immutable plans, durable journal transitions, recovery, and report aggregation. The UI does not discover apps, edit files, send Apple Events, launch target commands, or coordinate rollback.
 
 ### Adapter seam
 

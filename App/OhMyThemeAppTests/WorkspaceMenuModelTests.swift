@@ -285,7 +285,8 @@ final class WorkspaceMenuModelTests: XCTestCase {
                     userActions: [
                         UserAction(
                             title: "Open System Settings",
-                            detail: "Turn on Automation for Oh My Theme in System Settings > Privacy & Security > Automation."
+                            detail:
+                                "Turn on Automation for Oh My Theme in System Settings > Privacy & Security > Automation."
                         )
                     ]
                 )

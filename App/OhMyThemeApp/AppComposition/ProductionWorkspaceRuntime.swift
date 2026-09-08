@@ -4,6 +4,22 @@ import PlatformClients
 import ThemeEngine
 import ThemeModel
 
+struct WorkspaceTargetDiscovery {
+    let ghostty: Result<GhosttyDiscoveryReport, Error>
+    let wallpaper: Result<MacOSWallpaperDiscoveryReport, Error>
+    let starship: Result<StarshipDiscoveryReport, Error>
+    let vscode: Result<VSCodeDiscoveryReport, Error>
+}
+
+struct VSCodeCompanionRuntime {
+    let server: CompanionSocketServer
+    let platform: any VSCodeConnectionPlatform
+    let artifact: VSCodeCompanionArtifact
+}
+
+typealias WorkspaceTargetDiscoveryProvider = @MainActor () async -> WorkspaceTargetDiscovery
+typealias VSCodeCompanionBootstrap = @MainActor () throws -> VSCodeCompanionRuntime?
+
 @MainActor
 final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private enum Constants {
@@ -25,7 +41,8 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private let ghosttyAdapter: GhosttyConfigurationAdapter
     private let starshipAdapter: StarshipConfigurationAdapter
     private let vscodeDiscovery: VSCodeApplicationDiscovery
-    private let vscodePlatform: SystemVSCodeConnectionPlatform?
+    private let targetDiscoveryProvider: WorkspaceTargetDiscoveryProvider?
+    private let vscodePlatform: (any VSCodeConnectionPlatform)?
     private let vscodeArtifact: VSCodeCompanionArtifact?
     private let socketServer: CompanionSocketServer?
     private var candidates: [TargetInstanceID: Candidate] = [:]
@@ -51,10 +68,13 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     init(
         store: WorkspaceStore = WorkspaceStore(),
         themePacks: [ThemePack]? = nil,
-        additionalAdapters: [any ThemeAdapter] = []
+        additionalAdapters: [any ThemeAdapter] = [],
+        targetDiscoveryProvider: WorkspaceTargetDiscoveryProvider? = nil,
+        vscodeCompanionBootstrap: VSCodeCompanionBootstrap = ProductionWorkspaceRuntime.startVSCodeCompanion
     ) {
         self.store = store
         self.additionalAdapters = additionalAdapters
+        self.targetDiscoveryProvider = targetDiscoveryProvider
         appearanceAdapter = MacOSAppearanceAdapter()
         wallpaperAdapter = MacOSWallpaperAdapter(
             assetResolver: BundledWallpaperAssetResolver(
@@ -78,42 +98,16 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             }
         }
 
-        var server: CompanionSocketServer?
-        var platform: SystemVSCodeConnectionPlatform?
-        var artifact: VSCodeCompanionArtifact?
+        let companionRuntime: VSCodeCompanionRuntime?
         do {
-            guard
-                let vsixURL = Bundle.main.url(
-                    forResource: "oh-my-theme-companion-0.1.0",
-                    withExtension: "vsix"
-                )
-            else {
-                throw ProductionWorkspaceRuntimeError.missingVSCodeCompanion
-            }
-            let launchID = UUID().uuidString
-            let paths = try CompanionSocketPaths.production(launchID: launchID)
-            let companionServer = CompanionSocketServer(
-                configuration: CompanionSocketServerConfiguration(
-                    paths: paths,
-                    launchID: launchID,
-                    launchNonce: UUID().uuidString
-                )
-            )
-            try companionServer.start()
-            server = companionServer
-            platform = SystemVSCodeConnectionPlatform(server: companionServer)
-            artifact = VSCodeCompanionArtifact(
-                extensionID: Constants.companionExtensionID,
-                version: Constants.companionVersion,
-                vsixURL: vsixURL,
-                sha256: Constants.companionSHA256
-            )
+            companionRuntime = try vscodeCompanionBootstrap()
         } catch {
+            companionRuntime = nil
             vscodeStartupFailure = "VS Code companion unavailable: \(error)"
         }
-        socketServer = server
-        vscodePlatform = platform
-        vscodeArtifact = artifact
+        socketServer = companionRuntime?.server
+        vscodePlatform = companionRuntime?.platform
+        vscodeArtifact = companionRuntime?.artifact
 
         guard !self.themePacks.isEmpty else {
             themeEngine = nil
@@ -142,10 +136,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     }
 
     func start() async throws -> WorkspaceTargetSnapshot {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
+        let themeEngine = try requiredThemeEngine()
         let discovery = await discoverTargets()
         await registerAdapterForPersistedVSCodeTarget(from: discovery.vscode)
         try await themeEngine.reconcileInterruptedOperations()
@@ -153,10 +144,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     }
 
     func reviewConnection(optionID: TargetInstanceID) async throws -> ConnectionPlan {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
+        let themeEngine = try requiredThemeEngine()
         _ = await discoverTargets()
         guard let candidate = candidates[optionID] else {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(optionID)
@@ -171,10 +159,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         optionID: TargetInstanceID,
         reviewedPlan: ConnectionPlan
     ) async throws -> WorkspaceConnectionResult {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
+        let themeEngine = try requiredThemeEngine()
         var discovery = await discoverTargets()
         guard let candidate = candidates[optionID] else {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(optionID)
@@ -205,10 +190,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     func restoreAndDisconnect(
         targetInstanceID: TargetInstanceID
     ) async throws -> WorkspaceConnectionResult {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
+        let themeEngine = try requiredThemeEngine()
         guard let instance = workspace.connectedTargetInstances.first(where: { $0.id == targetInstanceID }) else {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
         }
@@ -221,27 +203,15 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     }
 
     func prepareApplyPlan() async throws -> ApplyPlan {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
-        return try await themeEngine.prepare(workspace: workspace)
+        try await requiredThemeEngine().prepare(workspace: workspace)
     }
 
     func apply(planID: UUID) async throws -> DurableApplyReport {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
-        return try await themeEngine.applyDurable(planID: planID, workspace: workspace)
+        try await requiredThemeEngine().applyDurable(planID: planID, workspace: workspace)
     }
 
     func undoLast() async throws -> UndoReport {
-        guard let themeEngine else {
-            throw ProductionWorkspaceRuntimeError.engineUnavailable(
-                fatalStartupFailure ?? "ThemeEngine is unavailable.")
-        }
-        return try await themeEngine.undoLast(workspace: workspace)
+        try await requiredThemeEngine().undoLast(workspace: workspace)
     }
 
     func undoAvailability() async throws -> UndoAvailability {
@@ -251,14 +221,21 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         return try await themeEngine.undoAvailability(workspace: workspace)
     }
 
-    private struct Discovery {
-        let ghostty: Result<GhosttyDiscoveryReport, Error>
-        let wallpaper: Result<MacOSWallpaperDiscoveryReport, Error>
-        let starship: Result<StarshipDiscoveryReport, Error>
-        let vscode: Result<VSCodeDiscoveryReport, Error>
+    private func requiredThemeEngine() throws -> ThemeEngine {
+        guard let themeEngine else {
+            throw ProductionWorkspaceRuntimeError.engineUnavailable(
+                fatalStartupFailure ?? "ThemeEngine is unavailable."
+            )
+        }
+        return themeEngine
     }
 
-    private func discoverTargets() async -> Discovery {
+    private func discoverTargets() async -> WorkspaceTargetDiscovery {
+        if let targetDiscoveryProvider {
+            let discovery = await targetDiscoveryProvider()
+            rebuildCandidates(discovery)
+            return discovery
+        }
         let ghostty: Result<GhosttyDiscoveryReport, Error>
         do {
             ghostty = .success(try await ghosttyAdapter.discover())
@@ -287,7 +264,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             vscode = .failure(error)
         }
 
-        let discovery = Discovery(
+        let discovery = WorkspaceTargetDiscovery(
             ghostty: ghostty,
             wallpaper: wallpaper,
             starship: starship,
@@ -297,7 +274,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         return discovery
     }
 
-    private func rebuildCandidates(_ discovery: Discovery) {
+    private func rebuildCandidates(_ discovery: WorkspaceTargetDiscovery) {
         var next: [TargetInstanceID: Candidate] = [:]
         let appearance = ConnectedTargetInstance(
             id: MacOSAppearanceAdapter.systemTargetInstanceID,
@@ -354,7 +331,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         candidates = next
     }
 
-    private func makeSnapshot(discovery: Discovery) -> WorkspaceTargetSnapshot {
+    private func makeSnapshot(discovery: WorkspaceTargetDiscovery) -> WorkspaceTargetSnapshot {
         let workspace = store.workspace
         let knownPrefixes = ["macos", "ghostty", "vscode", "starship"]
         let otherConnected = workspace.connectedTargetInstances.filter { instance in
@@ -367,12 +344,13 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             starshipTarget(workspace: workspace, discovery: discovery.starship),
         ]
         for instance in otherConnected {
-            targets.append(readyTarget(
-                id: instance.adapterID,
-                name: instance.displayName,
-                image: "wrench.and.screwdriver",
-                instances: [instance]
-            ))
+            targets.append(
+                readyTarget(
+                    id: instance.adapterID,
+                    name: instance.displayName,
+                    image: "wrench.and.screwdriver",
+                    instances: [instance]
+                ))
         }
         return WorkspaceTargetSnapshot(
             workspace: workspace,
@@ -638,6 +616,37 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             applicationVersion: installation.version,
             extensionVersion: Constants.companionVersion,
             profileName: Constants.vscodeProfileName
+        )
+    }
+
+    static func startVSCodeCompanion() throws -> VSCodeCompanionRuntime? {
+        guard
+            let vsixURL = Bundle.main.url(
+                forResource: "oh-my-theme-companion-0.1.0",
+                withExtension: "vsix"
+            )
+        else {
+            throw ProductionWorkspaceRuntimeError.missingVSCodeCompanion
+        }
+        let launchID = UUID().uuidString
+        let paths = try CompanionSocketPaths.production(launchID: launchID)
+        let companionServer = CompanionSocketServer(
+            configuration: CompanionSocketServerConfiguration(
+                paths: paths,
+                launchID: launchID,
+                launchNonce: UUID().uuidString
+            )
+        )
+        try companionServer.start()
+        return VSCodeCompanionRuntime(
+            server: companionServer,
+            platform: SystemVSCodeConnectionPlatform(server: companionServer),
+            artifact: VSCodeCompanionArtifact(
+                extensionID: Constants.companionExtensionID,
+                version: Constants.companionVersion,
+                vsixURL: vsixURL,
+                sha256: Constants.companionSHA256
+            )
         )
     }
 

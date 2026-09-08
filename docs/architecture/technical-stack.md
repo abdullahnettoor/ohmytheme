@@ -22,7 +22,7 @@ The SwiftUI layer is presentation code. It does not own theme application, targe
 
 The beta runs as one macOS application process. The VS Code companion extension and target applications remain external processes.
 
-`ThemeEngine` is a Swift `actor` and the only interface used by presentation code for mutating theme state. It permits one Setup, Apply, Undo, Restore, Disconnect, or recovery operation at a time.
+`WorkspaceRuntime` is the `MainActor`-isolated interface presentation code uses for Workspace state, discovery, and workflows. Its production implementation delegates durable mutation and recovery to `ThemeEngine`, a Swift `actor` that permits one Setup, Apply, Undo, Restore, Disconnect, or recovery operation at a time. Presentation code never receives `ThemeEngine` directly.
 
 - UI state and view updates run on `MainActor`.
 - The app derives onboarding resumption from persisted disposition and domain state rather than a stored wizard page number.
@@ -117,7 +117,7 @@ The initial repository may create these paths lazily as implementation reaches t
 
 ### Module responsibilities
 
-- `OhMyThemeApp`: SwiftUI scenes, presentation state, and dependency composition.
+- `OhMyThemeApp`: SwiftUI scenes, presentation state, dependency composition, and the `WorkspaceRuntime` seam between presentation and Workspace workflows.
 - `ThemeModel`: target-independent values with no SwiftUI, AppKit, or GRDB imports.
 - `ThemeCompiler`: theme-pack validation, normalization, and generated artifact compilation support.
 - `AdapterKit`: the adapter interface, type erasure, plan envelopes, receipts, and capability outcomes.
@@ -194,7 +194,7 @@ Every writable adapter must pass a shared safety contract proving that:
 7. External edits are not overwritten.
 8. Sensitive source bytes do not enter logs or reports.
 
-Use temporary directories, in-memory and temporary-file SQLite databases, fake clocks, deterministic identifiers, recording side-effect modules, and realistic target fixtures. Keep manual compatibility checks for privacy prompts, real applications, multiple windows or sessions, displays, and target versions.
+Use temporary directories, in-memory and temporary-file SQLite databases, fake clocks, deterministic identifiers, recording side-effect modules, and realistic target fixtures. Runtime integration tests inject discovery and companion bootstrap behavior so they do not inspect host applications, displays, or configuration or open production sockets. Keep manual compatibility checks for privacy prompts, real applications, multiple windows or sessions, displays, and target versions.
 
 The VS Code extension uses TypeScript protocol tests and the VS Code-supported extension-host test harness. Test reconnection, registration, configuration updates, acknowledgements, stale requests, and profile handling.
 

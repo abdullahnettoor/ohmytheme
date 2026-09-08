@@ -12,24 +12,17 @@ final class WorkspaceStore {
 
     init(persistenceStore: PersistenceStore? = nil) {
         if let persistenceStore {
-            self.persistence = persistenceStore
-            self.persistenceError = nil
+            persistence = persistenceStore
             do {
-                _ = try persistenceStore.loadWorkspace()
-            } catch PersistenceError.workspaceNotFound {
-                try? persistenceStore.saveWorkspace(.myMac)
+                try Self.ensureWorkspaceExists(in: persistenceStore)
             } catch {
-                self.persistenceError = String(describing: error)
+                persistenceError = String(describing: error)
             }
             return
         }
         do {
             let store = try Self.makePersistenceStore()
-            do {
-                _ = try store.loadWorkspace()
-            } catch PersistenceError.workspaceNotFound {
-                try store.saveWorkspace(.myMac)
-            }
+            try Self.ensureWorkspaceExists(in: store)
             persistence = store
         } catch {
             persistence = nil
@@ -69,6 +62,14 @@ final class WorkspaceStore {
             try persistence.saveWorkspace(updated)
         } catch {
             persistenceError = String(describing: error)
+        }
+    }
+
+    private static func ensureWorkspaceExists(in store: PersistenceStore) throws {
+        do {
+            _ = try store.loadWorkspace()
+        } catch PersistenceError.workspaceNotFound {
+            try store.saveWorkspace(.myMac)
         }
     }
 
