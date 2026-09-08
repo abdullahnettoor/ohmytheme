@@ -43,6 +43,29 @@ public struct SetupOwnershipDetail: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// Adapter-owned metadata that identifies one setup effect shared by multiple Target Instances.
+public struct ConnectionSharedSetupEffect: Codable, Equatable, Sendable {
+    public let key: String
+    public let name: String
+    public let detail: String?
+    public let coveredExpectedSideEffects: [String]
+    public let isConsequential: Bool
+
+    public init(
+        key: String,
+        name: String,
+        detail: String? = nil,
+        coveredExpectedSideEffects: [String] = [],
+        isConsequential: Bool = false
+    ) {
+        self.key = key
+        self.name = name
+        self.detail = detail
+        self.coveredExpectedSideEffects = coveredExpectedSideEffects
+        self.isConsequential = isConsequential
+    }
+}
+
 /// A setup effect or artifact shared across one or more target instances.
 public struct SetupSharedEffect: Codable, Equatable, Sendable, Identifiable {
     public var id: String { name }
@@ -110,7 +133,8 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
         userActions: [UserAction] = [],
         activationReach: ActivationReach = .currentInstances,
         ownershipDetails: [SetupOwnershipDetail] = [],
-        recoveryBehavior: String = "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
+        recoveryBehavior: String =
+            "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
         discoveryAndSelectionDigest: String,
         sharedEffects: [SetupSharedEffect] = []
     ) {
@@ -137,7 +161,11 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
         !requiresApproval && preparationFailures.isEmpty && userActions.isEmpty
     }
 
+    public var hasReadyTargets: Bool {
+        !targetPlans.isEmpty
+    }
+
     public var isFullyReady: Bool {
-        preparationFailures.isEmpty && !targetPlans.isEmpty
+        preparationFailures.isEmpty && hasReadyTargets
     }
 }

@@ -21,16 +21,29 @@ struct MacOSAppearanceAdapterTests {
         #expect(platform.applyCalls.isEmpty)
     }
 
-    @Test("Connection records the system appearance and permission requirement without changing it")
-    func connectionRecordsBaseline() async throws {
+    @Test("Connection review defers permission-sensitive baseline capture until execution")
+    func connectionRecordsBaselineAtExecution() async throws {
         let fixture = AppearanceFixture(initialDarkMode: false)
 
-        let plan = try await fixture.adapter.prepareConnection(instance: fixture.instance)
-        let baseline = try JSONDecoder().decode(AppearanceSnapshot.self, from: plan.capturedPreChangeState)
-        let receipt = try await fixture.adapter.connect(plan)
+        let reviewedPlan = try await fixture.adapter.prepareConnection(instance: fixture.instance)
 
+        #expect(reviewedPlan.capturedPreChangeState.isEmpty)
+        #expect(reviewedPlan.baselineCaptureTiming == .immediatelyBeforeExecution)
+        #expect(reviewedPlan.requiredPermissions == [MacOSAppearanceAdapter.automationPermissionDescription])
+        #expect(fixture.platform.readCount == 0)
+
+        let capture = try await fixture.adapter.captureConnectionBaseline(for: reviewedPlan)
+        let executionPlan = reviewedPlan.recordingExecutionBaseline(capture)
+        let baseline = try JSONDecoder().decode(
+            AppearanceSnapshot.self,
+            from: executionPlan.capturedPreChangeState
+        )
+        let receipt = try await fixture.adapter.connect(executionPlan)
+
+        #expect(executionPlan.intendedChangeDigest == reviewedPlan.intendedChangeDigest)
+        #expect(executionPlan.expectedSideEffects == reviewedPlan.expectedSideEffects)
         #expect(baseline == AppearanceSnapshot(darkMode: false))
-        #expect(plan.requiredPermissions == [MacOSAppearanceAdapter.automationPermissionDescription])
+        #expect(fixture.platform.readCount == 2)
         #expect(receipt.configurationState == .unchanged)
         #expect(receipt.detail?.contains("Automation access is available") == true)
         #expect(fixture.platform.applyCalls.isEmpty)
@@ -59,14 +72,40 @@ struct MacOSAppearanceAdapterTests {
         }
     }
 
-    @Test("Connection denial is a distinct permission-denied adapter outcome")
-    func connectionReportsPermissionDenial() async throws {
+    @Test("Connection denial occurs at execution rather than during review")
+    func connectionReportsPermissionDenialAtExecution() async throws {
         let fixture = AppearanceFixture(initialDarkMode: false)
         fixture.platform.readFailure = AppleScriptFailure.notAuthorized
 
+        let reviewedPlan = try await fixture.adapter.prepareConnection(instance: fixture.instance)
+        #expect(fixture.platform.readCount == 0)
+
         await #expect(throws: MacOSAppearanceAdapterError.permissionDenied) {
-            _ = try await fixture.adapter.prepareConnection(instance: fixture.instance)
+            _ = try await fixture.adapter.captureConnectionBaseline(for: reviewedPlan)
         }
+    }
+
+    @Test("Aggregate Setup Plan review does not request Automation permission")
+    func aggregateSetupPlanDefersPermissionRequest() async throws {
+        let fixture = AppearanceFixture(initialDarkMode: false)
+        fixture.platform.readFailure = AppleScriptFailure.notAuthorized
+        let engine = ThemeEngine(packs: [], adapters: [fixture.adapter])
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [fixture.instance.id]
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [fixture.instance]
+        )
+
+        #expect(plan.targetPlans.count == 1)
+        #expect(plan.preparationFailures.isEmpty)
+        #expect(fixture.platform.readCount == 0)
+        #expect(plan.userActions.contains { $0.kind == .permission })
     }
 
     @Test("Apply preparation maps the Theme Variant appearance and survives restart serialization")
@@ -234,7 +273,9 @@ struct MacOSAppearanceAdapterTests {
     @Test("Disconnect requires Undo to restore the Connection Baseline first")
     func disconnectRequiresBaseline() async throws {
         let fixture = AppearanceFixture(initialDarkMode: false)
-        let connectionPlan = try await fixture.adapter.prepareConnection(instance: fixture.instance)
+        let reviewedPlan = try await fixture.adapter.prepareConnection(instance: fixture.instance)
+        let capture = try await fixture.adapter.captureConnectionBaseline(for: reviewedPlan)
+        let connectionPlan = reviewedPlan.recordingExecutionBaseline(capture)
         _ = try await fixture.adapter.connect(connectionPlan)
         let applyPlan = try await fixture.adapter.prepareApply(
             instance: fixture.instance,

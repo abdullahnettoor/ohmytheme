@@ -39,13 +39,37 @@ public protocol CapabilityOutcomeError: Error {
     var capabilityOutcomeDetail: String { get }
 }
 
+public enum UserActionKind: String, Codable, Equatable, Sendable {
+    case instruction
+    case approval
+    case permission
+    case reload
+}
+
 public struct UserAction: Codable, Equatable, Sendable {
     public let title: String
     public let detail: String
+    public let kind: UserActionKind
 
-    public init(title: String, detail: String) {
+    public init(title: String, detail: String, kind: UserActionKind = .instruction) {
         self.title = title
         self.detail = detail
+        self.kind = kind
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title
+        case detail
+        case kind
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            title: try container.decode(String.self, forKey: .title),
+            detail: try container.decode(String.self, forKey: .detail),
+            kind: try container.decodeIfPresent(UserActionKind.self, forKey: .kind) ?? .instruction
+        )
     }
 }
 

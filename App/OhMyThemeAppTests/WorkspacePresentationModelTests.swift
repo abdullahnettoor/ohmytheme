@@ -642,10 +642,19 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertTrue(model.isSetupPlanInvalidated)
         XCTAssertNotNil(model.setupPlanInvalidationReason)
 
+        // Returning to the original selection does not revive an invalidated reviewed plan.
+        try await model.setTargetOptIn(instanceID, isOptedIn: true)
+        await model.revalidateSetupPlan()
+        XCTAssertTrue(model.isSetupPlanInvalidated)
+
         // Test confirmSetupPlan when invalidated
         let confirmedInvalid = await model.confirmSetupPlan()
         XCTAssertFalse(confirmedInvalid)
         XCTAssertTrue(model.isSetupPlanInvalidated)
+
+        // Preparing a replacement plan is the only way to clear invalidation.
+        await model.prepareSetupPlan()
+        XCTAssertFalse(model.isSetupPlanInvalidated)
 
         // Dismiss setup plan
         model.dismissSetupPlan()

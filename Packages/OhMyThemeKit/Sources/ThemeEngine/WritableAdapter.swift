@@ -12,6 +12,21 @@ public enum ReconciliationClassification: String, Codable, Equatable, Sendable {
     case conflicting
 }
 
+public enum ConnectionBaselineCaptureTiming: String, Codable, Equatable, Sendable {
+    case duringPlanPreparation
+    case immediatelyBeforeExecution
+}
+
+public struct ConnectionBaselineCapture: Equatable, Sendable {
+    public let capturedPreChangeState: Data
+    public let staleStateToken: String?
+
+    public init(capturedPreChangeState: Data, staleStateToken: String?) {
+        self.capturedPreChangeState = capturedPreChangeState
+        self.staleStateToken = staleStateToken
+    }
+}
+
 /// A prepared, immutable, serializable Connection Plan.
 public struct ConnectionPlan: Codable, Equatable, Sendable {
     public let targetInstanceID: TargetInstanceID
@@ -28,6 +43,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
     public let baselineWasPreviouslyStored: Bool
     public let activationReach: ActivationReach
     public let ownershipDetail: SetupOwnershipDetail?
+    public let sharedSetupEffects: [ConnectionSharedSetupEffect]
+    public let baselineCaptureTiming: ConnectionBaselineCaptureTiming
 
     public init(
         targetInstanceID: TargetInstanceID,
@@ -43,7 +60,9 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         requiresApproval: Bool = false,
         baselineWasPreviouslyStored: Bool = false,
         activationReach: ActivationReach = .currentInstances,
-        ownershipDetail: SetupOwnershipDetail? = nil
+        ownershipDetail: SetupOwnershipDetail? = nil,
+        sharedSetupEffects: [ConnectionSharedSetupEffect] = [],
+        baselineCaptureTiming: ConnectionBaselineCaptureTiming = .duringPlanPreparation
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
@@ -59,6 +78,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         self.baselineWasPreviouslyStored = baselineWasPreviouslyStored
         self.activationReach = activationReach
         self.ownershipDetail = ownershipDetail
+        self.sharedSetupEffects = sharedSetupEffects
+        self.baselineCaptureTiming = baselineCaptureTiming
     }
 
     public func approvingReviewedSetup() -> ConnectionPlan {
@@ -76,7 +97,9 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             requiresApproval: false,
             baselineWasPreviouslyStored: baselineWasPreviouslyStored,
             activationReach: activationReach,
-            ownershipDetail: ownershipDetail
+            ownershipDetail: ownershipDetail,
+            sharedSetupEffects: sharedSetupEffects,
+            baselineCaptureTiming: baselineCaptureTiming
         )
     }
 
@@ -95,7 +118,30 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             requiresApproval: requiresApproval,
             baselineWasPreviouslyStored: wasPreviouslyStored,
             activationReach: activationReach,
-            ownershipDetail: ownershipDetail
+            ownershipDetail: ownershipDetail,
+            sharedSetupEffects: sharedSetupEffects,
+            baselineCaptureTiming: baselineCaptureTiming
+        )
+    }
+
+    func recordingExecutionBaseline(_ capture: ConnectionBaselineCapture) -> ConnectionPlan {
+        ConnectionPlan(
+            targetInstanceID: targetInstanceID,
+            adapterID: adapterID,
+            adapterVersion: adapterVersion,
+            capturedPreChangeState: capture.capturedPreChangeState,
+            intendedChangeDigest: intendedChangeDigest,
+            staleStateToken: capture.staleStateToken,
+            expectedSideEffects: expectedSideEffects,
+            requiredPermissions: requiredPermissions,
+            userActions: userActions,
+            opaquePayload: opaquePayload,
+            requiresApproval: requiresApproval,
+            baselineWasPreviouslyStored: baselineWasPreviouslyStored,
+            activationReach: activationReach,
+            ownershipDetail: ownershipDetail,
+            sharedSetupEffects: sharedSetupEffects,
+            baselineCaptureTiming: baselineCaptureTiming
         )
     }
 
@@ -114,6 +160,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         case baselineWasPreviouslyStored
         case activationReach
         case ownershipDetail
+        case sharedSetupEffects
+        case baselineCaptureTiming
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,8 +182,17 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
                 Bool.self,
                 forKey: .baselineWasPreviouslyStored
             ) ?? false,
-            activationReach: try container.decodeIfPresent(ActivationReach.self, forKey: .activationReach) ?? .currentInstances,
-            ownershipDetail: try container.decodeIfPresent(SetupOwnershipDetail.self, forKey: .ownershipDetail)
+            activationReach: try container.decodeIfPresent(ActivationReach.self, forKey: .activationReach)
+                ?? .currentInstances,
+            ownershipDetail: try container.decodeIfPresent(SetupOwnershipDetail.self, forKey: .ownershipDetail),
+            sharedSetupEffects: try container.decodeIfPresent(
+                [ConnectionSharedSetupEffect].self,
+                forKey: .sharedSetupEffects
+            ) ?? [],
+            baselineCaptureTiming: try container.decodeIfPresent(
+                ConnectionBaselineCaptureTiming.self,
+                forKey: .baselineCaptureTiming
+            ) ?? .duringPlanPreparation
         )
     }
 }
@@ -245,6 +302,11 @@ public protocol RecoverableConnectionAdapter: ConnectionAdapter {
 
 public protocol ReviewedConnectionApproving: Sendable {
     func approveReviewedConnection(_ plan: ConnectionPlan) async throws -> ConnectionPlan
+}
+
+/// An adapter whose reviewed plan explicitly defers permission-sensitive baseline capture.
+public protocol DeferredConnectionBaselineCapturing: Sendable {
+    func captureConnectionBaseline(for reviewedPlan: ConnectionPlan) async throws -> ConnectionBaselineCapture
 }
 
 public protocol ConnectionAdapter: Sendable {

@@ -65,7 +65,11 @@ struct GhosttyAdapterTests {
         #expect(details.managedArtifactURL == fixture.managedURL)
         #expect(details.managedArtifactPermissions == 0o600)
         #expect(plan.expectedSideEffects.contains("Ghostty: managed include and fragment"))
-        #expect(plan.userActions.contains(UserAction(title: "Reload Ghostty", detail: "Press cmd+shift+,")))
+        #expect(
+            plan.userActions.contains(
+                UserAction(title: "Reload Ghostty", detail: "Press cmd+shift+,", kind: .reload)
+            )
+        )
     }
 
     @Test("Theme preparation creates a deterministic Ghostty fragment without writing")

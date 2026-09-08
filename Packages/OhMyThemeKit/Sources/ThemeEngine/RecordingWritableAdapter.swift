@@ -39,6 +39,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
     private let configuredReach: ActivationReach
     private let configuredSideEffects: [String]
     private let configuredPermissions: [String]
+    private let configuredSharedSetupEffects: [ConnectionSharedSetupEffect]
 
     public init(
         id: String = "recording",
@@ -46,7 +47,8 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
         reportsUnchangedForSameBytes: Bool = false,
         activationReach: ActivationReach = .currentInstances,
         expectedSideEffects: [String] = ["recording-world:include"],
-        requiredPermissions: [String] = []
+        requiredPermissions: [String] = [],
+        sharedSetupEffects: [ConnectionSharedSetupEffect] = []
     ) {
         self.id = id
         self.worldState = WorldState(bytes: initialWorld, revision: "rev-0")
@@ -54,6 +56,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
         self.configuredReach = activationReach
         self.configuredSideEffects = expectedSideEffects
         self.configuredPermissions = requiredPermissions
+        self.configuredSharedSetupEffects = sharedSetupEffects
     }
 
     public func setInterruption(_ point: InterruptionPoint, enabled: Bool) {
@@ -143,7 +146,8 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             summary: "Recording adapter configuration for \(instance.displayName).",
             routineDetails: configuredSideEffects,
             isConsequential: !configuredPermissions.isEmpty,
-            consequentialDetail: configuredPermissions.isEmpty ? nil : "Requires permission: \(configuredPermissions.joined(separator: ", "))"
+            consequentialDetail: configuredPermissions.isEmpty
+                ? nil : "Requires permission: \(configuredPermissions.joined(separator: ", "))"
         )
 
         return ConnectionPlan(
@@ -156,7 +160,8 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             expectedSideEffects: configuredSideEffects,
             requiredPermissions: configuredPermissions,
             activationReach: configuredReach,
-            ownershipDetail: ownership
+            ownershipDetail: ownership,
+            sharedSetupEffects: configuredSharedSetupEffects
         )
     }
 

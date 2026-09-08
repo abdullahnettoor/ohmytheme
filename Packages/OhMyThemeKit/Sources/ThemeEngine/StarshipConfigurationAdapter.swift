@@ -313,7 +313,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
             ] + (isLinked != nil ? ["Dotfiles source: \(isLinked!.path)"] : []),
             isConsequential: requiresApproval,
             consequentialDetail: requiresApproval
-                ? "Approval required before reading linked dotfile at \(isLinked!.path)."
+                ? "Approval required before modifying linked dotfile at \(isLinked!.path). Changes may appear in its dotfiles repository."
                 : nil
         )
 
@@ -332,7 +332,10 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
                 ? [
                     UserAction(
                         title: "Approve dotfiles source",
-                        detail: "Oh My Theme will read \(isLinked?.path ?? "the linked source").")
+                        detail:
+                            "Oh My Theme will modify \(isLinked?.path ?? "the linked source"); changes may appear in its dotfiles repository.",
+                        kind: .approval
+                    )
                 ] : [],
             opaquePayload: try encode(StarshipConnectionPayload(details: details, filePlan: nil)),
             requiresApproval: requiresApproval,
@@ -372,7 +375,8 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
             requiresApproval: false,
             baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored,
             activationReach: plan.activationReach,
-            ownershipDetail: updatedOwnership
+            ownershipDetail: updatedOwnership,
+            sharedSetupEffects: plan.sharedSetupEffects
         )
     }
 
@@ -384,7 +388,7 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
         // No file mutation on connect for Starship; just mark connected
         return ConnectionReceipt(
             configurationState: .unchanged,
-            runningInstanceReach: .newProcessesOnly,
+            runningInstanceReach: .nextPrompt,
             detail: "Starship connected; an applied theme will appear at the next prompt"
         )
     }

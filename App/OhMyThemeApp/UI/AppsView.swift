@@ -1,5 +1,5 @@
-import ThemeEngine
 import SwiftUI
+import ThemeEngine
 import ThemeModel
 
 struct AppsView: View {
@@ -37,10 +37,12 @@ struct AppsView: View {
                 try await model.refreshTargets()
             }
         }
-        .sheet(item: Binding(
-            get: { model.setupPlan },
-            set: { if $0 == nil { model.dismissSetupPlan() } }
-        )) { plan in
+        .sheet(
+            item: Binding(
+                get: { model.setupPlan },
+                set: { if $0 == nil { model.dismissSetupPlan() } }
+            )
+        ) { plan in
             SetupPlanReviewView(model: model, plan: plan)
         }
     }

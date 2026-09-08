@@ -346,25 +346,23 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             uniqueKeysWithValues: snapshot.targets.flatMap(\.instances).map { ($0.id, $0) }
         )
 
-        var availableInstances: [ConnectedTargetInstance] = []
-        for id in plan.targetInstanceIDs {
+        let currentInstances = plan.targetInstanceIDs.compactMap { id -> ConnectedTargetInstance? in
             if let candidate = candidates[id] {
-                availableInstances.append(candidate.instance)
-            } else if let item = snapshotItems[id] {
-                availableInstances.append(
-                    ConnectedTargetInstance(
-                        id: item.id,
-                        displayName: item.displayName,
-                        adapterID: item.adapterID
-                    )
-                )
+                return candidate.instance
             }
+            guard let item = snapshotItems[id] else { return nil }
+            return ConnectedTargetInstance(
+                id: item.id,
+                displayName: item.displayName,
+                adapterID: item.adapterID
+            )
         }
 
         return await themeEngine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspace,
-            availableInstances: availableInstances
+            currentInstances: currentInstances,
+            availableTargetInstanceIDs: Set(candidates.keys)
         )
     }
 

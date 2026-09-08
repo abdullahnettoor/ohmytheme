@@ -54,7 +54,14 @@ struct SetupPlanTests {
             id: "macos.wallpaper",
             activationReach: .currentInstances,
             expectedSideEffects: ["Set desktop picture"],
-            requiredPermissions: ["System Events"]
+            requiredPermissions: ["System Events"],
+            sharedSetupEffects: [
+                ConnectionSharedSetupEffect(
+                    key: "macos.wallpaper.management",
+                    name: "Desktop Wallpaper Management",
+                    coveredExpectedSideEffects: ["Set desktop picture"]
+                )
+            ]
         )
         let adapter3 = RecordingWritableAdapter(
             id: "macos.appearance",
@@ -86,12 +93,13 @@ struct SetupPlanTests {
 
         // 1. Stable engine-owned execution order:
         // macos.appearance (0), macos.wallpaper (1), starship (4)
-        #expect(plan.targetInstanceIDs == [
-            appearanceInstance.id,
-            wallpaperInstance1.id,
-            wallpaperInstance2.id,
-            starshipInstance.id
-        ])
+        #expect(
+            plan.targetInstanceIDs == [
+                appearanceInstance.id,
+                wallpaperInstance1.id,
+                wallpaperInstance2.id,
+                starshipInstance.id,
+            ])
         #expect(plan.isFullyReady)
         #expect(plan.targetPlans.count == 4)
         #expect(plan.preparationFailures.isEmpty)
@@ -110,19 +118,116 @@ struct SetupPlanTests {
         #expect(plan.requiredPermissions.contains("System Events"))
 
         // 5. Shared effects grouped once for wallpapers
-        let sharedWallpapers = plan.sharedEffects.first { $0.name == "Desktop Wallpaper Management" || $0.name == "Set desktop picture" }
+        let sharedWallpapers = plan.sharedEffects.first {
+            $0.name == "Desktop Wallpaper Management" || $0.name == "Set desktop picture"
+        }
         #expect(sharedWallpapers != nil)
         #expect(sharedWallpapers?.affectedTargetIDs.count == 2)
         #expect(sharedWallpapers?.affectedTargetIDs.contains(wallpaperInstance1.id) == true)
         #expect(sharedWallpapers?.affectedTargetIDs.contains(wallpaperInstance2.id) == true)
+        #expect(!plan.expectedSideEffects.contains("Set desktop picture"))
 
         // 6. Precondition validation on freshly prepared plan returns valid
         let validation = await engine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspace,
-            availableInstances: scrambledInstances
+            currentInstances: scrambledInstances,
+            availableTargetInstanceIDs: Set(scrambledInstances.map(\.id))
         )
         #expect(validation == .valid)
+    }
+
+    @Test("Shared effect identity suppresses each target's covered detail exactly once")
+    func sharedIdentityUsesPerTargetCoveredDetails() async throws {
+        let first = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "first.instance"),
+            displayName: "First",
+            adapterID: "first"
+        )
+        let second = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "second.instance"),
+            displayName: "Second",
+            adapterID: "second"
+        )
+        let firstEffect = "Capture First baseline"
+        let secondEffect = "Capture Second baseline"
+        let engine = ThemeEngine(
+            packs: [],
+            adapters: [
+                RecordingWritableAdapter(
+                    id: "first",
+                    expectedSideEffects: [firstEffect],
+                    sharedSetupEffects: [
+                        ConnectionSharedSetupEffect(
+                            key: "shared.baseline",
+                            name: "Shared baseline metadata",
+                            coveredExpectedSideEffects: [firstEffect]
+                        )
+                    ]
+                ),
+                RecordingWritableAdapter(
+                    id: "second",
+                    expectedSideEffects: [secondEffect],
+                    sharedSetupEffects: [
+                        ConnectionSharedSetupEffect(
+                            key: "shared.baseline",
+                            name: "Shared baseline metadata",
+                            coveredExpectedSideEffects: [secondEffect]
+                        )
+                    ]
+                ),
+            ]
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [first.id, second.id]
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [first, second]
+        )
+
+        #expect(plan.sharedEffects.count == 1)
+        #expect(plan.sharedEffects[0].affectedTargetIDs == [first.id, second.id])
+        #expect(plan.expectedSideEffects.isEmpty)
+    }
+
+    @Test("Matching effect descriptions are not grouped without adapter-owned shared identity")
+    func matchingDescriptionsRemainIndependentWithoutSharedIdentity() async throws {
+        let first = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "first.instance"),
+            displayName: "First",
+            adapterID: "first"
+        )
+        let second = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "second.instance"),
+            displayName: "Second",
+            adapterID: "second"
+        )
+        let engine = ThemeEngine(
+            packs: [],
+            adapters: [
+                RecordingWritableAdapter(id: "first", expectedSideEffects: ["Same wording"]),
+                RecordingWritableAdapter(id: "second", expectedSideEffects: ["Same wording"]),
+            ]
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [first.id, second.id]
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [first, second]
+        )
+
+        #expect(plan.sharedEffects.isEmpty)
+        #expect(plan.expectedSideEffects == ["First: Same wording", "Second: Same wording"])
     }
 
     @Test("Setup plan captures preparation failure when adapter is missing and plan reflects it")
@@ -162,6 +267,8 @@ struct SetupPlanTests {
         )
 
         #expect(!plan.isFullyReady)
+        #expect(plan.hasReadyTargets)
+        #expect(plan.activationReach == .currentInstances)
         #expect(plan.targetPlans.count == 1)
         #expect(plan.preparationFailures.count == 1)
         #expect(plan.preparationFailures[0].targetInstanceID == missingInstance.id)
@@ -210,13 +317,14 @@ struct SetupPlanTests {
             id: workspace.id,
             displayName: workspace.displayName,
             connectedTargetInstances: [],
-            targetOptIns: [instance1.id], // Opted out target2
+            targetOptIns: [instance1.id],  // Opted out target2
             themeAssignment: nil
         )
         let optInValidation = await engine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspaceWithChangedOptIns,
-            availableInstances: [instance1, instance2]
+            currentInstances: [instance1, instance2],
+            availableTargetInstanceIDs: [instance1.id, instance2.id]
         )
         guard case .invalidated(let reason) = optInValidation else {
             Issue.record("Expected validation to fail due to changed opt-ins")
@@ -228,7 +336,8 @@ struct SetupPlanTests {
         let discoveryValidation = await engine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspace,
-            availableInstances: [instance1] // instance2 disappeared
+            currentInstances: [instance1, instance2],
+            availableTargetInstanceIDs: [instance1.id]  // instance2 disappeared
         )
         guard case .invalidated(let reason2) = discoveryValidation else {
             Issue.record("Expected validation to fail due to missing instance")
@@ -241,7 +350,8 @@ struct SetupPlanTests {
         let configValidation = await engine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspace,
-            availableInstances: [instance1, instance2]
+            currentInstances: [instance1, instance2],
+            availableTargetInstanceIDs: [instance1.id, instance2.id]
         )
         guard case .invalidated(let reason3) = configValidation else {
             Issue.record("Expected validation to fail due to external config modification")
@@ -329,7 +439,9 @@ struct SetupPlanTests {
         }
         #expect(ghosttyPlan.activationReach == ActivationReach.reloadRequired)
         #expect(ghosttyPlan.ownershipDetail != nil)
-        #expect(ghosttyPlan.ownershipDetail?.routineDetails.contains(where: { $0.contains(ghosttyConfigFile.path) }) == true)
+        #expect(
+            ghosttyPlan.ownershipDetail?.routineDetails.contains(where: { $0.contains(ghosttyConfigFile.path) }) == true
+        )
         #expect(ghosttyPlan.userActions.contains(where: { $0.title == "Reload Ghostty" }))
 
         // 2. Starship reach is nextPrompt
@@ -339,15 +451,23 @@ struct SetupPlanTests {
         }
         #expect(starshipPlan.activationReach == ActivationReach.nextPrompt)
         #expect(starshipPlan.ownershipDetail != nil)
-        #expect(starshipPlan.ownershipDetail?.routineDetails.contains(where: { $0.contains(realStarshipFile.path) }) == true)
+        #expect(
+            starshipPlan.ownershipDetail?.routineDetails.contains(where: { $0.contains(realStarshipFile.path) }) == true
+        )
         #expect(starshipPlan.ownershipDetail?.isConsequential == true)
-        #expect(starshipPlan.userActions.contains(where: { $0.title == "Approve dotfiles source" && $0.detail.contains(realStarshipFile.path) }))
+        #expect(
+            starshipPlan.userActions.contains(where: {
+                $0.title == "Approve dotfiles source" && $0.detail.contains(realStarshipFile.path)
+            }))
 
         // 3. Aggregate plan reach takes the worst reach across targets (.reloadRequired)
         #expect(plan.activationReach == ActivationReach.reloadRequired)
 
         // 4. Aggregate user actions includes the exact dotfiles approval and reload
-        #expect(plan.userActions.contains(where: { $0.title == "Approve dotfiles source" && $0.detail.contains(realStarshipFile.path) }))
+        #expect(
+            plan.userActions.contains(where: {
+                $0.title == "Approve dotfiles source" && $0.detail.contains(realStarshipFile.path)
+            }))
         #expect(plan.userActions.contains(where: { $0.title == "Reload Ghostty" }))
     }
 
@@ -403,7 +523,8 @@ struct SetupPlanTests {
         let validResult = await engine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspace,
-            availableInstances: [instance1, instance2]
+            currentInstances: [instance1, instance2],
+            availableTargetInstanceIDs: [instance1.id, instance2.id]
         )
         #expect(validResult == .valid)
 
@@ -414,7 +535,8 @@ struct SetupPlanTests {
         let invalidatedResult = await engine.validateSetupPlanPreconditions(
             plan: plan,
             workspace: workspace,
-            availableInstances: [instance1, instance2]
+            currentInstances: [instance1, instance2],
+            availableTargetInstanceIDs: [instance1.id, instance2.id]
         )
         guard case .invalidated(let reason) = invalidatedResult else {
             Issue.record("Expected plan to invalidate when failed preparation resolves")

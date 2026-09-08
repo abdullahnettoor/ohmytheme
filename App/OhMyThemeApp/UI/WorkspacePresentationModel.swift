@@ -237,7 +237,8 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     var unresolvedOptedInCount: Int {
-        let countFromInstances = applicationTargets.flatMap(\.instances).filter { $0.isOptedIn && !$0.isConnected }.count
+        let countFromInstances = applicationTargets.flatMap(\.instances).filter { $0.isOptedIn && !$0.isConnected }
+            .count
         if countFromInstances > 0 || !applicationTargets.flatMap(\.instances).isEmpty {
             return countFromInstances
         }
@@ -374,12 +375,9 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     func revalidateSetupPlan() async {
-        guard let plan = setupPlan else { return }
+        guard let plan = setupPlan, setupPlanInvalidationReason == nil else { return }
         let result = await runtime.validateSetupPlanPreconditions(plan)
-        switch result {
-        case .valid:
-            setupPlanInvalidationReason = nil
-        case .invalidated(let reason):
+        if case .invalidated(let reason) = result {
             setupPlanInvalidationReason = reason
         }
     }

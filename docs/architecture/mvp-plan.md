@@ -230,9 +230,9 @@ rollback(receipt) -> RollbackResult
 disconnect(instance, baseline, mode) -> DisconnectResult
 ```
 
-Connection Plans and Adapter Plans are immutable and serializable. Each includes intended-change digests, captured pre-change values, stale-state tokens, expected side effects, required permissions, and a versioned opaque payload owned by the adapter.
+Connection Plans and Adapter Plans are immutable and serializable. Each includes intended-change digests, captured pre-change values, stale-state tokens, expected side effects, required permissions, and a versioned opaque payload owned by the adapter. A permission-sensitive Connection Plan may instead declare that its baseline must be captured immediately before execution. Its reviewed intent, permissions, side effects, and ownership details remain immutable; after the permission disclosure, the engine materializes only the baseline bytes and stale-state token into the journaled execution copy before any mutation.
 
-`connect` and `apply` consume their prepared plans. They must not regenerate output after user review. Immediately before each write or external mutation, the adapter revalidates file identity, hashes, target version, and relevant setting values against the plan. A stale plan stops as a conflict.
+`connect` and `apply` consume their prepared plans. They must not regenerate intended output after user review. Immediately before each write or external mutation, the adapter revalidates file identity, hashes, target version, and relevant setting values against the plan. A stale plan stops as a conflict.
 
 Every side effect must either be idempotent or expose enough inspection state for recovery to classify the current target as before-change, intended-after-change, or conflicting. Recovery may reconstruct a receipt when intended state is already present, retry an idempotent operation from before-state, or stop on any third state. It must never blindly repeat an ambiguous effect.
 

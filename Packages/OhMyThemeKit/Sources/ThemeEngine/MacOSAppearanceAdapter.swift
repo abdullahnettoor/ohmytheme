@@ -83,7 +83,7 @@ public enum MacOSAppearanceAdapterError: Error, Codable, Equatable, Sendable, Ca
     }
 }
 
-public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
+public actor MacOSAppearanceAdapter: RecoverableApplyAdapter, DeferredConnectionBaselineCapturing {
     public let id = "macos.appearance"
     public let version = "1.0.0"
     public let payloadVersion = "1"
@@ -99,9 +99,9 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
         self.platform = platform
     }
 
-    // Discovery deliberately performs no System Events request. The caller can
-    // show the permission disclosure immediately before connection triggers the
-    // first read and, on a clean machine, macOS presents its consent prompt.
+    // Discovery and Setup Plan review deliberately perform no System Events request.
+    // The caller shows the permission disclosure before setup execution performs
+    // the first read and, on a clean machine, macOS presents its consent prompt.
     public func discover() -> MacOSAppearanceDiscoveryReport {
         MacOSAppearanceDiscoveryReport(
             targetInstanceID: Self.systemTargetInstanceID,
@@ -117,8 +117,7 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
     ) async throws -> ConnectionPlan {
         _ = approveLinkedSource
         try validate(instance)
-        let baseline = try readAppearance(permissionFailure: .permissionDenied)
-        let baselineData = try encode(baseline)
+        let deferredBaseline = Data()
 
         let ownershipDetail = SetupOwnershipDetail(
             targetInstanceID: instance.id,
@@ -133,22 +132,44 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
             targetInstanceID: instance.id,
             adapterID: id,
             adapterVersion: version,
-            capturedPreChangeState: baselineData,
-            intendedChangeDigest: digest(of: baselineData),
-            staleStateToken: digest(of: baselineData),
+            capturedPreChangeState: deferredBaseline,
+            intendedChangeDigest: digest(of: Data("macos.appearance.connection".utf8)),
+            staleStateToken: nil,
             expectedSideEffects: [
                 "Records the current system Light/Dark appearance so it can be restored."
             ],
             requiredPermissions: [Self.automationPermissionDescription],
-            userActions: [],
-            opaquePayload: baselineData,
+            userActions: [Self.automationPermissionAction],
+            opaquePayload: nil,
             requiresApproval: false,
             activationReach: .currentInstances,
-            ownershipDetail: ownershipDetail
+            ownershipDetail: ownershipDetail,
+            baselineCaptureTiming: .immediatelyBeforeExecution
+        )
+    }
+
+    public func captureConnectionBaseline(
+        for reviewedPlan: ConnectionPlan
+    ) async throws -> ConnectionBaselineCapture {
+        try validateConnectionPlan(reviewedPlan)
+        guard reviewedPlan.baselineCaptureTiming == .immediatelyBeforeExecution,
+            reviewedPlan.capturedPreChangeState.isEmpty
+        else {
+            throw MacOSAppearanceAdapterError.malformedPlan
+        }
+
+        let baseline = try readAppearance(permissionFailure: .permissionDenied)
+        let baselineData = try encode(baseline)
+        return ConnectionBaselineCapture(
+            capturedPreChangeState: baselineData,
+            staleStateToken: digest(of: baselineData)
         )
     }
 
     public func connect(_ plan: ConnectionPlan) async throws -> ConnectionReceipt {
+        guard !plan.capturedPreChangeState.isEmpty else {
+            throw MacOSAppearanceAdapterError.malformedPlan
+        }
         try await revalidateConnection(plan: plan)
         return ConnectionReceipt(
             configurationState: .unchanged,
@@ -158,12 +179,8 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
     }
 
     public func revalidateConnection(plan: ConnectionPlan) async throws {
-        guard plan.adapterID == id,
-            plan.adapterVersion == version,
-            plan.targetInstanceID == Self.systemTargetInstanceID
-        else {
-            throw MacOSAppearanceAdapterError.malformedPlan
-        }
+        try validateConnectionPlan(plan)
+        guard !plan.capturedPreChangeState.isEmpty else { return }
         let baseline: AppearanceSnapshot = try decode(plan.capturedPreChangeState)
         let current = try readAppearance(permissionFailure: .permissionRevoked)
         guard current == baseline else {
@@ -456,8 +473,18 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
 
     private static let automationPermissionAction = UserAction(
         title: "Allow Automation access",
-        detail: automationPermissionDescription
+        detail: automationPermissionDescription,
+        kind: .permission
     )
+
+    private func validateConnectionPlan(_ plan: ConnectionPlan) throws {
+        guard plan.adapterID == id,
+            plan.adapterVersion == version,
+            plan.targetInstanceID == Self.systemTargetInstanceID
+        else {
+            throw MacOSAppearanceAdapterError.malformedPlan
+        }
+    }
 
     private func validate(_ instance: ConnectedTargetInstance) throws {
         guard instance.id == Self.systemTargetInstanceID, instance.adapterID == id else {

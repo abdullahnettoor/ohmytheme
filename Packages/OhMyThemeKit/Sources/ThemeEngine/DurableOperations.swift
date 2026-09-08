@@ -106,9 +106,6 @@ extension ThemeEngine {
                 )
                 targetPlans.append(plan)
 
-                for effect in plan.expectedSideEffects where !expectedSideEffects.contains(effect) {
-                    expectedSideEffects.append(effect)
-                }
                 for permission in plan.requiredPermissions where !requiredPermissions.contains(permission) {
                     requiredPermissions.append(permission)
                 }
@@ -116,16 +113,18 @@ extension ThemeEngine {
                     userActions.append(action)
                 }
 
-                let ownership = plan.ownershipDetail ?? SetupOwnershipDetail(
-                    targetInstanceID: instance.id,
-                    adapterID: instance.adapterID,
-                    summary: "Manages configuration for \(instance.displayName).",
-                    routineDetails: plan.expectedSideEffects,
-                    isConsequential: plan.requiresApproval || !plan.requiredPermissions.isEmpty,
-                    consequentialDetail: plan.requiresApproval
-                        ? "Approval required before modifying existing configuration."
-                        : (plan.requiredPermissions.first.map { "Requires permission: \($0)" })
-                )
+                let ownership =
+                    plan.ownershipDetail
+                    ?? SetupOwnershipDetail(
+                        targetInstanceID: instance.id,
+                        adapterID: instance.adapterID,
+                        summary: "Manages configuration for \(instance.displayName).",
+                        routineDetails: plan.expectedSideEffects,
+                        isConsequential: plan.requiresApproval || !plan.requiredPermissions.isEmpty,
+                        consequentialDetail: plan.requiresApproval
+                            ? "Approval required before modifying existing configuration."
+                            : (plan.requiredPermissions.first.map { "Requires permission: \($0)" })
+                    )
                 ownershipDetails.append(ownership)
             } catch {
                 let failure = TargetSetupPreparationFailure(
@@ -147,15 +146,29 @@ extension ThemeEngine {
             }
         }
 
-        let sharedEffects = Self.deriveSharedEffects(
+        let sharedEffectResult = Self.deriveSharedEffects(
             instances: orderedInstances,
             plans: targetPlans
         )
+        let instancesByID = Dictionary(uniqueKeysWithValues: orderedInstances.map { ($0.id, $0) })
+        let unsharedEffects = targetPlans.flatMap { plan in
+            plan.expectedSideEffects.compactMap { effect -> (TargetInstanceID, String)? in
+                let coveredEffects = sharedEffectResult.coveredSideEffectsByTarget[plan.targetInstanceID] ?? []
+                return coveredEffects.contains(effect) ? nil : (plan.targetInstanceID, effect)
+            }
+        }
+        let effectCounts = Dictionary(grouping: unsharedEffects, by: { $0.1 }).mapValues(\.count)
+        expectedSideEffects = unsharedEffects.map { targetID, effect in
+            guard effectCounts[effect, default: 0] > 1,
+                let instance = instancesByID[targetID]
+            else {
+                return effect
+            }
+            return "\(instance.displayName): \(effect)"
+        }
 
         let reach: ActivationReach
         if targetPlans.isEmpty {
-            reach = .unavailable
-        } else if !preparationFailures.isEmpty {
             reach = .unavailable
         } else {
             reach = targetPlans.map(\.activationReach).reduce(.currentInstances, Self.worstReach)
@@ -178,67 +191,73 @@ extension ThemeEngine {
             userActions: userActions,
             activationReach: reach,
             ownershipDetails: ownershipDetails,
-            recoveryBehavior: "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
+            recoveryBehavior:
+                "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
             discoveryAndSelectionDigest: digest,
-            sharedEffects: sharedEffects
+            sharedEffects: sharedEffectResult.effects
         )
     }
 
     private static func deriveSharedEffects(
         instances: [ConnectedTargetInstance],
         plans: [ConnectionPlan]
-    ) -> [SetupSharedEffect] {
-        var shared: [SetupSharedEffect] = []
-        var effectsToInstances: [String: [(id: TargetInstanceID, name: String)]] = [:]
+    ) -> (effects: [SetupSharedEffect], coveredSideEffectsByTarget: [TargetInstanceID: Set<String>]) {
+        struct GroupedEffect {
+            let descriptor: ConnectionSharedSetupEffect
+            var targets: [(id: TargetInstanceID, name: String, coveredSideEffects: [String])]
+        }
+
+        let instancesByID = Dictionary(uniqueKeysWithValues: instances.map { ($0.id, $0) })
+        var groups: [String: GroupedEffect] = [:]
 
         for plan in plans {
-            guard let instance = instances.first(where: { $0.id == plan.targetInstanceID }) else { continue }
-            for effect in plan.expectedSideEffects {
-                effectsToInstances[effect, default: []].append((id: instance.id, name: instance.displayName))
-            }
-            for perm in plan.requiredPermissions {
-                effectsToInstances[perm, default: []].append((id: instance.id, name: instance.displayName))
+            guard let instance = instancesByID[plan.targetInstanceID] else { continue }
+            for descriptor in plan.sharedSetupEffects {
+                let target = (
+                    id: instance.id,
+                    name: instance.displayName,
+                    coveredSideEffects: descriptor.coveredExpectedSideEffects
+                )
+                if var group = groups[descriptor.key] {
+                    group.targets.append(target)
+                    groups[descriptor.key] = group
+                } else {
+                    groups[descriptor.key] = GroupedEffect(
+                        descriptor: descriptor,
+                        targets: [target]
+                    )
+                }
             }
         }
 
-        for (effect, targets) in effectsToInstances where targets.count > 1 {
-            let isConsequential = plans.contains { plan in
-                plan.requiredPermissions.contains(effect) || (plan.requiresApproval && plan.expectedSideEffects.contains(effect))
-            }
-            shared.append(
-                SetupSharedEffect(
-                    name: effect,
-                    detail: nil,
-                    affectedTargetIDs: targets.map(\.id),
-                    affectedTargetNames: targets.map(\.name),
-                    isConsequential: isConsequential
+        let sharedGroups = groups.values.filter { $0.targets.count > 1 }
+        var coveredSideEffectsByTarget: [TargetInstanceID: Set<String>] = [:]
+        for group in sharedGroups {
+            for target in group.targets {
+                coveredSideEffectsByTarget[target.id, default: []].formUnion(
+                    target.coveredSideEffects
                 )
+            }
+        }
+        let effects = sharedGroups.map { group in
+            SetupSharedEffect(
+                name: group.descriptor.name,
+                detail: group.descriptor.detail,
+                affectedTargetIDs: group.targets.map(\.id),
+                affectedTargetNames: group.targets.map(\.name),
+                isConsequential: group.descriptor.isConsequential
             )
         }
+        .sorted { $0.name < $1.name }
 
-        let wallpaperInstances = instances.filter { $0.adapterID == "macos.wallpaper" }
-        if wallpaperInstances.count > 1 {
-            let sharedName = "Desktop Wallpaper Management"
-            if !shared.contains(where: { $0.name == sharedName }) {
-                shared.append(
-                    SetupSharedEffect(
-                        name: sharedName,
-                        detail: "Applies desktop wallpapers across all selected displays",
-                        affectedTargetIDs: wallpaperInstances.map(\.id),
-                        affectedTargetNames: wallpaperInstances.map(\.displayName),
-                        isConsequential: false
-                    )
-                )
-            }
-        }
-
-        return shared.sorted { $0.name < $1.name }
+        return (effects, coveredSideEffectsByTarget)
     }
 
     public func validateSetupPlanPreconditions(
         plan: SetupPlan,
         workspace: Workspace,
-        availableInstances: [ConnectedTargetInstance]
+        currentInstances: [ConnectedTargetInstance],
+        availableTargetInstanceIDs: Set<TargetInstanceID>
     ) async -> SetupPlanPreconditionValidation {
         let currentUnresolvedOptIns = Set(workspace.targetOptIns.filter { !workspace.isConnected($0) })
         let planTargets = Set(plan.targetInstanceIDs)
@@ -248,16 +267,13 @@ extension ThemeEngine {
             )
         }
 
-        let availableMap = Dictionary(uniqueKeysWithValues: availableInstances.map { ($0.id, $0) })
-        for targetID in plan.targetInstanceIDs {
-            if availableMap[targetID] == nil {
+        let currentInstancesByID = Dictionary(uniqueKeysWithValues: currentInstances.map { ($0.id, $0) })
+        for targetPlan in plan.targetPlans {
+            if !availableTargetInstanceIDs.contains(targetPlan.targetInstanceID) {
                 return .invalidated(
-                    reason: "Target instance \(targetID.rawValue) is no longer available."
+                    reason: "Target instance \(targetPlan.targetInstanceID.rawValue) is no longer available."
                 )
             }
-        }
-
-        for targetPlan in plan.targetPlans {
             guard let adapter = self.connectionAdapter(for: targetPlan.adapterID) else {
                 return .invalidated(
                     reason: "Adapter \(targetPlan.adapterID) is no longer available."
@@ -267,13 +283,14 @@ extension ThemeEngine {
                 try await adapter.revalidateConnection(plan: targetPlan)
             } catch {
                 return .invalidated(
-                    reason: "Configuration for \(targetPlan.targetInstanceID.rawValue) was externally modified: \(error.localizedDescription)"
+                    reason:
+                        "Configuration for \(targetPlan.targetInstanceID.rawValue) was externally modified: \(error.localizedDescription)"
                 )
             }
         }
 
         for failure in plan.preparationFailures {
-            guard let instance = availableMap[failure.targetInstanceID] else {
+            guard let instance = currentInstancesByID[failure.targetInstanceID] else {
                 return .invalidated(
                     reason: "Target instance \(failure.targetInstanceID.rawValue) is no longer available."
                 )
@@ -281,7 +298,8 @@ extension ThemeEngine {
             guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
                 if failure.adapterID != instance.adapterID {
                     return .invalidated(
-                        reason: "Adapter for \(instance.displayName) changed from \(failure.adapterID) to \(instance.adapterID)."
+                        reason:
+                            "Adapter for \(instance.displayName) changed from \(failure.adapterID) to \(instance.adapterID)."
                     )
                 }
                 continue
@@ -304,7 +322,9 @@ extension ThemeEngine {
             }
         }
 
-        let orderedAvailable = WorkspaceTargetOrder.ordered(plan.targetInstanceIDs.compactMap { availableMap[$0] })
+        let orderedAvailable = WorkspaceTargetOrder.ordered(
+            plan.targetInstanceIDs.compactMap { currentInstancesByID[$0] }
+        )
         let currentDigest = Self.computeDiscoveryAndSelectionDigest(
             instances: orderedAvailable,
             workspace: workspace,
@@ -469,6 +489,57 @@ extension ThemeEngine {
                     )
                 ]
             )
+        }
+
+        if plan.baselineCaptureTiming == .immediatelyBeforeExecution {
+            guard let baselineCapturingAdapter = adapter as? any DeferredConnectionBaselineCapturing else {
+                try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+                return ConnectionReport(
+                    operationID: operation.id,
+                    outcomes: [
+                        TargetCapabilityOutcome(
+                            targetInstanceID: instance.id,
+                            adapterID: adapter.id,
+                            capabilityID: "connection",
+                            sourceType: .unavailable,
+                            sourceRevision: "n/a",
+                            configurationState: .failed,
+                            runningInstanceReach: .unavailable,
+                            detail: "The adapter cannot capture its deferred Connection Baseline."
+                        )
+                    ]
+                )
+            }
+            do {
+                let capture = try await baselineCapturingAdapter.captureConnectionBaseline(for: plan)
+                plan = plan.recordingExecutionBaseline(capture)
+            } catch {
+                let failure = Self.capabilityOutcome(
+                    for: error,
+                    fallbackState: .failed,
+                    fallbackDetail: "Execution preparation failed: \(error)"
+                )
+                try persistence.journalTransitionState(operationID: operation.id, to: .failed)
+                return ConnectionReport(
+                    operationID: operation.id,
+                    outcomes: [
+                        TargetCapabilityOutcome(
+                            targetInstanceID: instance.id,
+                            adapterID: adapter.id,
+                            capabilityID: "connection",
+                            sourceType: .unavailable,
+                            sourceRevision: "n/a",
+                            configurationState: failure.configurationState,
+                            runningInstanceReach: failure.activationReach,
+                            detail: failure.detail,
+                            userActions: Self.permissionActions(
+                                setupNeeds: plan.userActions,
+                                requiredPermissions: plan.requiredPermissions
+                            )
+                        )
+                    ]
+                )
+            }
         }
 
         let baselineWasPreviouslyStored =

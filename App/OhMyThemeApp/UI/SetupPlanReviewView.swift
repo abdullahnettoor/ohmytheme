@@ -191,20 +191,8 @@ struct SetupPlanReviewView: View {
 
                             if let targetPlan, !targetPlan.userActions.isEmpty {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(targetPlan.userActions, id: \.title) { action in
-                                        HStack(alignment: .top, spacing: 6) {
-                                            Image(systemName: action.title.contains("Approve") || action.title.contains("Permission") ? "exclamationmark.shield.fill" : "arrow.triangle.2.circlepath")
-                                                .font(.caption2)
-                                                .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.secondary)
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(action.title)
-                                                    .font(.caption2.weight(.semibold))
-                                                    .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.primary)
-                                                Text(action.detail)
-                                                    .font(.caption2.monospaced())
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
+                                    ForEach(Array(targetPlan.userActions.enumerated()), id: \.offset) { _, action in
+                                        userActionRow(action)
                                     }
                                 }
                                 .padding(.leading, 30)
@@ -244,7 +232,7 @@ struct SetupPlanReviewView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Shared Artifacts & Setup Effects")
                 .font(.headline)
-            Text("These configuration effects apply once across multiple selected targets.")
+            Text("Shared setup details are grouped once for every affected target.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -313,20 +301,8 @@ struct SetupPlanReviewView: View {
                         Text("Required User Actions & Approvals")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.primary)
-                        ForEach(plan.userActions, id: \.title) { action in
-                            HStack(alignment: .top, spacing: 6) {
-                                Image(systemName: action.title.contains("Approve") || action.title.contains("Permission") ? "exclamationmark.shield.fill" : "hand.tap.fill")
-                                    .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.secondary)
-                                    .font(.caption2)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(action.title)
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.primary)
-                                    Text(action.detail)
-                                        .font(.caption2.monospaced())
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
+                        ForEach(Array(plan.userActions.enumerated()), id: \.offset) { _, action in
+                            userActionRow(action)
                         }
                     }
                 }
@@ -381,9 +357,12 @@ struct SetupPlanReviewView: View {
                 Text("Zero External Writes Guarantee")
                     .font(.subheadline.weight(.semibold))
             }
-            Text("Reviewing this plan performed zero writes to your system and created no connection baseline. " + plan.recoveryBehavior)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Text(
+                "Reviewing this plan performed zero writes to your system and created no connection baseline. "
+                    + plan.recoveryBehavior
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
         .padding(12)
         .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
@@ -417,11 +396,35 @@ struct SetupPlanReviewView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!plan.isFullyReady || model.isSetupPlanInvalidated)
+                .disabled(!plan.hasReadyTargets || model.isSetupPlanInvalidated)
                 .accessibilityIdentifier("confirm-setup-plan-button")
             }
         }
         .padding(18)
+    }
+
+    private func userActionRow(_ action: UserAction) -> some View {
+        let isConsequential = action.kind == .approval || action.kind == .permission
+        let systemImage: String =
+            switch action.kind {
+            case .approval, .permission: "exclamationmark.shield.fill"
+            case .reload: "arrow.triangle.2.circlepath"
+            case .instruction: "hand.tap.fill"
+            }
+
+        return HStack(alignment: .top, spacing: 6) {
+            Image(systemName: systemImage)
+                .foregroundStyle(isConsequential ? Color.orange : Color.secondary)
+                .font(.caption2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(action.title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(isConsequential ? Color.orange : Color.primary)
+                Text(action.detail)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func targetDisplayName(for id: TargetInstanceID) -> String {

@@ -500,7 +500,7 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
             ] + (details.linkedSourceURL != nil ? ["Dotfiles source: \(details.linkedSourceURL!.path)"] : []),
             isConsequential: requiresApproval,
             consequentialDetail: requiresApproval
-                ? "Approval required before modifying linked dotfile at \(details.linkedSourceURL!.path)."
+                ? "Approval required before modifying linked dotfile at \(details.linkedSourceURL!.path). Changes may appear in its dotfiles repository."
                 : nil
         )
 
@@ -517,14 +517,16 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
             ],
             requiredPermissions: ["Write the selected user-owned Ghostty configuration"],
             userActions: [
-                UserAction(title: "Reload Ghostty", detail: details.expectedReload)
+                UserAction(title: "Reload Ghostty", detail: details.expectedReload, kind: .reload)
             ]
                 + (details.linkedSourceURL == nil || approveLinkedSource
                     ? []
                     : [
                         UserAction(
                             title: "Approve dotfiles source",
-                            detail: "Oh My Theme will edit \(details.linkedSourceURL?.path ?? "the linked source")."
+                            detail:
+                                "Oh My Theme will modify \(details.linkedSourceURL?.path ?? "the linked source"); changes may appear in its dotfiles repository.",
+                            kind: .approval
                         )
                     ]),
             opaquePayload: try encode(payload),
@@ -565,7 +567,8 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
             requiresApproval: false,
             baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored,
             activationReach: plan.activationReach,
-            ownershipDetail: updatedOwnership
+            ownershipDetail: updatedOwnership,
+            sharedSetupEffects: plan.sharedSetupEffects
         )
     }
 

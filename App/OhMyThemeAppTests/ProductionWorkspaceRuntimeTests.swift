@@ -1066,6 +1066,54 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         )
     }
 
+    func testUnavailablePersistedTargetDoesNotSatisfySetupPlanAvailabilityValidation() async throws {
+        let targetID = MacOSWallpaperAdapter.targetInstanceID(forDisplayID: 42)
+        let instance = ConnectedTargetInstance(
+            id: targetID,
+            displayName: "Wallpaper (Display 42)",
+            adapterID: "macos.wallpaper"
+        )
+        try persistence.saveWorkspace(
+            Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [],
+                targetOptIns: [targetID]
+            ),
+            targetInstances: [
+                PersistedTargetInstance(
+                    id: targetID,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: false,
+                    isOptedIn: true
+                )
+            ]
+        )
+        let runtime = makeRuntime()
+        let connectionPlan = ConnectionPlan(
+            targetInstanceID: targetID,
+            adapterID: instance.adapterID,
+            adapterVersion: "1.0.0",
+            capturedPreChangeState: Data("reviewed".utf8),
+            intendedChangeDigest: "reviewed"
+        )
+        let setupPlan = SetupPlan(
+            workspaceID: .myMac,
+            targetInstanceIDs: [targetID],
+            targetPlans: [connectionPlan],
+            discoveryAndSelectionDigest: "reviewed"
+        )
+
+        let validation = await runtime.validateSetupPlanPreconditions(setupPlan)
+
+        guard case .invalidated(let reason) = validation else {
+            XCTFail("Expected the unavailable persisted display to invalidate the plan")
+            return
+        }
+        XCTAssertTrue(reason.contains("no longer available"))
+    }
+
     func testProductionWorkspaceRuntimePrepareSetupPlanAndValidation() async throws {
         let adapter = RecordingWritableAdapter(id: "recording")
         let runtime = makeRuntime(additionalAdapters: [adapter])

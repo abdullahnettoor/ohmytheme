@@ -794,7 +794,7 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
             summary: "Installs Oh My Theme companion extension and communicates via Unix socket.",
             routineDetails: [
                 "VS Code executable: \(installation.executableURL.path)",
-                "Companion extension: \(artifact.extensionID)@\(artifact.version) for profile \(profileName)"
+                "Companion extension: \(artifact.extensionID)@\(artifact.version) for profile \(profileName)",
             ],
             isConsequential: !approved,
             consequentialDetail: !approved
@@ -823,7 +823,8 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
                     UserAction(
                         title: "Approve VS Code companion installation",
                         detail:
-                            "Install \(artifact.extensionID)@\(artifact.version) for profile \(profileName) using \(installation.executableURL.path)."
+                            "Install \(artifact.extensionID)@\(artifact.version) for profile \(profileName) using \(installation.executableURL.path).",
+                        kind: .approval
                     )
                 ] : [],
             opaquePayload: try encode(payload),

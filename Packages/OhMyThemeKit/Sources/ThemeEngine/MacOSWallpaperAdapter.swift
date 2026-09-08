@@ -195,6 +195,7 @@ public actor MacOSWallpaperAdapter: RecoverableApplyAdapter {
         let digest = digest(of: opaquePayload)
 
         let displayTitle = instance.displayName.isEmpty ? "display \(displayID)" : instance.displayName
+        let expectedSideEffect = "Records the current wallpaper for display \(displayID) so it can be restored."
         let ownershipDetail = SetupOwnershipDetail(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -213,9 +214,7 @@ public actor MacOSWallpaperAdapter: RecoverableApplyAdapter {
             capturedPreChangeState: baselineData,
             intendedChangeDigest: digest,
             staleStateToken: digest,
-            expectedSideEffects: [
-                "Records the current wallpaper for display \(displayID) so it can be restored."
-            ],
+            expectedSideEffects: [expectedSideEffect],
             requiredPermissions: [],
             userActions: [],
             opaquePayload: opaquePayload,
