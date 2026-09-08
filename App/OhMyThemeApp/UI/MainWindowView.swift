@@ -53,6 +53,7 @@ struct MainWindowView: View {
             )
         ) { plan in
             SetupPlanReviewView(model: model, plan: plan)
+                .interactiveDismissDisabled(model.isExecutingSetup)
         }
         .onAppear {
             presenceController.mainWindowDidOpen()

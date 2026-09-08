@@ -89,6 +89,10 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         worldState = WorldState(bytes: newBytes, revision: UUID().uuidString)
     }
 
+    public func isConnected(_ id: TargetInstanceID) -> Bool {
+        connectedInstances.contains(id)
+    }
+
     // MARK: ThemeAdapter
 
     public func prepareApply(

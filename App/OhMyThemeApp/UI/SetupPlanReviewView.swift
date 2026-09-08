@@ -77,6 +77,7 @@ struct SetupPlanReviewView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .disabled(model.isExecutingSetup)
             .accessibilityIdentifier("dismiss-setup-plan-button")
         }
         .padding(18)
@@ -383,6 +384,7 @@ struct SetupPlanReviewView: View {
                 dismiss()
             }
             .buttonStyle(.plain)
+            .disabled(model.isExecutingSetup)
             .accessibilityIdentifier("dismiss-setup-plan-footer-button")
 
             Spacer()

@@ -634,4 +634,204 @@ struct SetupTransactionTests {
         let reloaded = try fixture.store.journalLoadOperation(id: op.id)
         #expect(reloaded?.state == .failed || reloaded?.state == .applied || reloaded?.state == .reconciled)
     }
+
+    // AC 2: Cancellation before mutation is immediate; unstarted instances marked skipped.
+    @Test("Cancellation before mutation is immediate and marks unstarted instances skipped")
+    func cancellationBeforeMutationIsImmediate() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let first = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let firstAdapter = RecordingWritableAdapter(id: "macos.appearance")
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [firstAdapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID],
+            themeAssignment: nil
+        )
+        let plan = try await engine.prepareSetup(workspace: workspace, instances: [first])
+
+        // Request cancellation before executeSetup begins
+        #expect(try await engine.cancelRemainingSetup(operationID: plan.id))
+
+        var caughtCancellation = false
+        do {
+            _ = try await engine.executeSetup(
+                plan: plan,
+                workspace: workspace,
+                instances: [first]
+            )
+        } catch let error as DurableOperationError {
+            if error == .operationCancelled {
+                caughtCancellation = true
+            }
+        }
+
+        #expect(caughtCancellation)
+        let records = try fixture.store.journalLoadRecords(operationID: plan.id)
+        #expect(!records.isEmpty)
+        #expect(records.allSatisfy { $0.phase == .skipped })
+        #expect(try fixture.store.journalLoadOperation(id: plan.id)?.state == .cancelled)
+        #expect(await firstAdapter.isConnected(firstID) == false)
+    }
+
+    // AC 3: Completed target results remain intact and are not automatically restored when setup is canceled.
+    @Test("Completed target results remain intact and are not restored when setup is cancelled")
+    func completedTargetsRemainIntactOnCancel() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let secondID = TargetInstanceID(rawValue: "starship.default")
+        let first = ConnectedTargetInstance(
+            id: firstID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let second = ConnectedTargetInstance(id: secondID, displayName: "Starship", adapterID: "starship")
+        let firstAdapter = RecordingWritableAdapter(id: "macos.appearance")
+        let secondAdapter = RecordingWritableAdapter(id: "starship")
+
+        let gate = SetupGate()
+        await firstAdapter.setBeforeConnectHook { _ in
+            await gate.wait()
+        }
+
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [firstAdapter, secondAdapter],
+            persistence: fixture.store
+        )
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID, secondID],
+            themeAssignment: nil
+        )
+        let plan = try await engine.prepareSetup(workspace: workspace, instances: [first, second])
+        let progress = ProgressCollector()
+        let execution = Task {
+            try await engine.executeSetup(
+                plan: plan,
+                workspace: workspace,
+                instances: [first, second],
+                onProgress: { progress.add($0) }
+            )
+        }
+
+        while !(await gate.arrived()) {
+            await Task.yield()
+        }
+        let operationID = progress.updates.last?.operationID
+        #expect(operationID != nil)
+        guard let operationID else { return }
+
+        // Cancel while instance 2 is waiting
+        #expect(try await engine.cancelRemainingSetup(operationID: operationID))
+        await gate.open()
+
+        let report = try await execution.value
+        #expect(report.outcomes[0].targetInstanceID == firstID)
+        #expect(report.outcomes[0].configurationState == .updated)
+        #expect(report.outcomes[1].targetInstanceID == secondID)
+        #expect(report.outcomes[1].detail == "Skipped after Cancel Remaining.")
+
+        // Verify first target remains intact and was NOT restored
+        let baseline = try fixture.store.journalLoadConnectionBaseline(targetInstanceID: firstID)
+        #expect(baseline != nil)
+        let loaded = try fixture.store.loadWorkspace()
+        let firstPersisted = loaded.targetInstances.first { $0.id == firstID }
+        #expect(firstPersisted?.isConnected == true)
+    }
+
+    // AC 4: Skipped states and the cancellation request survive relaunch.
+    @Test("Skipped states and cancellation request survive relaunch")
+    func skippedStatesAndCancellationSurviveRelaunch() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let firstID = TargetInstanceID(rawValue: "macos.appearance")
+        let secondID = TargetInstanceID(rawValue: "starship.default")
+        let firstAdapter = RecordingWritableAdapter(id: "macos.appearance")
+        let secondAdapter = RecordingWritableAdapter(id: "starship")
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [firstID, secondID],
+            themeAssignment: nil
+        )
+
+        // Inject an interrupted setup operation with cancellation requested
+        let op = try fixture.store.journalStartOperation(kind: .setup, workspaceID: workspace.id)
+        try fixture.store.journalRecordCancellationRequest(operationID: op.id)
+        try fixture.store.journalTransitionState(operationID: op.id, to: .applying)
+
+        // Target 1: was completed before interrupt
+        try fixture.store.journalSaveRecord(
+            JournaledRecord(
+                operationID: op.id,
+                targetInstanceID: firstID,
+                ordinal: 0,
+                adapterID: "macos.appearance",
+                adapterVersion: "1",
+                capabilityID: "connection",
+                phase: .applied,
+                intendedChangeDigest: "connected",
+                staleStateToken: nil,
+                planDigest: nil,
+                receiptJSON: nil,
+                detail: nil
+            )
+        )
+        // Target 2: was not started yet (phase .prepared)
+        try fixture.store.journalSaveRecord(
+            JournaledRecord(
+                operationID: op.id,
+                targetInstanceID: secondID,
+                ordinal: 1,
+                adapterID: "starship",
+                adapterVersion: "1",
+                capabilityID: "connection",
+                phase: .prepared,
+                intendedChangeDigest: "connected",
+                staleStateToken: nil,
+                planDigest: nil,
+                receiptJSON: nil,
+                detail: nil
+            )
+        )
+
+        // Simulate relaunch by creating a brand new ThemeEngine instance
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [firstAdapter, secondAdapter],
+            persistence: fixture.store
+        )
+
+        try await engine.reconcileInterruptedOperations()
+
+        // Verify cancellation survived relaunch
+        let reloaded = try fixture.store.journalLoadOperation(id: op.id)
+        #expect(reloaded?.cancellationRequested == true)
+        #expect(reloaded?.state == .cancelled)
+
+        // Verify Target 2 was marked skipped
+        let records = try fixture.store.journalLoadRecords(operationID: op.id)
+        let secondRecord = records.first { $0.targetInstanceID == secondID }
+        #expect(secondRecord?.phase == .skipped)
+        #expect(secondRecord?.detail == "Skipped after Cancel Remaining.")
+
+        // Verify Target 1 completed state remained intact
+        let firstRecord = records.first { $0.targetInstanceID == firstID }
+        #expect(firstRecord?.phase == .applied)
+    }
 }

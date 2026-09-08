@@ -185,6 +185,17 @@ public final class PersistenceStore: @unchecked Sendable {
                 }
             }
         }
+        migrator.registerMigration("add-operation-cancellation-requested") { database in
+            guard try database.tableExists("operations") else { return }
+            let hasCancellationRequested = try database.columns(in: "operations").contains {
+                $0.name == "cancellation_requested"
+            }
+            if !hasCancellationRequested {
+                try database.alter(table: "operations") { table in
+                    table.add(column: "cancellation_requested", .boolean).notNull().defaults(to: false)
+                }
+            }
+        }
         try migrator.migrate(database)
     }
 
@@ -197,6 +208,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("workspace_id", .text).notNull()
                 table.column("variant_id", .text)
                 table.column("parent_operation_id", .text)
+                table.column("cancellation_requested", .boolean).notNull().defaults(to: false)
                 table.column("created_at", .double).notNull()
             }
         }

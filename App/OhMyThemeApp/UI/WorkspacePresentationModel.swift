@@ -380,6 +380,7 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     func dismissSetupPlan() {
+        guard !isExecutingSetup else { return }
         setupPlan = nil
         setupPlanInvalidationReason = nil
         setupProgress = nil
@@ -453,6 +454,9 @@ final class WorkspacePresentationModel: ObservableObject {
         } catch {
             if case ProductionWorkspaceRuntimeError.setupPlanInvalidated(let reason) = error {
                 setupPlanInvalidationReason = reason
+            } else if case DurableOperationError.operationCancelled = error {
+                operationError = "Setup was cancelled."
+                return nil
             }
             operationError = Self.describe(error)
             throw error
@@ -607,7 +611,12 @@ final class WorkspacePresentationModel: ObservableObject {
         } else {
             switch outcome.configurationState {
             case .updated: configuration = kind == .setup ? "Connected" : "Updated"
-            case .unchanged: configuration = "Already set"
+            case .unchanged:
+                if outcome.detail == "Skipped after Cancel Remaining." {
+                    configuration = "Skipped"
+                } else {
+                    configuration = "Already set"
+                }
             case .permissionRequired: configuration = "Permission required"
             case .conflicted: configuration = "Conflict"
             case .failed: configuration = "Failed"
@@ -650,6 +659,7 @@ final class WorkspacePresentationModel: ObservableObject {
         outcome.rollbackState == .recoveryRequired
             || [.permissionRequired, .conflicted, .failed, .unavailable]
                 .contains(outcome.configurationState)
+            || (outcome.configurationState == .unchanged && outcome.detail == "Skipped after Cancel Remaining.")
     }
 
     private func capabilityName(_ capabilityID: String) -> String {
@@ -749,6 +759,10 @@ final class WorkspacePresentationModel: ObservableObject {
     #if DEBUG
     func setBusyForTesting(_ busy: Bool) {
         self.isBusy = busy
+    }
+
+    func setIsExecutingSetupForTesting(_ executing: Bool) {
+        self.isExecutingSetup = executing
     }
     #endif
 

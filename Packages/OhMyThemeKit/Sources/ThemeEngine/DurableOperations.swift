@@ -119,6 +119,7 @@ public enum DurableOperationError: Error, Equatable, Sendable {
     case operationInProgress
     case operationNotFound(UUID)
     case noLastApplyTransaction
+    case operationCancelled
 }
 
 public enum UndoAvailability: Equatable, Sendable {
@@ -501,13 +502,16 @@ extension ThemeEngine {
             throw ThemeEngineError.planMembershipChanged(plan.id)
         }
 
+        let isPreCancelled = pendingCancellations.contains(plan.id)
         setupPlansInFlight.removeValue(forKey: plan.id)
 
         let operation = try persistence.journalStartOperation(
+            id: plan.id,
             kind: .setup,
             workspaceID: workspace.id,
             variantID: nil,
-            parentOperationID: plan.retrySourceOperationID
+            parentOperationID: plan.retrySourceOperationID,
+            cancellationRequested: isPreCancelled
         )
         try await beginOperationTracking(operation)
         trackingStarted = true
@@ -586,10 +590,6 @@ extension ThemeEngine {
             }
         }
 
-        try await checkAndConsumeCancellation(operation.id)
-
-        try persistence.journalTransitionState(operationID: operation.id, to: .applying)
-
         var steps: [SetupProgress.TargetStep] = []
         for targetID in plan.targetInstanceIDs {
             let displayName = instanceMap[targetID]?.displayName ?? targetID.rawValue
@@ -623,6 +623,35 @@ extension ThemeEngine {
             currentTargetID: nil
         )
         onProgress?(currentProgress)
+
+        do {
+            try await checkAndConsumeCancellation(operation.id)
+        } catch let error as DurableOperationError where error == .operationCancelled {
+            for (ordinal, targetID) in plan.targetInstanceIDs.enumerated() {
+                if let targetPlan = originalPlansByID[targetID] {
+                    try persistence.journalSaveRecord(
+                        JournaledRecord(
+                            operationID: operation.id,
+                            targetInstanceID: targetID,
+                            ordinal: ordinal,
+                            adapterID: targetPlan.adapterID,
+                            adapterVersion: targetPlan.adapterVersion,
+                            capabilityID: "connection",
+                            phase: .skipped,
+                            intendedChangeDigest: targetPlan.intendedChangeDigest,
+                            staleStateToken: targetPlan.staleStateToken,
+                            planDigest: planReferences[targetID]?.digest,
+                            receiptJSON: nil,
+                            detail: "Skipped after Cancel Remaining."
+                        )
+                    )
+                }
+            }
+            try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
+            throw error
+        }
+
+        try persistence.journalTransitionState(operationID: operation.id, to: .applying)
 
         var outcomes: [TargetCapabilityOutcome] = []
         var anyMutated = false
@@ -2100,14 +2129,23 @@ extension ThemeEngine {
         guard let persistence = self.persistenceStore else {
             throw DurableOperationError.persistenceRequired
         }
+        if setupPlansInFlight[operationID] != nil {
+            recordCancellationRequest(operationID)
+            try? persistence.journalRecordCancellationRequest(operationID: operationID)
+            return true
+        }
         guard currentOperationID == operationID,
             let operation = try persistence.journalLoadOperation(id: operationID),
             operation.kind == .setup,
-            operation.state == .applying
+            (operation.state == .prepared || operation.state == .applying)
         else {
             throw DurableOperationError.cancellationRefused
         }
         recordCancellationRequest(operationID)
+        try persistence.journalRecordCancellationRequest(operationID: operationID)
+        if operation.state == .prepared {
+            try persistence.journalTransitionState(operationID: operationID, to: .cancelled)
+        }
         return true
     }
 
@@ -2123,6 +2161,7 @@ extension ThemeEngine {
             throw DurableOperationError.cancellationRefused
         }
         self.recordCancellationRequest(operationID)
+        try persistence.journalRecordCancellationRequest(operationID: operationID)
         try persistence.journalTransitionState(operationID: operationID, to: .cancelled)
         return true
     }
@@ -2548,7 +2587,12 @@ extension ThemeEngine {
                 }
                 let newPhase: RecordPhase
                 switch classification {
-                case .beforeChange: newPhase = .reconciledBefore
+                case .beforeChange:
+                    if operation.cancellationRequested {
+                        newPhase = .skipped
+                    } else {
+                        newPhase = .reconciledBefore
+                    }
                 case .intendedAfterChange:
                     if let recoveredAdapterReceipt {
                         newPhase = applyRecordPhase(for: recoveredAdapterReceipt)
@@ -2556,6 +2600,14 @@ extension ThemeEngine {
                         newPhase = .reconciledIntended
                     }
                 case .conflicting: newPhase = .reconciledConflict
+                }
+                let detailString: String
+                if operation.cancellationRequested && classification == .beforeChange {
+                    detailString = "Skipped after Cancel Remaining."
+                } else if recoveredReceiptJSON != nil {
+                    detailString = "reconciled:\(classification.rawValue):receipt-recovered"
+                } else {
+                    detailString = "reconciled:\(classification.rawValue)"
                 }
                 try persistence.journalSaveRecord(
                     JournaledRecord(
@@ -2570,9 +2622,7 @@ extension ThemeEngine {
                         staleStateToken: record.staleStateToken,
                         planDigest: record.planDigest,
                         receiptJSON: recoveredReceiptJSON,
-                        detail: recoveredReceiptJSON == nil
-                            ? "reconciled:\(classification.rawValue)"
-                            : "reconciled:\(classification.rawValue):receipt-recovered"
+                        detail: detailString
                     )
                 )
                 if operation.kind == .undo, classification == .intendedAfterChange {
@@ -2595,7 +2645,9 @@ extension ThemeEngine {
                     break
                 }
             }
-            if let (targetInstanceID, connected) = reconciledConnectionState {
+            if operation.cancellationRequested {
+                try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
+            } else if let (targetInstanceID, connected) = reconciledConnectionState {
                 try persistence.transitionOperation(
                     operationID: operation.id,
                     to: .reconciled,
@@ -2995,14 +3047,17 @@ extension ThemeEngine {
     }
 
     fileprivate func checkAndConsumeCancellation(_ operationID: UUID) async throws {
-        if self.pendingCancellations.contains(operationID) {
+        let isPersistedCancellation = (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
+        if self.pendingCancellations.contains(operationID) || isPersistedCancellation {
             self.pendingCancellations.remove(operationID)
-            throw DurableOperationError.cancellationRefused
+            throw DurableOperationError.operationCancelled
         }
     }
 
     fileprivate func consumeSetupCancellation(_ operationID: UUID) -> Bool {
-        pendingCancellations.remove(operationID) != nil
+        let isPersistedCancellation = (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
+        let removedFromMemory = pendingCancellations.remove(operationID) != nil
+        return removedFromMemory || isPersistedCancellation
     }
 
     fileprivate func markMutationBegun(_ operationID: UUID) async {

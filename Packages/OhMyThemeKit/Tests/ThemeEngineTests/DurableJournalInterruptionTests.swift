@@ -17,6 +17,11 @@ struct DurableJournalInterruptionTests {
         try assertInterruptionRecovery(for: .connect)
     }
 
+    @Test("Forced termination after each Setup checkpoint preserves configuration and consistent recovery")
+    func setupInterruption() throws {
+        try assertInterruptionRecovery(for: .setup)
+    }
+
     private func assertInterruptionRecovery(for scenario: CrashScenario) throws {
         let checkpoints = try discoverCheckpoints(for: scenario)
         #expect(!checkpoints.isEmpty)
@@ -154,6 +159,7 @@ enum CrashScenario: String, CaseIterable, CustomTestStringConvertible {
     case undo
     case restore
     case disconnect
+    case setup
 
     static let recoverableCases: [CrashScenario] = [.apply, .undo, .restore, .disconnect]
 

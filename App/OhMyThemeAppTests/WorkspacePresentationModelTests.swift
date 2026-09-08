@@ -882,4 +882,54 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNil(report)
         XCTAssertEqual(runtime.executeSetupPlanCalls.count, 0)
     }
+
+    func testClosingWindowLeavesActiveSetupTransactionRunning() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        await model.prepareSetupPlan()
+        XCTAssertNotNil(model.setupPlan)
+
+        // While setup is executing, window dismiss attempts must not terminate setup
+        model.setIsExecutingSetupForTesting(true)
+        XCTAssertTrue(model.isExecutingSetup)
+
+        model.dismissSetupPlan()
+        XCTAssertNotNil(model.setupPlan)
+        XCTAssertTrue(model.isExecutingSetup)
+
+        // Once execution completes, dismissal succeeds
+        model.setIsExecutingSetupForTesting(false)
+        model.dismissSetupPlan()
+        XCTAssertNil(model.setupPlan)
+    }
+
+    func testExecuteSetupPlanHandlesCancellationGracefully() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        runtime.executeSetupPlanError = DurableOperationError.operationCancelled
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        await model.prepareSetupPlan()
+        XCTAssertNotNil(model.setupPlan)
+
+        let report = try await model.executeSetupPlan()
+        XCTAssertNil(report)
+        XCTAssertFalse(model.isExecutingSetup)
+        XCTAssertFalse(model.isBusy)
+        XCTAssertEqual(model.operationError, "Setup was cancelled.")
+    }
 }

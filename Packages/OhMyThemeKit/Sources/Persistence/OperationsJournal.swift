@@ -40,6 +40,7 @@ public struct JournaledOperation: Codable, Equatable, Sendable, Identifiable {
     public let workspaceID: WorkspaceID
     public let variantID: String?
     public let parentOperationID: UUID?
+    public let cancellationRequested: Bool
     public let createdAt: Date
 
     public init(
@@ -49,6 +50,7 @@ public struct JournaledOperation: Codable, Equatable, Sendable, Identifiable {
         workspaceID: WorkspaceID,
         variantID: String?,
         parentOperationID: UUID? = nil,
+        cancellationRequested: Bool = false,
         createdAt: Date
     ) {
         self.id = id
@@ -57,6 +59,7 @@ public struct JournaledOperation: Codable, Equatable, Sendable, Identifiable {
         self.workspaceID = workspaceID
         self.variantID = variantID
         self.parentOperationID = parentOperationID
+        self.cancellationRequested = cancellationRequested
         self.createdAt = createdAt
     }
 }
@@ -128,25 +131,28 @@ public struct StoredConnectionBaseline: Codable, Equatable, Sendable {
 
 extension PersistenceStore {
     public func journalStartOperation(
+        id: UUID? = nil,
         kind: OperationKind,
         workspaceID: WorkspaceID,
         variantID: String? = nil,
-        parentOperationID: UUID? = nil
+        parentOperationID: UUID? = nil,
+        cancellationRequested: Bool = false
     ) throws -> JournaledOperation {
         let operation = JournaledOperation(
-            id: UUID(),
+            id: id ?? UUID(),
             kind: kind,
             state: .prepared,
             workspaceID: workspaceID,
             variantID: variantID,
             parentOperationID: parentOperationID,
+            cancellationRequested: cancellationRequested,
             createdAt: Date()
         )
         try withWrite { database in
             try database.execute(
                 sql: """
-                    INSERT INTO operations (id, kind, state, workspace_id, variant_id, parent_operation_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO operations (id, kind, state, workspace_id, variant_id, parent_operation_id, cancellation_requested, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     operation.id.uuidString,
@@ -155,6 +161,7 @@ extension PersistenceStore {
                     operation.workspaceID.rawValue,
                     operation.variantID,
                     operation.parentOperationID?.uuidString,
+                    operation.cancellationRequested ? 1 : 0,
                     operation.createdAt.timeIntervalSince1970,
                 ]
             )
@@ -203,13 +210,36 @@ extension PersistenceStore {
         didCommit(.operationStateTransitioned)
     }
 
+    public func journalRecordCancellationRequest(operationID: UUID) throws {
+        try withWrite { database in
+            try database.execute(
+                sql: "UPDATE operations SET cancellation_requested = 1 WHERE id = ?",
+                arguments: [operationID.uuidString]
+            )
+        }
+        didCommit(.operationStateTransitioned)
+    }
+
+    public func journalIsCancellationRequested(operationID: UUID) throws -> Bool {
+        try withRead { database in
+            guard
+                let row = try Row.fetchOne(
+                    database,
+                    sql: "SELECT cancellation_requested FROM operations WHERE id = ?",
+                    arguments: [operationID.uuidString]
+                )
+            else { return false }
+            return (row["cancellation_requested"] as Bool?) ?? false
+        }
+    }
+
     public func journalLoadOperation(id: UUID) throws -> JournaledOperation? {
         try withRead { database in
             guard
                 let row = try Row.fetchOne(
                     database,
                     sql: """
-                        SELECT id, kind, state, workspace_id, variant_id, parent_operation_id, created_at
+                        SELECT id, kind, state, workspace_id, variant_id, parent_operation_id, cancellation_requested, created_at
                         FROM operations WHERE id = ?
                         """,
                     arguments: [id.uuidString]
@@ -229,13 +259,12 @@ extension PersistenceStore {
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.parent_operation_id, o.created_at
+                    SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.parent_operation_id, o.cancellation_requested, o.created_at
                     FROM operations o
                     WHERE o.kind = 'apply'
                       AND o.state IN ('applied', 'reconciled')
                       AND o.workspace_id = ?
-                      AND EXISTS (
-                        SELECT 1 FROM operation_records r
+                      AND EXISTS (\n                        SELECT 1 FROM operation_records r
                         WHERE r.operation_id = o.id AND r.phase = 'applied'
                       )
                     ORDER BY o.created_at DESC, o.id DESC
@@ -270,7 +299,7 @@ extension PersistenceStore {
             let rows = try Row.fetchAll(
                 database,
                 sql: """
-                    SELECT id, kind, state, workspace_id, variant_id, parent_operation_id, created_at
+                    SELECT id, kind, state, workspace_id, variant_id, parent_operation_id, cancellation_requested, created_at
                     FROM operations WHERE state IN ('prepared', 'applying')
                     ORDER BY created_at
                     """
@@ -419,6 +448,7 @@ extension PersistenceStore {
         } else {
             parentOperationID = nil
         }
+        let cancellationRequested = (row["cancellation_requested"] as Bool?) ?? false
         return JournaledOperation(
             id: id,
             kind: kind,
@@ -426,6 +456,7 @@ extension PersistenceStore {
             workspaceID: WorkspaceID(rawValue: row["workspace_id"]),
             variantID: row["variant_id"],
             parentOperationID: parentOperationID,
+            cancellationRequested: cancellationRequested,
             createdAt: Date(timeIntervalSince1970: row["created_at"])
         )
     }

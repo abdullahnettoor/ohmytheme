@@ -54,17 +54,56 @@ struct DurabilityCrashHarness {
             contentStoreURL: locations.content,
             checkpointHandler: recorder.record
         )
-        let adapter = FileBackedAdapter(stateURL: locations.externalState)
-        let engine = ThemeEngine(
-            packs: [fixturePack],
-            adapters: [adapter],
-            persistence: store
-        )
-        try await perform(scenario, engine: engine)
+        let engine: ThemeEngine
+        if scenario == .setup {
+            let adapter1 = FileBackedAdapter(id: setupInstance1.adapterID, stateURL: locations.externalState)
+            let adapter2 = FileBackedAdapter(id: setupInstance2.adapterID, stateURL: locations.externalState2)
+            engine = ThemeEngine(
+                packs: [fixturePack],
+                adapters: [adapter1, adapter2],
+                persistence: store
+            )
+        } else {
+            let adapter = FileBackedAdapter(stateURL: locations.externalState)
+            engine = ThemeEngine(
+                packs: [fixturePack],
+                adapters: [adapter],
+                persistence: store
+            )
+        }
+        try await perform(scenario, engine: engine, store: store)
     }
 
     private static func prepareFixture(for scenario: Scenario, rootURL: URL) async throws {
         let locations = paths(rootURL)
+        if scenario == .setup {
+            try FileBackedAdapter.initializeState(at: locations.externalState)
+            try FileBackedAdapter.initializeState(at: locations.externalState2)
+            let store = try PersistenceStore(
+                databaseURL: locations.database,
+                contentStoreURL: locations.content
+            )
+            try store.saveWorkspace(
+                setupWorkspace,
+                targetInstances: [
+                    PersistedTargetInstance(
+                        id: setupInstance1.id,
+                        displayName: setupInstance1.displayName,
+                        adapterID: setupInstance1.adapterID,
+                        isConnected: false,
+                        isOptedIn: true
+                    ),
+                    PersistedTargetInstance(
+                        id: setupInstance2.id,
+                        displayName: setupInstance2.displayName,
+                        adapterID: setupInstance2.adapterID,
+                        isConnected: false,
+                        isOptedIn: true
+                    ),
+                ]
+            )
+            return
+        }
         try FileBackedAdapter.initializeState(at: locations.externalState)
         let store = try PersistenceStore(
             databaseURL: locations.database,
@@ -96,7 +135,7 @@ struct DurabilityCrashHarness {
         _ = try await engine.applyDurable(planID: plan.id, workspace: connectedWorkspace)
     }
 
-    private static func perform(_ scenario: Scenario, engine: ThemeEngine) async throws {
+    private static func perform(_ scenario: Scenario, engine: ThemeEngine, store: PersistenceStore) async throws {
         switch scenario {
         case .connect:
             _ = try await engine.connect(instance: instance, workspace: disconnectedWorkspace)
@@ -109,10 +148,24 @@ struct DurabilityCrashHarness {
             _ = try await engine.restore(instance: instance, workspace: connectedWorkspace)
         case .disconnect:
             _ = try await engine.disconnect(instance: instance, workspace: connectedWorkspace)
+        case .setup:
+            let workspaceToUse = (try? store.loadWorkspace().workspace) ?? setupWorkspace
+            let plan = try await engine.prepareSetup(
+                workspace: workspaceToUse,
+                instances: [setupInstance1, setupInstance2]
+            )
+            _ = try await engine.executeSetup(
+                plan: plan,
+                workspace: workspaceToUse,
+                instances: [setupInstance1, setupInstance2]
+            )
         }
     }
 
     private static func verify(scenario: Scenario, rootURL: URL) async throws -> Verification {
+        if scenario == .setup {
+            return try await verifySetup(rootURL: rootURL)
+        }
         let locations = paths(rootURL)
         let store = try PersistenceStore(
             databaseURL: locations.database,
@@ -227,7 +280,111 @@ struct DurabilityCrashHarness {
             if !state.connected, state.configuration != userOwnedConfiguration {
                 failures.append("disconnect removed membership without restoring exact user bytes")
             }
+        case .setup:
+            break
         }
+    }
+
+    private static func verifySetup(rootURL: URL) async throws -> Verification {
+        let locations = paths(rootURL)
+        let store = try PersistenceStore(
+            databaseURL: locations.database,
+            contentStoreURL: locations.content
+        )
+        let adapter1 = FileBackedAdapter(id: setupInstance1.adapterID, stateURL: locations.externalState)
+        let adapter2 = FileBackedAdapter(id: setupInstance2.adapterID, stateURL: locations.externalState2)
+        let engine = ThemeEngine(
+            packs: [fixturePack],
+            adapters: [adapter1, adapter2],
+            persistence: store
+        )
+        let interruptedBefore = try store.journalInterruptedOperations()
+        var failures: [String] = []
+
+        do {
+            try await engine.reconcileInterruptedOperations()
+        } catch {
+            failures.append("reconciliation failed: \(error)")
+        }
+
+        let state1 = try FileBackedAdapter.loadState(at: locations.externalState)
+        let state2 = try FileBackedAdapter.loadState(at: locations.externalState2)
+        let persisted = try store.loadWorkspace()
+        let member1 = persisted.targetInstances.first { $0.id == setupInstance1.id }
+        let member2 = persisted.targetInstances.first { $0.id == setupInstance2.id }
+        let baseline1 = try store.journalLoadConnectionBaseline(targetInstanceID: setupInstance1.id)
+        let baseline2 = try store.journalLoadConnectionBaseline(targetInstanceID: setupInstance2.id)
+
+        for (name, state, member, baseline) in [
+            ("target 1", state1, member1, baseline1),
+            ("target 2", state2, member2, baseline2)
+        ] {
+            if state.configuration != userOwnedConfiguration {
+                failures.append("\(name) configuration changed from user-owned bytes")
+            }
+            if member?.isConnected != state.connected {
+                failures.append("\(name) persisted membership disagrees with adapter state")
+            }
+            if state.connected {
+                if baseline == nil {
+                    failures.append("\(name) connected without stored baseline")
+                }
+            } else {
+                if baseline != nil {
+                    failures.append("\(name) disconnected but retains baseline")
+                }
+            }
+        }
+
+        let interruptedAfter = try store.journalInterruptedOperations()
+        if !interruptedAfter.isEmpty {
+            failures.append("reconciliation left interrupted operations")
+        }
+
+        for operation in interruptedBefore {
+            guard let reloaded = try store.journalLoadOperation(id: operation.id) else {
+                failures.append("interrupted operation disappeared")
+                continue
+            }
+            if reloaded.state != .reconciled && reloaded.state != .cancelled {
+                failures.append("interrupted setup operation did not become reconciled or cancelled (state: \(reloaded.state))")
+            }
+            let records = try store.journalLoadRecords(operationID: operation.id)
+            if records.contains(where: { $0.phase == .prepared || $0.phase == .applying }) {
+                failures.append("setup operation retains a nonterminal record")
+            }
+        }
+
+        // Verify idempotency: re-running setup completes without duplicate effects or corruption
+        do {
+            let latestWorkspace = try store.loadWorkspace().workspace
+            let unconfigured = [setupInstance1, setupInstance2].filter { !latestWorkspace.isConnected($0.id) }
+            if !unconfigured.isEmpty {
+                let plan = try await engine.prepareSetup(
+                    workspace: latestWorkspace,
+                    instances: unconfigured
+                )
+                let report = try await engine.executeSetup(
+                    plan: plan,
+                    workspace: latestWorkspace,
+                    instances: unconfigured
+                )
+                for outcome in report.outcomes {
+                    if outcome.configurationState != ConfigurationState.updated && outcome.configurationState != ConfigurationState.unchanged {
+                        failures.append("re-running setup produced failure outcome: \(outcome.configurationState)")
+                    }
+                }
+            }
+            let finalState1 = try FileBackedAdapter.loadState(at: locations.externalState)
+            let finalState2 = try FileBackedAdapter.loadState(at: locations.externalState2)
+            if !finalState1.connected || !finalState2.connected {
+                failures.append("re-running setup did not connect both targets")
+            }
+        } catch {
+            failures.append("re-running setup failed: \(error)")
+        }
+
+        return Verification(failures: failures)
     }
 
     private static func resetFixture(at rootURL: URL) throws {
@@ -243,6 +400,7 @@ struct DurabilityCrashHarness {
             database: rootURL.appendingPathComponent("state.sqlite"),
             content: rootURL.appendingPathComponent("content", isDirectory: true),
             externalState: rootURL.appendingPathComponent("synthetic-target.json"),
+            externalState2: rootURL.appendingPathComponent("synthetic-target-2.json"),
             marker: rootURL.appendingPathComponent("checkpoint-marker.json")
         )
     }
@@ -266,12 +424,14 @@ private enum Scenario: String {
     case undo
     case restore
     case disconnect
+    case setup
 }
 
 private struct FixturePaths {
     let database: URL
     let content: URL
     let externalState: URL
+    let externalState2: URL
     let marker: URL
 }
 
@@ -336,13 +496,14 @@ private struct SyntheticState: Codable {
 private actor FileBackedAdapter: RecoverableApplyAdapter, RecoverableRollbackAdapter,
     RecoverableConnectionAdapter
 {
-    let id = "durability-file"
+    let id: String
     let version = "1"
     let payloadVersion = "1"
 
     private let stateURL: URL
 
-    init(stateURL: URL) {
+    init(id: String = "durability-file", stateURL: URL) {
+        self.id = id
         self.stateURL = stateURL
     }
 
@@ -608,6 +769,24 @@ private let userOwnedConfiguration = Data([
     0x75, 0x73, 0x65, 0x72, 0x00, 0xff, 0x0a, 0x63, 0x6f, 0x6e, 0x66, 0x69, 0x67,
 ])
 private let themeConfiguration = Data("managed-theme-configuration".utf8)
+private let setupInstance1 = ConnectedTargetInstance(
+    id: TargetInstanceID(rawValue: "durability-file.1.default"),
+    displayName: "Setup target 1",
+    adapterID: "durability-file.1"
+)
+private let setupInstance2 = ConnectedTargetInstance(
+    id: TargetInstanceID(rawValue: "durability-file.2.default"),
+    displayName: "Setup target 2",
+    adapterID: "durability-file.2"
+)
+private let setupWorkspace = Workspace(
+    id: .myMac,
+    displayName: "My Mac",
+    connectedTargetInstances: [],
+    targetOptIns: [setupInstance1.id, setupInstance2.id],
+    themeAssignment: .fixed(variantID: "durability/dark")
+)
+
 private let instance = ConnectedTargetInstance(
     id: TargetInstanceID(rawValue: "durability-file.default"),
     displayName: "Durability file target",
