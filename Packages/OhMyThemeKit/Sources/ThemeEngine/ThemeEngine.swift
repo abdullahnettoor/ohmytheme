@@ -380,6 +380,8 @@ public enum ThemeEngineError: Error, Equatable, Sendable {
     case fixedThemeAssignmentRequired
     case planNotFound(UUID)
     case planWorkspaceChanged(UUID)
+    case planMembershipChanged(UUID)
+    case corruptPlanState(UUID, reason: String)
     case engineUnavailable
     case applyInProgress
 }

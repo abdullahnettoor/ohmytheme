@@ -36,6 +36,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
     private let reportsUnchangedForSameBytes: Bool
     private var interruptions: Set<InterruptionPoint> = []
     private var connectedInstances: Set<TargetInstanceID> = []
+    private var beforeConnectionPreparationHook: (@Sendable (ConnectedTargetInstance) async throws -> Void)? = nil
     private var beforeConnectHook: (@Sendable (ConnectionPlan) async throws -> Void)? = nil
     private let configuredReach: ActivationReach
     private let configuredSideEffects: [String]
@@ -64,6 +65,12 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         self.configuredSharedSetupEffects = sharedSetupEffects
         self.baselineCaptureTiming = baselineCaptureTiming
         self.deniesDeferredBaselineCapture = deniesDeferredBaselineCapture
+    }
+
+    public func setBeforeConnectionPreparationHook(
+        _ hook: (@Sendable (ConnectedTargetInstance) async throws -> Void)?
+    ) {
+        self.beforeConnectionPreparationHook = hook
     }
 
     public func setBeforeConnectHook(_ hook: (@Sendable (ConnectionPlan) async throws -> Void)?) {
@@ -151,6 +158,9 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         instance: ConnectedTargetInstance,
         approveLinkedSource: Bool
     ) async throws -> ConnectionPlan {
+        if let beforeConnectionPreparationHook {
+            try await beforeConnectionPreparationHook(instance)
+        }
         let ownership = SetupOwnershipDetail(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -201,6 +211,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
                 detail: "world revision changed since prepare"
             )
         }
+
         worldState = WorldState(
             bytes: worldState.bytes + Data(".connected".utf8),
             revision: "connect-\(plan.targetInstanceID.rawValue)"
@@ -209,7 +220,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         try trigger(.afterConnect)
         return ConnectionReceipt(
             configurationState: .updated,
-            runningInstanceReach: .currentInstances,
+            runningInstanceReach: configuredReach,
             detail: "connected"
         )
     }
@@ -351,4 +362,40 @@ public enum RecordingWritableAdapterError: Error, Equatable, Sendable {
     case incompatiblePayload
     case rollbackRefused
     case notConnected
+}
+
+public struct RecordingConnectionPermissionDeniedError: ConnectionMutationNotStartedError, CapabilityOutcomeError,
+    Equatable, Sendable
+{
+    public init() {}
+    public var capabilityConfigurationState: ConfigurationState { .permissionRequired }
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+    public var capabilityOutcomeDetail: String { "Permission was denied during target connection." }
+}
+
+public struct RecordingConnectionConflictError: ConnectionMutationNotStartedError, CapabilityOutcomeError, Equatable,
+    Sendable
+{
+    public init() {}
+    public var capabilityConfigurationState: ConfigurationState { .conflicted }
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+    public var capabilityOutcomeDetail: String {
+        "Target configuration was externally modified before connection started."
+    }
+}
+
+public struct RecordingConnectionFailedError: ConnectionMutationNotStartedError, CapabilityOutcomeError, Equatable,
+    Sendable
+{
+    public init() {}
+    public var capabilityConfigurationState: ConfigurationState { .failed }
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+    public var capabilityOutcomeDetail: String { "Connection failed unexpectedly before mutation started." }
+}
+
+public struct RecordingConnectionUnavailableError: CapabilityOutcomeError, Equatable, Sendable {
+    public init() {}
+    public var capabilityConfigurationState: ConfigurationState { .unavailable }
+    public var capabilityActivationReach: ActivationReach { .unavailable }
+    public var capabilityOutcomeDetail: String { "Target instance cannot be reached." }
 }

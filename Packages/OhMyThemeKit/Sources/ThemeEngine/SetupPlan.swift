@@ -7,12 +7,43 @@ public struct TargetSetupPreparationFailure: Codable, Equatable, Sendable, Ident
     public var id: TargetInstanceID { targetInstanceID }
     public let targetInstanceID: TargetInstanceID
     public let adapterID: String
+    public let configurationState: ConfigurationState
     public let detail: String
 
-    public init(targetInstanceID: TargetInstanceID, adapterID: String, detail: String) {
+    public init(
+        targetInstanceID: TargetInstanceID,
+        adapterID: String,
+        configurationState: ConfigurationState = .failed,
+        detail: String
+    ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
+        self.configurationState = configurationState
         self.detail = detail
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targetInstanceID
+        case adapterID
+        case configurationState
+        case detail
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        targetInstanceID = try container.decode(TargetInstanceID.self, forKey: .targetInstanceID)
+        adapterID = try container.decode(String.self, forKey: .adapterID)
+        configurationState =
+            try container.decodeIfPresent(ConfigurationState.self, forKey: .configurationState) ?? .failed
+        detail = try container.decode(String.self, forKey: .detail)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(targetInstanceID, forKey: .targetInstanceID)
+        try container.encode(adapterID, forKey: .adapterID)
+        try container.encode(configurationState, forKey: .configurationState)
+        try container.encode(detail, forKey: .detail)
     }
 }
 
@@ -172,6 +203,58 @@ public struct SetupPlan: Codable, Equatable, Identifiable, Sendable {
     public var isFullyReady: Bool {
         preparationFailures.isEmpty && hasReadyTargets
     }
+
+    /// Validates the aggregate integrity of the plan before any external mutation begins.
+    public func validatePlanIntegrity() throws {
+        guard !targetInstanceIDs.isEmpty else {
+            throw ThemeEngineError.corruptPlanState(id, reason: "Setup plan has no target instances.")
+        }
+        guard Set(targetInstanceIDs).count == targetInstanceIDs.count else {
+            throw ThemeEngineError.corruptPlanState(id, reason: "Setup plan contains duplicate target instance IDs.")
+        }
+        guard !discoveryAndSelectionDigest.isEmpty else {
+            throw ThemeEngineError.corruptPlanState(id, reason: "Setup plan discovery and selection digest is empty.")
+        }
+
+        let planTargetIDs = targetPlans.map(\.targetInstanceID)
+        guard Set(planTargetIDs).count == planTargetIDs.count else {
+            throw ThemeEngineError.corruptPlanState(id, reason: "Setup plan contains duplicate target plans.")
+        }
+        let planTargetIDSet = Set(planTargetIDs)
+
+        let failureTargetIDs = preparationFailures.map(\.targetInstanceID)
+        guard Set(failureTargetIDs).count == failureTargetIDs.count else {
+            throw ThemeEngineError.corruptPlanState(id, reason: "Setup plan contains duplicate preparation failures.")
+        }
+        let failureTargetIDSet = Set(failureTargetIDs)
+
+        guard planTargetIDSet.isDisjoint(with: failureTargetIDSet) else {
+            throw ThemeEngineError.corruptPlanState(
+                id,
+                reason: "Setup plan contains targets in both ready plans and preparation failures."
+            )
+        }
+        guard planTargetIDSet.union(failureTargetIDSet) == Set(targetInstanceIDs) else {
+            throw ThemeEngineError.corruptPlanState(
+                id,
+                reason: "Setup plan target instance IDs do not match target plans and failures."
+            )
+        }
+        for targetPlan in targetPlans {
+            guard !targetPlan.intendedChangeDigest.isEmpty else {
+                throw ThemeEngineError.corruptPlanState(
+                    id,
+                    reason: "Target plan intended change digest is empty for \(targetPlan.targetInstanceID.rawValue)."
+                )
+            }
+            guard !targetPlan.adapterID.isEmpty else {
+                throw ThemeEngineError.corruptPlanState(
+                    id,
+                    reason: "Target plan adapter ID is empty for \(targetPlan.targetInstanceID.rawValue)."
+                )
+            }
+        }
+    }
 }
 
 /// Progress and live state of a Setup Transaction across its selected target instances.
@@ -185,6 +268,7 @@ public struct SetupProgress: Codable, Equatable, Sendable {
         case unchanged(detail: String)
         case conflict(detail: String)
         case failed(detail: String)
+        case unavailable(detail: String)
         case recoveryRequired(detail: String)
     }
 
@@ -230,7 +314,8 @@ public struct SetupProgress: Codable, Equatable, Sendable {
             switch step.status {
             case .waiting, .configuring:
                 return false
-            case .needsPermission, .needsAction, .connected, .unchanged, .conflict, .failed, .recoveryRequired:
+            case .needsPermission, .needsAction, .connected, .unchanged, .conflict, .failed, .unavailable,
+                .recoveryRequired:
                 return true
             }
         }.count

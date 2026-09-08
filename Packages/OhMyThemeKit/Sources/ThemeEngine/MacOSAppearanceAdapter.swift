@@ -30,7 +30,9 @@ public struct MacOSAppearanceApplyPayload: Codable, Equatable, Sendable {
     }
 }
 
-public enum MacOSAppearanceAdapterError: Error, Codable, Equatable, Sendable, CapabilityOutcomeError {
+public enum MacOSAppearanceAdapterError: Error, Codable, Equatable, Sendable, CapabilityOutcomeError,
+    ConnectionMutationNotStartedError
+{
     case unsupportedInstance(TargetInstanceID)
     case permissionDenied
     case permissionRevoked

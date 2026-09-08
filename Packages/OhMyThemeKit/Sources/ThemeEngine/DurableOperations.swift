@@ -28,6 +28,16 @@ public struct DurableApplyReport: Codable, Equatable, Sendable {
 }
 
 public struct SetupReport: Codable, Equatable, Sendable {
+    public enum OutcomeKind: String, Codable, Equatable, Sendable {
+        case connected
+        case unchanged
+        case needsPermission
+        case conflict
+        case failed
+        case unavailable
+        case recoveryRequired
+    }
+
     public let operationID: UUID
     public let retrySourceOperationID: UUID?
     public let outcomes: [TargetCapabilityOutcome]
@@ -40,6 +50,61 @@ public struct SetupReport: Codable, Equatable, Sendable {
         self.operationID = operationID
         self.retrySourceOperationID = retrySourceOperationID
         self.outcomes = outcomes
+    }
+
+    public func outcomeKind(for outcome: TargetCapabilityOutcome) -> OutcomeKind {
+        if outcome.rollbackState == .recoveryRequired {
+            return .recoveryRequired
+        }
+        switch outcome.configurationState {
+        case .updated:
+            return .connected
+        case .unchanged:
+            return .unchanged
+        case .permissionRequired:
+            return .needsPermission
+        case .conflicted:
+            return .conflict
+        case .failed:
+            return .failed
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    public func kind(for targetInstanceID: TargetInstanceID) -> OutcomeKind? {
+        guard let outcome = outcomes.first(where: { $0.targetInstanceID == targetInstanceID }) else {
+            return nil
+        }
+        return outcomeKind(for: outcome)
+    }
+
+    public var connectedOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .connected }
+    }
+
+    public var unchangedOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .unchanged }
+    }
+
+    public var needsPermissionOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .needsPermission }
+    }
+
+    public var conflictOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .conflict }
+    }
+
+    public var failedOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .failed }
+    }
+
+    public var unavailableOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .unavailable }
+    }
+
+    public var recoveryRequiredOutcomes: [TargetCapabilityOutcome] {
+        outcomes.filter { outcomeKind(for: $0) == .recoveryRequired }
     }
 }
 
@@ -100,6 +165,7 @@ extension ThemeEngine {
                 let failure = TargetSetupPreparationFailure(
                     targetInstanceID: instance.id,
                     adapterID: instance.adapterID,
+                    configurationState: .unavailable,
                     detail: "The adapter is unavailable or does not support connect."
                 )
                 preparationFailures.append(failure)
@@ -144,10 +210,12 @@ extension ThemeEngine {
                     )
                 ownershipDetails.append(ownership)
             } catch {
+                let outcome = Self.capabilityOutcome(for: error, fallbackState: .failed)
                 let failure = TargetSetupPreparationFailure(
                     targetInstanceID: instance.id,
                     adapterID: instance.adapterID,
-                    detail: String(describing: error)
+                    configurationState: outcome.configurationState,
+                    detail: outcome.detail
                 )
                 preparationFailures.append(failure)
                 ownershipDetails.append(
@@ -425,6 +493,14 @@ extension ThemeEngine {
             throw ThemeEngineError.planWorkspaceChanged(plan.id)
         }
 
+        try plan.validatePlanIntegrity()
+
+        let currentUnresolvedOptIns = Set(workspace.targetOptIns.filter { !workspace.isConnected($0) })
+        let planTargets = Set(plan.targetInstanceIDs)
+        guard currentUnresolvedOptIns == planTargets else {
+            throw ThemeEngineError.planMembershipChanged(plan.id)
+        }
+
         setupPlansInFlight.removeValue(forKey: plan.id)
 
         let operation = try persistence.journalStartOperation(
@@ -532,7 +608,11 @@ extension ThemeEngine {
                         targetInstanceID: targetID,
                         displayName: displayName,
                         adapterID: failure.adapterID,
-                        status: .failed(detail: failure.detail)
+                        status: Self.setupProgressStatus(
+                            configurationState: failure.configurationState,
+                            activationReach: .unavailable,
+                            detail: failure.detail
+                        )
                     )
                 )
             }
@@ -563,7 +643,7 @@ extension ThemeEngine {
                         capabilityID: "connection",
                         sourceType: .unavailable,
                         sourceRevision: "n/a",
-                        configurationState: .failed,
+                        configurationState: failure.configurationState,
                         runningInstanceReach: .unavailable,
                         detail: failure.detail
                     )
@@ -584,6 +664,10 @@ extension ThemeEngine {
                 )
 
             guard let adapter = self.connectionAdapter(for: targetPlan.adapterID) else {
+                let executionPlan = targetPlan.recordingStoredBaseline(
+                    baselineWasPreviouslyStored[targetID] ?? false
+                )
+                try removeNewConnectionBaseline(for: executionPlan, persistence: persistence)
                 let failureOutcome = TargetCapabilityOutcome(
                     targetInstanceID: targetID,
                     adapterID: targetPlan.adapterID,
@@ -611,7 +695,8 @@ extension ThemeEngine {
                         detail: failureOutcome.detail
                     )
                 )
-                currentProgress.steps[ordinal].status = .failed(detail: failureOutcome.detail ?? "Adapter unavailable")
+                currentProgress.steps[ordinal].status = .unavailable(
+                    detail: failureOutcome.detail ?? "Adapter unavailable")
                 onProgress?(currentProgress)
                 continue
             }
@@ -734,10 +819,11 @@ extension ThemeEngine {
                                 : []
                         )
                     )
-                    currentProgress.steps[ordinal].status =
-                        failure.configurationState == .permissionRequired
-                        ? .needsPermission(detail: failure.detail)
-                        : .failed(detail: failure.detail)
+                    currentProgress.steps[ordinal].status = Self.setupProgressStatus(
+                        configurationState: failure.configurationState,
+                        activationReach: failure.activationReach,
+                        detail: failure.detail
+                    )
                     currentProgress.steps[ordinal].currentAction = nil
                     onProgress?(currentProgress)
                     continue
@@ -834,12 +920,11 @@ extension ThemeEngine {
                     )
                 )
                 outcomes.append(outcome)
-                if receipt.configurationState == .unchanged {
-                    currentProgress.steps[ordinal].status = .unchanged(
-                        detail: receipt.detail ?? "Target configuration unchanged")
-                } else {
-                    currentProgress.steps[ordinal].status = .connected(reach: receipt.runningInstanceReach)
-                }
+                currentProgress.steps[ordinal].status = Self.setupProgressStatus(
+                    configurationState: receipt.configurationState,
+                    activationReach: receipt.runningInstanceReach,
+                    detail: receipt.detail ?? "Target configuration unchanged"
+                )
                 currentProgress.steps[ordinal].currentAction = nil
                 onProgress?(currentProgress)
             } catch {
@@ -852,6 +937,8 @@ extension ThemeEngine {
                     try removeNewConnectionBaseline(for: executionPlan, persistence: persistence)
                 }
                 let recoveryRequired = error is any MutationRecoveryRequiredError
+                let preMutationConflict =
+                    mutationNotStarted && failureOutcome.configurationState == .conflicted
                 try persistence.journalSaveRecord(
                     JournaledRecord(
                         operationID: operation.id,
@@ -879,7 +966,7 @@ extension ThemeEngine {
                     detail: failureOutcome.detail,
                     rollbackState: recoveryRequired
                         ? .recoveryRequired
-                        : mutationNotStarted ? .blocked : .notNeeded,
+                        : preMutationConflict ? .blocked : .notNeeded,
                     userActions: recoveryRequired
                         ? [Self.recoveryRequiredAction]
                         : failureOutcome.configurationState == .permissionRequired
@@ -887,19 +974,15 @@ extension ThemeEngine {
                                 setupNeeds: targetPlan.userActions,
                                 requiredPermissions: targetPlan.requiredPermissions
                             )
-                            : mutationNotStarted ? [Self.reviewExternalChangeAction] : []
+                            : preMutationConflict ? [Self.reviewExternalChangeAction] : []
                 )
                 outcomes.append(outcome)
-                let detailString = failureOutcome.detail
-                if recoveryRequired {
-                    currentProgress.steps[ordinal].status = .recoveryRequired(detail: detailString)
-                } else if failureOutcome.configurationState == .permissionRequired {
-                    currentProgress.steps[ordinal].status = .needsPermission(detail: detailString)
-                } else if mutationNotStarted {
-                    currentProgress.steps[ordinal].status = .conflict(detail: detailString)
-                } else {
-                    currentProgress.steps[ordinal].status = .failed(detail: detailString)
-                }
+                currentProgress.steps[ordinal].status = Self.setupProgressStatus(
+                    configurationState: failureOutcome.configurationState,
+                    activationReach: failureOutcome.activationReach,
+                    detail: failureOutcome.detail,
+                    isRecoveryRequired: recoveryRequired
+                )
                 currentProgress.steps[ordinal].currentAction = nil
                 onProgress?(currentProgress)
             }
@@ -1214,6 +1297,7 @@ extension ThemeEngine {
                 try removeNewConnectionBaseline(for: plan, persistence: persistence)
             }
             let recoveryRequired = error is any MutationRecoveryRequiredError
+            let preMutationConflict = mutationNotStarted && failure.configurationState == .conflicted
             try persistence.journalSaveRecord(
                 JournaledRecord(
                     operationID: operation.id,
@@ -1247,7 +1331,7 @@ extension ThemeEngine {
                         detail: failure.detail,
                         rollbackState: recoveryRequired
                             ? .recoveryRequired
-                            : mutationNotStarted ? .blocked : .notNeeded,
+                            : preMutationConflict ? .blocked : .notNeeded,
                         userActions: recoveryRequired
                             ? [Self.recoveryRequiredAction]
                             : failure.configurationState == .permissionRequired
@@ -1255,7 +1339,7 @@ extension ThemeEngine {
                                     setupNeeds: plan.userActions,
                                     requiredPermissions: plan.requiredPermissions
                                 )
-                                : mutationNotStarted ? [Self.reviewExternalChangeAction] : []
+                                : preMutationConflict ? [Self.reviewExternalChangeAction] : []
                     )
                 ]
             )
@@ -2521,6 +2605,31 @@ extension ThemeEngine {
             } else {
                 try persistence.journalTransitionState(operationID: operation.id, to: .reconciled)
             }
+        }
+    }
+
+    private static func setupProgressStatus(
+        configurationState: ConfigurationState,
+        activationReach: ActivationReach,
+        detail: String,
+        isRecoveryRequired: Bool = false
+    ) -> SetupProgress.StepStatus {
+        if isRecoveryRequired {
+            return .recoveryRequired(detail: detail)
+        }
+        switch configurationState {
+        case .updated:
+            return .connected(reach: activationReach)
+        case .unchanged:
+            return .unchanged(detail: detail)
+        case .permissionRequired:
+            return .needsPermission(detail: detail)
+        case .conflicted:
+            return .conflict(detail: detail)
+        case .failed:
+            return .failed(detail: detail)
+        case .unavailable:
+            return .unavailable(detail: detail)
         }
     }
 

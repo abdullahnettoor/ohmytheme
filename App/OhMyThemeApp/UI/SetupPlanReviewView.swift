@@ -519,6 +519,13 @@ struct SetupPlanReviewView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Color.red.opacity(0.1), in: Capsule())
+        case .unavailable:
+            Label("Unavailable", systemImage: "slash.circle")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.12), in: Capsule())
         case .recoveryRequired:
             Label("Recovery Required", systemImage: "shield.slash.fill")
                 .font(.caption2.weight(.semibold))

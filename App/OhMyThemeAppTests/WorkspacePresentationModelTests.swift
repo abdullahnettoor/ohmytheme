@@ -386,6 +386,108 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertEqual(report.title, "Theme applied with remaining work")
     }
 
+    func testPartialSetupPresentationDistinguishesOutcomes() {
+        let targets = (1...7).map { i in
+            ConnectedTargetInstance(
+                id: TargetInstanceID(rawValue: "target-\(i)"),
+                displayName: "Target \(i)",
+                adapterID: "adapter-\(i)"
+            )
+        }
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: targets
+        )
+        let model = WorkspacePresentationModel(runtime: FakeWorkspaceRuntime(workspace: workspace))
+
+        let outcomes = [
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[0].id,
+                adapterID: targets[0].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .updated,
+                runningInstanceReach: .currentInstances
+            ),
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[1].id,
+                adapterID: targets[1].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .unchanged,
+                runningInstanceReach: .currentInstances
+            ),
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[2].id,
+                adapterID: targets[2].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .permissionRequired,
+                runningInstanceReach: .unavailable
+            ),
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[3].id,
+                adapterID: targets[3].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .conflicted,
+                runningInstanceReach: .unavailable
+            ),
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[4].id,
+                adapterID: targets[4].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .failed,
+                runningInstanceReach: .unavailable
+            ),
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[5].id,
+                adapterID: targets[5].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .unavailable,
+                runningInstanceReach: .unavailable
+            ),
+            TargetCapabilityOutcome(
+                targetInstanceID: targets[6].id,
+                adapterID: targets[6].adapterID,
+                capabilityID: "connection",
+                sourceType: .unavailable,
+                sourceRevision: "1",
+                configurationState: .failed,
+                runningInstanceReach: .unavailable,
+                rollbackState: .recoveryRequired
+            ),
+        ]
+
+        let report = model.present(outcomes: outcomes, kind: .setup)
+
+        XCTAssertEqual(report.sectionTitle, "Latest Setup Report")
+        XCTAssertEqual(report.title, "Setup complete with remaining work")
+        XCTAssertEqual(report.groups.count, 7)
+
+        let configurations = report.groups.compactMap { $0.outcomes.first?.configuration }
+        XCTAssertEqual(
+            configurations,
+            [
+                "Connected",
+                "Already set",
+                "Permission required",
+                "Conflict",
+                "Failed",
+                "Unavailable",
+                "Recovery required",
+            ])
+    }
+
     func testWorkspaceRestoresAndPersistsTheSelectedFixedThemeVariant() {
         let workspace = Workspace(
             id: .myMac,

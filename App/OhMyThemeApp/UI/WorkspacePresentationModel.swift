@@ -557,7 +557,9 @@ final class WorkspacePresentationModel: ObservableObject {
         }.map { targetID in
             OutcomeGroup(
                 id: targetID,
-                targetName: targetsByID[targetID]?.displayName ?? displayName(for: grouped[targetID]?.first?.adapterID),
+                targetName: targetsByID[targetID]?.displayName
+                    ?? applicationTargets.flatMap(\.instances).first(where: { $0.id == targetID })?.displayName
+                    ?? displayName(for: grouped[targetID]?.first?.adapterID),
                 outcomes: (grouped[targetID] ?? []).sorted { $0.capabilityID < $1.capabilityID }.map {
                     present(outcome: $0, kind: kind)
                 }
@@ -566,10 +568,7 @@ final class WorkspacePresentationModel: ObservableObject {
         let hasUpdate = outcomes.contains { $0.configurationState == .updated }
         let hasUnchanged = outcomes.contains { $0.configurationState == .unchanged }
         let hasSuccess = hasUpdate || hasUnchanged
-        let hasProblem = outcomes.contains {
-            [.permissionRequired, .conflicted, .failed, .unavailable]
-                .contains($0.configurationState)
-        }
+        let hasProblem = outcomes.contains(where: isProblem)
         let title: String
         switch (kind, hasSuccess, hasProblem) {
         case (.apply, true, false) where hasUpdate: title = "Theme applied"
@@ -603,13 +602,17 @@ final class WorkspacePresentationModel: ObservableObject {
 
     private func present(outcome: TargetCapabilityOutcome, kind: ReportKind) -> PresentedOutcome {
         let configuration: String
-        switch outcome.configurationState {
-        case .updated: configuration = "Updated"
-        case .unchanged: configuration = "Already set"
-        case .permissionRequired: configuration = "Permission required"
-        case .conflicted: configuration = "Conflict"
-        case .failed: configuration = "Failed"
-        case .unavailable: configuration = "Unavailable"
+        if outcome.rollbackState == .recoveryRequired {
+            configuration = "Recovery required"
+        } else {
+            switch outcome.configurationState {
+            case .updated: configuration = kind == .setup ? "Connected" : "Updated"
+            case .unchanged: configuration = "Already set"
+            case .permissionRequired: configuration = "Permission required"
+            case .conflicted: configuration = "Conflict"
+            case .failed: configuration = "Failed"
+            case .unavailable: configuration = "Unavailable"
+            }
         }
 
         let reach: String?
@@ -639,9 +642,14 @@ final class WorkspacePresentationModel: ObservableObject {
             detail: outcome.detail,
             userActions: userActions,
             rollback: rollback,
-            isProblem: [.permissionRequired, .conflicted, .failed, .unavailable]
-                .contains(outcome.configurationState)
+            isProblem: isProblem(outcome)
         )
+    }
+
+    private func isProblem(_ outcome: TargetCapabilityOutcome) -> Bool {
+        outcome.rollbackState == .recoveryRequired
+            || [.permissionRequired, .conflicted, .failed, .unavailable]
+                .contains(outcome.configurationState)
     }
 
     private func capabilityName(_ capabilityID: String) -> String {
@@ -729,6 +737,10 @@ final class WorkspacePresentationModel: ObservableObject {
             "There is no theme change left to undo."
         case DurableOperationError.persistenceRequired:
             "Recovery storage is unavailable, so Oh My Theme refused to change your Workspace."
+        case ThemeEngineError.planMembershipChanged:
+            "Selected targets changed since the plan was prepared."
+        case ThemeEngineError.corruptPlanState(_, let reason):
+            "Setup plan is corrupt: \(reason)"
         default:
             String(describing: error)
         }
