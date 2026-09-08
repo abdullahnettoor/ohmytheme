@@ -27,6 +27,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
     public let requiresApproval: Bool
     public let baselineWasPreviouslyStored: Bool
     public let activationReach: ActivationReach
+    public let ownershipDetail: SetupOwnershipDetail?
 
     public init(
         targetInstanceID: TargetInstanceID,
@@ -41,7 +42,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         opaquePayload: Data? = nil,
         requiresApproval: Bool = false,
         baselineWasPreviouslyStored: Bool = false,
-        activationReach: ActivationReach = .currentInstances
+        activationReach: ActivationReach = .currentInstances,
+        ownershipDetail: SetupOwnershipDetail? = nil
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
@@ -56,6 +58,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         self.requiresApproval = requiresApproval
         self.baselineWasPreviouslyStored = baselineWasPreviouslyStored
         self.activationReach = activationReach
+        self.ownershipDetail = ownershipDetail
     }
 
     public func approvingReviewedSetup() -> ConnectionPlan {
@@ -72,7 +75,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             opaquePayload: opaquePayload,
             requiresApproval: false,
             baselineWasPreviouslyStored: baselineWasPreviouslyStored,
-            activationReach: activationReach
+            activationReach: activationReach,
+            ownershipDetail: ownershipDetail
         )
     }
 
@@ -90,7 +94,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             opaquePayload: opaquePayload,
             requiresApproval: requiresApproval,
             baselineWasPreviouslyStored: wasPreviouslyStored,
-            activationReach: activationReach
+            activationReach: activationReach,
+            ownershipDetail: ownershipDetail
         )
     }
 
@@ -108,6 +113,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         case requiresApproval
         case baselineWasPreviouslyStored
         case activationReach
+        case ownershipDetail
     }
 
     public init(from decoder: Decoder) throws {
@@ -128,7 +134,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
                 Bool.self,
                 forKey: .baselineWasPreviouslyStored
             ) ?? false,
-            activationReach: try container.decodeIfPresent(ActivationReach.self, forKey: .activationReach) ?? .currentInstances
+            activationReach: try container.decodeIfPresent(ActivationReach.self, forKey: .activationReach) ?? .currentInstances,
+            ownershipDetail: try container.decodeIfPresent(SetupOwnershipDetail.self, forKey: .ownershipDetail)
         )
     }
 }

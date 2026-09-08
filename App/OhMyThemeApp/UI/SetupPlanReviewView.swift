@@ -36,6 +36,13 @@ struct SetupPlanReviewView: View {
         }
         .frame(minWidth: 540, minHeight: 480)
         .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            await model.revalidateSetupPlan()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                await model.revalidateSetupPlan()
+            }
+        }
     }
 
     private var header: some View {
@@ -123,6 +130,7 @@ struct SetupPlanReviewView: View {
                 ForEach(Array(plan.targetInstanceIDs.enumerated()), id: \.element) { index, targetID in
                     let failure = plan.preparationFailures.first { $0.targetInstanceID == targetID }
                     let ownership = plan.ownershipDetails.first { $0.targetInstanceID == targetID }
+                    let targetPlan = plan.targetPlans.first { $0.targetInstanceID == targetID }
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 10) {
@@ -177,6 +185,27 @@ struct SetupPlanReviewView: View {
                                     Text(detail)
                                         .font(.caption2.weight(.medium))
                                         .foregroundStyle(.orange)
+                                }
+                                .padding(.leading, 30)
+                            }
+
+                            if let targetPlan, !targetPlan.userActions.isEmpty {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(targetPlan.userActions, id: \.title) { action in
+                                        HStack(alignment: .top, spacing: 6) {
+                                            Image(systemName: action.title.contains("Approve") || action.title.contains("Permission") ? "exclamationmark.shield.fill" : "arrow.triangle.2.circlepath")
+                                                .font(.caption2)
+                                                .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.secondary)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(action.title)
+                                                    .font(.caption2.weight(.semibold))
+                                                    .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.primary)
+                                                Text(action.detail)
+                                                    .font(.caption2.monospaced())
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
                                 }
                                 .padding(.leading, 30)
                             }
@@ -278,6 +307,30 @@ struct SetupPlanReviewView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                if !plan.userActions.isEmpty {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Required User Actions & Approvals")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.primary)
+                        ForEach(plan.userActions, id: \.title) { action in
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: action.title.contains("Approve") || action.title.contains("Permission") ? "exclamationmark.shield.fill" : "hand.tap.fill")
+                                    .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.secondary)
+                                    .font(.caption2)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(action.title)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(action.title.contains("Approve") ? Color.orange : Color.primary)
+                                    Text(action.detail)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if !plan.requiredPermissions.isEmpty {
                     Divider()
                     VStack(alignment: .leading, spacing: 4) {
@@ -357,7 +410,11 @@ struct SetupPlanReviewView: View {
                 .accessibilityIdentifier("revalidate-setup-plan-button")
             } else {
                 Button("Configure Selected Apps") {
-                    // Issue #32 handles execution of durable Setup Transaction
+                    Task {
+                        let isValid = await model.confirmSetupPlan()
+                        guard isValid else { return }
+                        // Issue #32 handles execution of durable Setup Transaction
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!plan.isFullyReady || model.isSetupPlanInvalidated)

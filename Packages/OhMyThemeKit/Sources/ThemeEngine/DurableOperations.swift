@@ -116,9 +116,15 @@ extension ThemeEngine {
                     userActions.append(action)
                 }
 
-                let ownership = Self.deriveOwnershipDetail(
-                    for: instance,
-                    plan: plan
+                let ownership = plan.ownershipDetail ?? SetupOwnershipDetail(
+                    targetInstanceID: instance.id,
+                    adapterID: instance.adapterID,
+                    summary: "Manages configuration for \(instance.displayName).",
+                    routineDetails: plan.expectedSideEffects,
+                    isConsequential: plan.requiresApproval || !plan.requiredPermissions.isEmpty,
+                    consequentialDetail: plan.requiresApproval
+                        ? "Approval required before modifying existing configuration."
+                        : (plan.requiredPermissions.first.map { "Requires permission: \($0)" })
                 )
                 ownershipDetails.append(ownership)
             } catch {
@@ -175,56 +181,6 @@ extension ThemeEngine {
             recoveryBehavior: "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
             discoveryAndSelectionDigest: digest,
             sharedEffects: sharedEffects
-        )
-    }
-
-    private static func deriveOwnershipDetail(
-        for instance: ConnectedTargetInstance,
-        plan: ConnectionPlan
-    ) -> SetupOwnershipDetail {
-        let summary: String
-        let routineDetails: [String]
-        switch instance.adapterID {
-        case "ghostty":
-            summary = "Configures Ghostty theme fragment and include directive."
-            routineDetails = ["~/.config/ghostty/config", "themes/oh-my-theme-managed-fragment"]
-        case "starship":
-            summary = "Configures Starship palette and managed settings."
-            routineDetails = ["~/.config/starship.toml"]
-        case let id where id.starts(with: "vscode"):
-            summary = "Installs Oh My Theme companion extension and communicates via Unix socket."
-            routineDetails = ["VS Code extension: oh-my-theme-companion"]
-        case "macos.appearance":
-            summary = "Controls macOS dark/light mode appearance via System Events."
-            routineDetails = ["macOS System Events Dark Mode"]
-        case "macos.wallpaper":
-            summary = "Controls desktop wallpaper for \(instance.displayName)."
-            routineDetails = ["macOS Desktop Picture"]
-        default:
-            summary = "Manages configuration for \(instance.displayName)."
-            routineDetails = plan.expectedSideEffects
-        }
-
-        let isConsequential: Bool
-        let consequentialDetail: String?
-        if plan.requiresApproval {
-            isConsequential = true
-            consequentialDetail = "Approval required before modifying existing configuration or linked dotfile."
-        } else if !plan.requiredPermissions.isEmpty {
-            isConsequential = true
-            consequentialDetail = "Requires permission: \(plan.requiredPermissions.joined(separator: ", "))"
-        } else {
-            isConsequential = false
-            consequentialDetail = nil
-        }
-
-        return SetupOwnershipDetail(
-            targetInstanceID: instance.id,
-            adapterID: instance.adapterID,
-            summary: summary,
-            routineDetails: routineDetails,
-            isConsequential: isConsequential,
-            consequentialDetail: consequentialDetail
         )
     }
 
@@ -313,6 +269,38 @@ extension ThemeEngine {
                 return .invalidated(
                     reason: "Configuration for \(targetPlan.targetInstanceID.rawValue) was externally modified: \(error.localizedDescription)"
                 )
+            }
+        }
+
+        for failure in plan.preparationFailures {
+            guard let instance = availableMap[failure.targetInstanceID] else {
+                return .invalidated(
+                    reason: "Target instance \(failure.targetInstanceID.rawValue) is no longer available."
+                )
+            }
+            guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
+                if failure.adapterID != instance.adapterID {
+                    return .invalidated(
+                        reason: "Adapter for \(instance.displayName) changed from \(failure.adapterID) to \(instance.adapterID)."
+                    )
+                }
+                continue
+            }
+            do {
+                _ = try await adapter.prepareConnection(
+                    instance: instance,
+                    approveLinkedSource: false
+                )
+                return .invalidated(
+                    reason: "Preconditions changed: setup preparation for \(instance.displayName) can now succeed."
+                )
+            } catch {
+                let currentDetail = String(describing: error)
+                if currentDetail != failure.detail {
+                    return .invalidated(
+                        reason: "Preparation conditions for \(instance.displayName) changed: \(currentDetail)"
+                    )
+                }
             }
         }
 

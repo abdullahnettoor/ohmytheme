@@ -304,6 +304,19 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
         )
         let requiresApproval = isLinked != nil && !approveLinkedSource
 
+        let ownershipDetail = SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            summary: "Configures Starship palette and managed settings.",
+            routineDetails: [
+                "Configuration file: \(inspection.resolvedURL.path)"
+            ] + (isLinked != nil ? ["Dotfiles source: \(isLinked!.path)"] : []),
+            isConsequential: requiresApproval,
+            consequentialDetail: requiresApproval
+                ? "Approval required before reading linked dotfile at \(isLinked!.path)."
+                : nil
+        )
+
         return ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -322,7 +335,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
                         detail: "Oh My Theme will read \(isLinked?.path ?? "the linked source").")
                 ] : [],
             opaquePayload: try encode(StarshipConnectionPayload(details: details, filePlan: nil)),
-            requiresApproval: requiresApproval
+            requiresApproval: requiresApproval,
+            activationReach: .nextPrompt,
+            ownershipDetail: ownershipDetail
         )
     }
 
@@ -333,6 +348,16 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
             inspection: baseline.inspection,
             approvedLinkedSourceURL: payload.details.linkedSourceURL
         )
+        let updatedOwnership = plan.ownershipDetail.map {
+            SetupOwnershipDetail(
+                targetInstanceID: $0.targetInstanceID,
+                adapterID: $0.adapterID,
+                summary: $0.summary,
+                routineDetails: $0.routineDetails,
+                isConsequential: false,
+                consequentialDetail: nil
+            )
+        }
         return ConnectionPlan(
             targetInstanceID: plan.targetInstanceID,
             adapterID: plan.adapterID,
@@ -345,7 +370,9 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
             userActions: plan.userActions,
             opaquePayload: plan.opaquePayload,
             requiresApproval: false,
-            baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored
+            baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored,
+            activationReach: plan.activationReach,
+            ownershipDetail: updatedOwnership
         )
     }
 

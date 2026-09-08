@@ -632,10 +632,20 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNotNil(model.setupPlan)
         XCTAssertFalse(model.isSetupPlanInvalidated)
 
+        // Test confirmSetupPlan when valid
+        let confirmedValid = await model.confirmSetupPlan()
+        XCTAssertTrue(confirmedValid)
+        XCTAssertFalse(model.isSetupPlanInvalidated)
+
         // Invalidate by opting out
         try await model.setTargetOptIn(instanceID, isOptedIn: false)
         XCTAssertTrue(model.isSetupPlanInvalidated)
         XCTAssertNotNil(model.setupPlanInvalidationReason)
+
+        // Test confirmSetupPlan when invalidated
+        let confirmedInvalid = await model.confirmSetupPlan()
+        XCTAssertFalse(confirmedInvalid)
+        XCTAssertTrue(model.isSetupPlanInvalidated)
 
         // Dismiss setup plan
         model.dismissSetupPlan()

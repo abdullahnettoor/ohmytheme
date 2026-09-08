@@ -487,6 +487,23 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
             parent: parentInspection,
             managedArtifact: artifactInspection
         )
+        let isLinked = details.linkedSourceURL != nil
+        let requiresApproval = isLinked && !approveLinkedSource
+        let ownershipDetail = SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            summary: "Configures Ghostty theme fragment and include directive.",
+            routineDetails: [
+                "Configuration file: \(parentInspection.resolvedURL.path)",
+                "Managed fragment: \(artifactPlan.resolvedURL.path)",
+                "Include directive: \(includeLine)",
+            ] + (details.linkedSourceURL != nil ? ["Dotfiles source: \(details.linkedSourceURL!.path)"] : []),
+            isConsequential: requiresApproval,
+            consequentialDetail: requiresApproval
+                ? "Approval required before modifying linked dotfile at \(details.linkedSourceURL!.path)."
+                : nil
+        )
+
         return ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -511,7 +528,9 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
                         )
                     ]),
             opaquePayload: try encode(payload),
-            requiresApproval: details.linkedSourceURL != nil && !approveLinkedSource
+            requiresApproval: requiresApproval,
+            activationReach: .reloadRequired,
+            ownershipDetail: ownershipDetail
         )
     }
 
@@ -522,6 +541,16 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
             parentPlan: payload.parentPlan.approvingLinkedSource(),
             managedArtifactPlan: payload.managedArtifactPlan
         )
+        let updatedOwnership = plan.ownershipDetail.map {
+            SetupOwnershipDetail(
+                targetInstanceID: $0.targetInstanceID,
+                adapterID: $0.adapterID,
+                summary: $0.summary,
+                routineDetails: $0.routineDetails,
+                isConsequential: false,
+                consequentialDetail: nil
+            )
+        }
         return ConnectionPlan(
             targetInstanceID: plan.targetInstanceID,
             adapterID: plan.adapterID,
@@ -534,7 +563,9 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
             userActions: plan.userActions,
             opaquePayload: try encode(approvedPayload),
             requiresApproval: false,
-            baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored
+            baselineWasPreviouslyStored: plan.baselineWasPreviouslyStored,
+            activationReach: plan.activationReach,
+            ownershipDetail: updatedOwnership
         )
     }
 

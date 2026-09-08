@@ -194,6 +194,18 @@ public actor MacOSWallpaperAdapter: RecoverableApplyAdapter {
         let opaquePayload = try encode(details)
         let digest = digest(of: opaquePayload)
 
+        let displayTitle = instance.displayName.isEmpty ? "display \(displayID)" : instance.displayName
+        let ownershipDetail = SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            summary: "Controls desktop picture for \(displayTitle).",
+            routineDetails: [
+                "Current desktop picture: \(snapshot.imageURL.path)"
+            ],
+            isConsequential: false,
+            consequentialDetail: nil
+        )
+
         return ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -207,7 +219,9 @@ public actor MacOSWallpaperAdapter: RecoverableApplyAdapter {
             requiredPermissions: [],
             userActions: [],
             opaquePayload: opaquePayload,
-            requiresApproval: false
+            requiresApproval: false,
+            activationReach: .currentInstances,
+            ownershipDetail: ownershipDetail
         )
     }
 

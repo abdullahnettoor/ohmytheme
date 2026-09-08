@@ -120,6 +120,15 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
         let baseline = try readAppearance(permissionFailure: .permissionDenied)
         let baselineData = try encode(baseline)
 
+        let ownershipDetail = SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            summary: "Controls macOS dark/light mode appearance via System Events.",
+            routineDetails: ["macOS System Events Dark Mode"],
+            isConsequential: true,
+            consequentialDetail: "Requires AppleScript Automation permission for System Events."
+        )
+
         return ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -133,7 +142,9 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
             requiredPermissions: [Self.automationPermissionDescription],
             userActions: [],
             opaquePayload: baselineData,
-            requiresApproval: false
+            requiresApproval: false,
+            activationReach: .currentInstances,
+            ownershipDetail: ownershipDetail
         )
     }
 

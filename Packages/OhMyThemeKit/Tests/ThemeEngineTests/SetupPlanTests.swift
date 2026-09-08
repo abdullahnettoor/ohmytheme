@@ -249,4 +249,177 @@ struct SetupPlanTests {
         }
         #expect(reason3.contains("externally modified"))
     }
+
+    @Test("Ghostty and Starship adapters declare honest activation reach and exact ownership paths")
+    func testGhosttyAndStarshipHonestActivationReachAndOwnershipMetadata() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omt-reach-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Setup Ghostty mock file structure
+        let ghosttyConfigDir = tempDir.appendingPathComponent("ghostty", isDirectory: true)
+        try FileManager.default.createDirectory(at: ghosttyConfigDir, withIntermediateDirectories: true)
+        let ghosttyConfigFile = ghosttyConfigDir.appendingPathComponent("config")
+        try "background = #111111\n".write(to: ghosttyConfigFile, atomically: true, encoding: .utf8)
+
+        let ghosttyAdapter = GhosttyConfigurationAdapter(
+            configurationURL: ghosttyConfigFile
+        )
+        let ghosttyInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "ghostty.test"),
+            displayName: "Ghostty Terminal",
+            adapterID: "ghostty"
+        )
+
+        // Setup Starship mock file structure with linked dotfile
+        let dotfilesSourceDir = tempDir.appendingPathComponent("dotfiles", isDirectory: true)
+        try FileManager.default.createDirectory(at: dotfilesSourceDir, withIntermediateDirectories: true)
+        let realStarshipFile = dotfilesSourceDir.appendingPathComponent("starship.toml")
+        try "format = \"$all\"\n".write(to: realStarshipFile, atomically: true, encoding: .utf8)
+
+        let starshipConfigDir = tempDir.appendingPathComponent("config", isDirectory: true)
+        try FileManager.default.createDirectory(at: starshipConfigDir, withIntermediateDirectories: true)
+        let starshipSymlink = starshipConfigDir.appendingPathComponent("starship.toml")
+        try FileManager.default.createSymbolicLink(at: starshipSymlink, withDestinationURL: realStarshipFile)
+
+        let starshipAdapter = StarshipConfigurationAdapter(
+            configurationURL: starshipSymlink
+        )
+        let starshipInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "starship.test"),
+            displayName: "Starship Prompt",
+            adapterID: "starship"
+        )
+
+        let immediateAdapter = RecordingWritableAdapter(id: "immediate.test", activationReach: .currentInstances)
+        let immediateInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "immediate.1"),
+            displayName: "Immediate App",
+            adapterID: "immediate.test"
+        )
+
+        let store = try PersistenceStore(
+            databaseURL: tempDir.appendingPathComponent("db.sqlite"),
+            contentStoreURL: tempDir.appendingPathComponent("content", isDirectory: true)
+        )
+        let engine = ThemeEngine(
+            packs: [],
+            adapters: [ghosttyAdapter, starshipAdapter, immediateAdapter],
+            persistence: store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "reach-test"),
+            displayName: "Reach Test",
+            connectedTargetInstances: [],
+            targetOptIns: [ghosttyInstance.id, starshipInstance.id, immediateInstance.id],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [ghosttyInstance, starshipInstance, immediateInstance]
+        )
+
+        // 1. Ghostty reach is reloadRequired
+        guard let ghosttyPlan = plan.targetPlans.first(where: { $0.targetInstanceID == ghosttyInstance.id }) else {
+            Issue.record("Missing ghostty plan")
+            return
+        }
+        #expect(ghosttyPlan.activationReach == ActivationReach.reloadRequired)
+        #expect(ghosttyPlan.ownershipDetail != nil)
+        #expect(ghosttyPlan.ownershipDetail?.routineDetails.contains(where: { $0.contains(ghosttyConfigFile.path) }) == true)
+        #expect(ghosttyPlan.userActions.contains(where: { $0.title == "Reload Ghostty" }))
+
+        // 2. Starship reach is nextPrompt
+        guard let starshipPlan = plan.targetPlans.first(where: { $0.targetInstanceID == starshipInstance.id }) else {
+            Issue.record("Missing starship plan")
+            return
+        }
+        #expect(starshipPlan.activationReach == ActivationReach.nextPrompt)
+        #expect(starshipPlan.ownershipDetail != nil)
+        #expect(starshipPlan.ownershipDetail?.routineDetails.contains(where: { $0.contains(realStarshipFile.path) }) == true)
+        #expect(starshipPlan.ownershipDetail?.isConsequential == true)
+        #expect(starshipPlan.userActions.contains(where: { $0.title == "Approve dotfiles source" && $0.detail.contains(realStarshipFile.path) }))
+
+        // 3. Aggregate plan reach takes the worst reach across targets (.reloadRequired)
+        #expect(plan.activationReach == ActivationReach.reloadRequired)
+
+        // 4. Aggregate user actions includes the exact dotfiles approval and reload
+        #expect(plan.userActions.contains(where: { $0.title == "Approve dotfiles source" && $0.detail.contains(realStarshipFile.path) }))
+        #expect(plan.userActions.contains(where: { $0.title == "Reload Ghostty" }))
+    }
+
+    @Test("Preparation failure resolves and invalidates the aggregate SetupPlan")
+    func testResolvedPreparationFailureInvalidatesSetupPlan() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("omt-failure-res-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = try PersistenceStore(
+            databaseURL: tempDir.appendingPathComponent("db.sqlite"),
+            contentStoreURL: tempDir.appendingPathComponent("content", isDirectory: true)
+        )
+
+        let adapter1 = RecordingWritableAdapter(id: "adapter.available")
+        let instance1 = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "inst.1"),
+            displayName: "Instance 1",
+            adapterID: "adapter.available"
+        )
+        let missingAdapterID = "adapter.missing"
+        let instance2 = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "inst.2"),
+            displayName: "Instance 2",
+            adapterID: missingAdapterID
+        )
+
+        let engine = ThemeEngine(
+            packs: [],
+            adapters: [adapter1],
+            persistence: store
+        )
+
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "res-test"),
+            displayName: "Failure Resolution Test",
+            connectedTargetInstances: [],
+            targetOptIns: [instance1.id, instance2.id],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [instance1, instance2]
+        )
+
+        #expect(plan.targetPlans.count == 1)
+        #expect(plan.preparationFailures.count == 1)
+        #expect(plan.preparationFailures[0].targetInstanceID == instance2.id)
+
+        // While adapter is missing, preconditions are unchanged
+        let validResult = await engine.validateSetupPlanPreconditions(
+            plan: plan,
+            workspace: workspace,
+            availableInstances: [instance1, instance2]
+        )
+        #expect(validResult == .valid)
+
+        // When adapter is registered, setup preparation can now succeed -> invalidates plan
+        let newAdapter = RecordingWritableAdapter(id: missingAdapterID)
+        await engine.register(adapter: newAdapter)
+
+        let invalidatedResult = await engine.validateSetupPlanPreconditions(
+            plan: plan,
+            workspace: workspace,
+            availableInstances: [instance1, instance2]
+        )
+        guard case .invalidated(let reason) = invalidatedResult else {
+            Issue.record("Expected plan to invalidate when failed preparation resolves")
+            return
+        }
+        #expect(reason.contains("can now succeed"))
+    }
 }

@@ -384,6 +384,13 @@ final class WorkspacePresentationModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func confirmSetupPlan() async -> Bool {
+        await revalidateSetupPlan()
+        guard !isSetupPlanInvalidated else { return false }
+        return true
+    }
+
     func selectThemeVariant(_ variantID: String?) {
         guard let variantID else { return }
         runtime.selectFixedThemeVariant(variantID)

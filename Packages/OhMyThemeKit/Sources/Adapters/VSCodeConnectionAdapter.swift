@@ -788,6 +788,20 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
         let approved = !needsInstallation || approveLinkedSource
         let baselineData = try encode(baseline)
 
+        let ownershipDetail = SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            summary: "Installs Oh My Theme companion extension and communicates via Unix socket.",
+            routineDetails: [
+                "VS Code executable: \(installation.executableURL.path)",
+                "Companion extension: \(artifact.extensionID)@\(artifact.version) for profile \(profileName)"
+            ],
+            isConsequential: !approved,
+            consequentialDetail: !approved
+                ? "Approval required to install companion extension using \(installation.executableURL.path)."
+                : nil
+        )
+
         return ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
@@ -813,7 +827,9 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
                     )
                 ] : [],
             opaquePayload: try encode(payload),
-            requiresApproval: !approved
+            requiresApproval: !approved,
+            activationReach: .currentInstances,
+            ownershipDetail: ownershipDetail
         )
     }
 

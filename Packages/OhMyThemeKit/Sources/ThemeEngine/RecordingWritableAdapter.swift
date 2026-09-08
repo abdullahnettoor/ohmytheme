@@ -137,7 +137,16 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
         instance: ConnectedTargetInstance,
         approveLinkedSource: Bool
     ) async throws -> ConnectionPlan {
-        ConnectionPlan(
+        let ownership = SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            summary: "Recording adapter configuration for \(instance.displayName).",
+            routineDetails: configuredSideEffects,
+            isConsequential: !configuredPermissions.isEmpty,
+            consequentialDetail: configuredPermissions.isEmpty ? nil : "Requires permission: \(configuredPermissions.joined(separator: ", "))"
+        )
+
+        return ConnectionPlan(
             targetInstanceID: instance.id,
             adapterID: id,
             adapterVersion: version,
@@ -146,7 +155,8 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             staleStateToken: worldState.revision,
             expectedSideEffects: configuredSideEffects,
             requiredPermissions: configuredPermissions,
-            activationReach: configuredReach
+            activationReach: configuredReach,
+            ownershipDetail: ownership
         )
     }
 
