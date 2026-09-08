@@ -32,6 +32,7 @@
 		E00700000000000000000001 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00700000000000000000002 /* MenuBarContentView.swift */; };
 		E00800000000000000000001 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00800000000000000000002 /* SettingsView.swift */; };
 		E00900000000000000000001 /* AppPresenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00900000000000000000002 /* AppPresenceTests.swift */; };
+		E01000000000000000000001 /* ThemePreviewCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E01000000000000000000002 /* ThemePreviewCardView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -75,6 +76,7 @@
 		E00700000000000000000002 /* MenuBarContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
 		E00800000000000000000002 /* SettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		E00900000000000000000002 /* AppPresenceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPresenceTests.swift; sourceTree = "<group>"; };
+		E01000000000000000000002 /* ThemePreviewCardView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ThemePreviewCardView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -170,6 +172,7 @@
 				E00600000000000000000002 /* AppsView.swift */,
 				E00700000000000000000002 /* MenuBarContentView.swift */,
 				E00800000000000000000002 /* SettingsView.swift */,
+				E01000000000000000000002 /* ThemePreviewCardView.swift */,
 			);
 			name = UI;
 			path = UI;
@@ -382,6 +385,7 @@
 				E00600000000000000000001 /* AppsView.swift in Sources */,
 				E00700000000000000000001 /* MenuBarContentView.swift in Sources */,
 				E00800000000000000000001 /* SettingsView.swift in Sources */,
+				E01000000000000000000001 /* ThemePreviewCardView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

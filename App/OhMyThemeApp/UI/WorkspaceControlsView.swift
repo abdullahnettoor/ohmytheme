@@ -273,40 +273,79 @@ struct WorkspaceControlsView: View {
 
     private var themeSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeading("Theme Variant", detail: "Prepare an Apply Plan before anything changes.")
+            sectionHeading(
+                "Theme",
+                detail: "The desired Theme Variant is saved separately from Target outcomes shown below."
+            )
 
-            Picker(
-                "Theme Variant",
-                selection: Binding(
-                    get: { model.selectedThemeVariantID },
-                    set: { model.selectThemeVariant($0) }
-                )
-            ) {
-                Text("Choose a Theme Variant").tag(nil as String?)
-                ForEach(model.bundledThemeVariants, id: \.variantID) { variant in
-                    Text(variant.name).tag(variant.variantID as String?)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.desiredThemeTitle)
+                            .font(.headline)
+                            .accessibilityIdentifier("desired-theme-title")
+
+                        Text(model.desiredThemeExplanation)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Text(model.desiredThemeStatus)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityIdentifier("desired-theme-status")
                 }
-            }
-            .labelsHidden()
-            .accessibilityLabel("Theme Variant")
-            .accessibilityIdentifier("theme-variant-picker")
 
-            if let selected = model.bundledThemeVariants.first(where: {
-                $0.variantID == model.selectedThemeVariantID
-            }) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("\(selected.sourceType.capitalized) source · \(selected.appearance.capitalized)")
+                if let selected = model.bundledThemeVariants.first(where: {
+                    $0.variantID == model.selectedThemeVariantID
+                }) {
+                    HStack(spacing: 10) {
+                        ThemeSwatchStrip(preview: selected.preview)
+
+                        Text(
+                            "\(selected.source.type.rawValue.capitalized) source · "
+                                + selected.appearance.rawValue.capitalized
+                        )
                         .font(.caption.weight(.medium))
-                    Text(selected.attribution)
-                        .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    Text(selected.sourceRevision)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selected.source.attribution)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        Text("Revision: \(selected.source.revision)")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
+
+                Picker(
+                    "Theme Variant",
+                    selection: Binding(
+                        get: { model.selectedThemeVariantID },
+                        set: { model.selectThemeVariant($0) }
+                    )
+                ) {
+                    Text("Choose a Theme Variant").tag(nil as String?)
+                    ForEach(model.bundledThemeVariants, id: \.variantID) { variant in
+                        Text(variant.name).tag(variant.variantID as String?)
+                    }
+                }
+                .labelsHidden()
+                .accessibilityLabel("Theme Variant")
+                .accessibilityIdentifier("theme-variant-picker")
             }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityIdentifier("overview-desired-theme-section")
 
             Button {
                 model.perform {
@@ -404,6 +443,10 @@ struct WorkspaceControlsView: View {
 
     private func reportSection(_ report: WorkspacePresentationModel.PresentedReport) -> some View {
         VStack(alignment: .leading, spacing: 12) {
+            Text(report.sectionTitle)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
             HStack {
                 Text(report.title)
                     .font(.headline)

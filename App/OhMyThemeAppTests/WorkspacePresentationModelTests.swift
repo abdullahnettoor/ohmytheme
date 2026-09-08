@@ -78,8 +78,21 @@ final class WorkspacePresentationModelTests: XCTestCase {
             model.bundledThemeVariants.map(\.name),
             ["Catppuccin Mocha", "Oh My Theme Aurora"]
         )
-        XCTAssertEqual(model.bundledThemeVariants.map(\.sourceType), ["upstream", "generated"])
-        XCTAssertTrue(model.bundledThemeVariants.allSatisfy { !$0.sourceRevision.isEmpty && !$0.attribution.isEmpty })
+        XCTAssertEqual(
+            model.bundledThemeVariants.map { $0.source.type.rawValue },
+            ["upstream", "generated"]
+        )
+        XCTAssertTrue(
+            model.bundledThemeVariants.allSatisfy {
+                !$0.source.revision.isEmpty && !$0.source.attribution.isEmpty
+            }
+        )
+        XCTAssertTrue(
+            model.bundledThemeVariants.allSatisfy {
+                $0.preview.color(for: .canvas).rawValue.hasPrefix("#")
+            }
+        )
+        XCTAssertTrue(model.bundledThemeVariants.allSatisfy { $0.preview.source == $0.source })
     }
 
     func testWorkspaceRequestsApplyPlanThroughRuntime() async throws {
@@ -328,6 +341,7 @@ final class WorkspacePresentationModelTests: XCTestCase {
             kind: .apply
         )
 
+        XCTAssertEqual(report.sectionTitle, "Latest Apply Report")
         XCTAssertEqual(report.title, "Theme already applied")
     }
 
@@ -426,5 +440,91 @@ final class WorkspacePresentationModelTests: XCTestCase {
         await model.start()
 
         XCTAssertEqual(model.selectedThemeVariantID, "oh-my-theme/aurora")
+    }
+
+    func testSelectingThemeVariantUpdatesPreviewWithoutPreparingApplyPlanOrMutatingTargets() throws {
+        let packs = try BundledThemeCatalog().load()
+        let target = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "ghostty.test"),
+            displayName: "Ghostty",
+            adapterID: "ghostty"
+        )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [target],
+            themeAssignment: .fixed(variantID: "catppuccin/mocha")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertEqual(model.selectedThemeVariantID, "catppuccin/mocha")
+        XCTAssertEqual(model.selectedThemePreview?.variantID, "catppuccin/mocha")
+        XCTAssertNil(model.applyPlan)
+        XCTAssertEqual(runtime.prepareCalls, 0)
+
+        model.selectThemeVariant("oh-my-theme/aurora")
+
+        XCTAssertEqual(model.selectedThemeVariantID, "oh-my-theme/aurora")
+        XCTAssertEqual(model.selectedThemePreview?.variantID, "oh-my-theme/aurora")
+        XCTAssertNil(model.applyPlan)
+        XCTAssertEqual(runtime.prepareCalls, 0)
+        XCTAssertEqual(runtime.workspace.connectedTargetInstances.count, 1)
+        XCTAssertEqual(runtime.workspace.connectedTargetInstances.first?.id, target.id)
+    }
+
+    func testOverviewDescribesDesiredSelectionWithoutClaimingAppliedState() throws {
+        let packs = try BundledThemeCatalog().load()
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "ghostty.test"),
+                    displayName: "Ghostty",
+                    adapterID: "ghostty"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "catppuccin/mocha")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertEqual(model.desiredThemeTitle, "Catppuccin Mocha")
+        XCTAssertEqual(model.desiredThemeStatus, "Desired")
+        XCTAssertTrue(model.desiredThemeExplanation.contains("saved separately from Target outcomes"))
+    }
+
+    func testExistingStoredAppearancePairIsPreservedButHiddenFromFirstReleaseInterface() throws {
+        let packs = try BundledThemeCatalog().load()
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            themeAssignment: .appearancePair(
+                lightVariantID: "catppuccin/mocha",
+                darkVariantID: "oh-my-theme/aurora"
+            )
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        guard case .appearancePair(let light, let dark) = model.workspace.themeAssignment else {
+            XCTFail("Expected .appearancePair")
+            return
+        }
+        XCTAssertEqual(light, "catppuccin/mocha")
+        XCTAssertEqual(dark, "oh-my-theme/aurora")
+
+        XCTAssertNil(model.selectedThemeVariantID)
+        XCTAssertNil(model.selectedThemePreview)
+        XCTAssertEqual(model.desiredThemeTitle, "Choose a fixed Theme Variant")
+        XCTAssertEqual(model.desiredThemeStatus, "Selection required")
+        XCTAssertFalse(model.desiredThemeTitle.contains("Light"))
+        XCTAssertFalse(model.desiredThemeTitle.contains("Dark"))
+
+        model.selectThemeVariant("catppuccin/mocha")
+        XCTAssertEqual(model.selectedThemeVariantID, "catppuccin/mocha")
+        XCTAssertEqual(model.desiredThemeStatus, "Desired")
     }
 }

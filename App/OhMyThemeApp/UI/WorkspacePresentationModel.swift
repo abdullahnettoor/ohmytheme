@@ -59,6 +59,15 @@ final class WorkspacePresentationModel: ObservableObject {
         let kind: ReportKind
         let title: String
         let groups: [OutcomeGroup]
+
+        var sectionTitle: String {
+            switch kind {
+            case .apply: "Latest Apply Report"
+            case .undo: "Latest Undo Result"
+            case .connection: "Latest Connection Result"
+            case .disconnect: "Latest Disconnect Result"
+            }
+        }
     }
 
     struct OutcomeGroup: Equatable, Identifiable {
@@ -77,6 +86,14 @@ final class WorkspacePresentationModel: ObservableObject {
         let isProblem: Bool
 
         var userAction: String? { userActions.first }
+    }
+
+    private struct DesiredThemePresentation {
+        let variantID: String?
+        let preview: ThemePreviewData?
+        let title: String
+        let status: String
+        let explanation: String
     }
 
     @Published private(set) var workspace: Workspace
@@ -123,15 +140,8 @@ final class WorkspacePresentationModel: ObservableObject {
 
     var bundledThemeVariants: [BundledThemeVariant] {
         themePacks.flatMap { pack in
-            pack.variants.map {
-                BundledThemeVariant(
-                    name: "\(pack.displayName) \($0.displayName)",
-                    variantID: $0.qualifiedID,
-                    appearance: $0.appearance.rawValue,
-                    sourceType: pack.source.type.rawValue,
-                    sourceRevision: pack.source.revision,
-                    attribution: pack.source.attribution
-                )
+            pack.variants.map { variant in
+                BundledThemeVariant(preview: ThemePreviewData(pack: pack, variant: variant))
             }
         }
     }
@@ -141,9 +151,45 @@ final class WorkspacePresentationModel: ObservableObject {
             && !workspace.connectedTargetInstances.isEmpty
     }
 
-    var selectedThemeVariantID: String? {
-        guard case .fixed(let variantID) = workspace.themeAssignment else { return nil }
-        return variantID
+    var selectedThemeVariantID: String? { desiredThemePresentation.variantID }
+
+    var selectedThemePreview: ThemePreviewData? { desiredThemePresentation.preview }
+
+    var desiredThemeTitle: String { desiredThemePresentation.title }
+
+    var desiredThemeStatus: String { desiredThemePresentation.status }
+
+    var desiredThemeExplanation: String { desiredThemePresentation.explanation }
+
+    private var desiredThemePresentation: DesiredThemePresentation {
+        switch workspace.themeAssignment {
+        case .fixed(let variantID):
+            let variant = bundledThemeVariants.first(where: { $0.variantID == variantID })
+            return DesiredThemePresentation(
+                variantID: variantID,
+                preview: variant?.preview,
+                title: variant?.name ?? variantID,
+                status: "Desired",
+                explanation: "This selection is saved separately from Target outcomes. "
+                    + "No Target Instance changes until Apply."
+            )
+        case .appearancePair:
+            return DesiredThemePresentation(
+                variantID: nil,
+                preview: nil,
+                title: "Choose a fixed Theme Variant",
+                status: "Selection required",
+                explanation: "This version applies one fixed Theme Variant. Choose one in Themes."
+            )
+        case nil:
+            return DesiredThemePresentation(
+                variantID: nil,
+                preview: nil,
+                title: "No Theme Variant selected",
+                status: "Not selected",
+                explanation: "Choose a Theme Variant in Themes to set the desired theme for My Mac."
+            )
+        }
     }
 
     func start() async {
@@ -442,12 +488,13 @@ final class WorkspacePresentationModel: ObservableObject {
         }
     }
 
-    struct BundledThemeVariant: Equatable {
-        let name: String
-        let variantID: String
-        let appearance: String
-        let sourceType: String
-        let sourceRevision: String
-        let attribution: String
+    struct BundledThemeVariant: Equatable, Identifiable {
+        let preview: ThemePreviewData
+
+        var id: String { preview.id }
+        var name: String { preview.displayName }
+        var variantID: String { preview.variantID }
+        var appearance: ThemeAppearance { preview.appearance }
+        var source: ThemeSource { preview.source }
     }
 }

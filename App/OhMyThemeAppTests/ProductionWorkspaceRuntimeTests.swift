@@ -56,6 +56,57 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         XCTAssertTrue(snapshot.targets.contains { $0.id == "macos" })
     }
 
+    func testRuntimePreservesStoredAppearancePairAcrossReload() throws {
+        let pair = ThemeAssignment.appearancePair(
+            lightVariantID: "catppuccin/mocha",
+            darkVariantID: "oh-my-theme/aurora"
+        )
+        let customWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            themeAssignment: pair
+        )
+        try persistence.saveWorkspace(customWorkspace)
+
+        let runtime = makeRuntime()
+        XCTAssertEqual(runtime.workspace.themeAssignment, pair)
+
+        let reloadedStore = WorkspaceStore(persistenceStore: persistence)
+        let reloadedRuntime = ProductionWorkspaceRuntime(
+            store: reloadedStore,
+            themePacks: packs,
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .failure(DiscoveryUnavailable.expectedInTest),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+        XCTAssertEqual(reloadedRuntime.workspace.themeAssignment, pair)
+
+        let model = WorkspacePresentationModel(runtime: reloadedRuntime)
+        XCTAssertNil(model.selectedThemeVariantID)
+        XCTAssertNil(model.selectedThemePreview)
+        XCTAssertEqual(model.desiredThemeTitle, "Choose a fixed Theme Variant")
+        XCTAssertEqual(model.desiredThemeStatus, "Selection required")
+
+        model.selectThemeVariant("catppuccin/mocha")
+        XCTAssertEqual(model.selectedThemeVariantID, "catppuccin/mocha")
+        XCTAssertEqual(
+            reloadedStore.workspace.themeAssignment,
+            .fixed(variantID: "catppuccin/mocha")
+        )
+        let persistedStore = WorkspaceStore(persistenceStore: persistence)
+        XCTAssertEqual(
+            persistedStore.workspace.themeAssignment,
+            .fixed(variantID: "catppuccin/mocha")
+        )
+    }
+
     func testRuntimeSelectFixedThemeVariantPersistsThemeAssignment() throws {
         let runtime = makeRuntime()
 
@@ -63,7 +114,6 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
 
         XCTAssertEqual(runtime.workspace.themeAssignment, .fixed(variantID: "oh-my-theme/aurora"))
 
-        // Verify SQLite persistence survives a new WorkspaceStore instance
         let reloadedStore = WorkspaceStore(persistenceStore: persistence)
         XCTAssertEqual(reloadedStore.workspace.themeAssignment, .fixed(variantID: "oh-my-theme/aurora"))
     }
