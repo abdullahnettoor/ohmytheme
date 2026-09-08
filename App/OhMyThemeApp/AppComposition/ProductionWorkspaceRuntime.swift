@@ -1,4 +1,5 @@
 import Adapters
+import AppKit
 import Foundation
 import PlatformClients
 import ThemeEngine
@@ -19,6 +20,7 @@ struct VSCodeCompanionRuntime {
 
 typealias WorkspaceTargetDiscoveryProvider = @MainActor () async -> WorkspaceTargetDiscovery
 typealias VSCodeCompanionBootstrap = @MainActor () throws -> VSCodeCompanionRuntime?
+typealias CurrentThemeAppearanceProvider = @MainActor () -> ThemeAppearance
 
 @MainActor
 final class ProductionWorkspaceRuntime: WorkspaceRuntime {
@@ -43,6 +45,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private let starshipAdapter: StarshipConfigurationAdapter
     private let vscodeDiscovery: VSCodeApplicationDiscovery
     private let targetDiscoveryProvider: WorkspaceTargetDiscoveryProvider?
+    private let currentThemeAppearanceProvider: CurrentThemeAppearanceProvider
     private let vscodePlatform: (any VSCodeConnectionPlatform)?
     private let vscodeArtifact: VSCodeCompanionArtifact?
     private let socketServer: CompanionSocketServer?
@@ -73,12 +76,17 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         additionalAdapters: [any ThemeAdapter] = [],
         experimentalAdapterIDs: Set<String> = [],
         targetDiscoveryProvider: WorkspaceTargetDiscoveryProvider? = nil,
+        currentThemeAppearanceProvider: @escaping CurrentThemeAppearanceProvider = {
+            let match = NSApplication.shared.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+            return match == .darkAqua ? .dark : .light
+        },
         vscodeCompanionBootstrap: VSCodeCompanionBootstrap = ProductionWorkspaceRuntime.startVSCodeCompanion
     ) {
         self.store = store
         self.additionalAdapters = additionalAdapters
         self.experimentalAdapterIDs = experimentalAdapterIDs
         self.targetDiscoveryProvider = targetDiscoveryProvider
+        self.currentThemeAppearanceProvider = currentThemeAppearanceProvider
         appearanceAdapter = MacOSAppearanceAdapter()
         wallpaperAdapter = MacOSWallpaperAdapter(
             assetResolver: BundledWallpaperAssetResolver(
@@ -496,6 +504,8 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             )
         }
 
+        let themeContainsWallpaper = desiredThemeVariant()?.wallpaper != nil
+
         let displaySummary: String
         switch wallpaper {
         case .success(let report):
@@ -508,9 +518,9 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                     let displayID = display.targetInstanceID
                     let isConnected = workspace.isConnected(displayID)
                     let isOptedIn = workspace.isOptedIn(displayID)
-                    let recommendation = RecommendedTargetPolicy.evaluate(
-                        adapterID: "macos.wallpaper",
-                        isAvailable: true
+                    let wallpaperEval = RecommendedTargetPolicy.evaluateWallpaperDisplay(
+                        isAvailable: true,
+                        themeContainsWallpaper: themeContainsWallpaper
                     )
                     let item = WorkspacePresentationModel.TargetInstanceItem(
                         id: displayID,
@@ -520,8 +530,9 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                         managementState: isConnected ? .connected : (isOptedIn ? .setupNeeded : .notSelected),
                         isOptedIn: isOptedIn,
                         isConnected: isConnected,
-                        isRecommended: recommendation.isRecommended,
-                        exclusionReason: recommendation.exclusionReason
+                        isRecommended: wallpaperEval.isRecommended,
+                        exclusionReason: wallpaperEval.exclusionReason,
+                        exclusionDetail: wallpaperEval.exclusionDetail
                     )
                     items.append(item)
                     if isOptedIn, !isConnected, let candidate = candidates[displayID] {
@@ -1076,27 +1087,68 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         detail: String,
         workspace: Workspace
     ) -> [WorkspacePresentationModel.TargetInstanceItem] {
-        store.targetInstances.filter { $0.adapterID == adapterID }.map { instance in
+        var items: [WorkspacePresentationModel.TargetInstanceItem] = []
+        var seenIDs = Set<TargetInstanceID>()
+
+        for instance in store.targetInstances where instance.adapterID == adapterID {
+            seenIDs.insert(instance.id)
             let isConnected = workspace.isConnected(instance.id)
             let isOptedIn = workspace.isOptedIn(instance.id)
-            return WorkspacePresentationModel.TargetInstanceItem(
-                id: instance.id,
-                displayName: instance.displayName,
-                detail: detail,
-                adapterID: instance.adapterID,
-                managementState: targetManagementState(
-                    isConnected: isConnected,
+            items.append(
+                WorkspacePresentationModel.TargetInstanceItem(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    detail: detail,
+                    adapterID: instance.adapterID,
+                    managementState: targetManagementState(
+                        isConnected: isConnected,
+                        isOptedIn: isOptedIn,
+                        isAvailable: false,
+                        hasKnownProblem: true
+                    ),
                     isOptedIn: isOptedIn,
-                    isAvailable: false,
-                    hasKnownProblem: true
-                ),
-                isOptedIn: isOptedIn,
-                isConnected: isConnected,
-                isRecommended: false,
-                exclusionReason: .unavailable,
-                exclusionDetail: detail
+                    isConnected: isConnected,
+                    isRecommended: false,
+                    exclusionReason: .unavailable,
+                    exclusionDetail: detail
+                )
             )
         }
+
+        for connected in workspace.connectedTargetInstances
+        where connected.adapterID == adapterID && !seenIDs.contains(connected.id) {
+            seenIDs.insert(connected.id)
+            items.append(
+                WorkspacePresentationModel.TargetInstanceItem(
+                    id: connected.id,
+                    displayName: connected.displayName,
+                    detail: detail,
+                    adapterID: connected.adapterID,
+                    managementState: .needsAttention,
+                    isOptedIn: true,
+                    isConnected: true,
+                    isRecommended: false,
+                    exclusionReason: .unavailable,
+                    exclusionDetail: detail
+                )
+            )
+        }
+
+        return items
+    }
+
+    private func desiredThemeVariant() -> ThemeVariant? {
+        guard let assignment = workspace.themeAssignment else { return nil }
+        let variantID: String
+        switch assignment {
+        case .fixed(let fixedVariantID):
+            variantID = fixedVariantID
+        case .appearancePair(let lightVariantID, let darkVariantID):
+            variantID = currentThemeAppearanceProvider() == .dark ? darkVariantID : lightVariantID
+        }
+        return themePacks.lazy
+            .flatMap(\.variants)
+            .first { $0.qualifiedID == variantID }
     }
 
     private func targetManagementState(

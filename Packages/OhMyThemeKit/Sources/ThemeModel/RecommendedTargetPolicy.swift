@@ -52,4 +52,20 @@ public enum RecommendedTargetPolicy: Sendable {
         }
         return (true, nil)
     }
+
+    /// Evaluates whether a wallpaper display target instance qualifies as recommended.
+    /// A display is recommended only when the desired theme variant contains a wallpaper
+    /// and that display is available.
+    public static func evaluateWallpaperDisplay(
+        isAvailable: Bool,
+        themeContainsWallpaper: Bool
+    ) -> (isRecommended: Bool, exclusionReason: RecommendationExclusionReason?, exclusionDetail: String?) {
+        if !isAvailable {
+            return (false, .unavailable, "Display is unavailable.")
+        }
+        if !themeContainsWallpaper {
+            return (false, .unavailable, "The selected theme does not contain a wallpaper.")
+        }
+        return (true, nil, nil)
+    }
 }

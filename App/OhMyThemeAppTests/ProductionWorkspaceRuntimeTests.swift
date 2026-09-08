@@ -397,9 +397,10 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
             currentPlacement: nil
         )
         var discoveryCalls = 0
+        let pack = makeThemePackWithWallpaper()
         let runtime = ProductionWorkspaceRuntime(
             store: store,
-            themePacks: packs,
+            themePacks: [pack],
             targetDiscoveryProvider: {
                 discoveryCalls += 1
                 return WorkspaceTargetDiscovery(
@@ -416,6 +417,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
             vscodeCompanionBootstrap: { nil }
         )
 
+        runtime.selectFixedThemeVariant("pack-wallpaper/variant-wallpaper")
         let initialSnapshot = try await runtime.start()
         let wallpaperID = display.targetInstanceID
         let initialWallpaper = try XCTUnwrap(
@@ -654,6 +656,393 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         let snapshot = try await runtime.selectRecommended(applicationID: "macos")
         XCTAssertTrue(snapshot.workspace.isOptedIn(appearanceID))
         XCTAssertFalse(snapshot.workspace.isOptedIn(customID))
+    }
+
+    func testWallpaperDiscoveryWithNoDisplaysReportsNoDisplaysAndAppearanceRemainsIndependent() async throws {
+        let pack = makeThemePackWithWallpaper()
+        let runtime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: [pack],
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: [])),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+
+        runtime.selectFixedThemeVariant("pack-wallpaper/variant-wallpaper")
+        let snapshot = try await runtime.start()
+        let macosTarget = try XCTUnwrap(snapshot.targets.first { $0.id == "macos" })
+        XCTAssertTrue(macosTarget.summary.contains("No wallpaper displays discovered."))
+
+        // Only System Appearance is in instances
+        XCTAssertEqual(macosTarget.instances.count, 1)
+        let appearance = macosTarget.instances[0]
+        XCTAssertEqual(appearance.adapterID, "macos.appearance")
+        XCTAssertTrue(appearance.isRecommended)
+        XCTAssertFalse(appearance.isOptedIn)
+
+        // Select All Recommended opts in System Appearance only
+        let selected = try await runtime.selectAllRecommended()
+        XCTAssertTrue(selected.workspace.isOptedIn(appearance.id))
+        XCTAssertEqual(selected.workspace.targetOptIns.count, 1)
+    }
+
+    func testSingleWallpaperDisplayWithWallpaperThemeIsRecommendedAndSelectable() async throws {
+        let display = MacOSWallpaperConnectedDisplay(
+            displayID: 1,
+            currentImageURL: URL(fileURLWithPath: "/tmp/wallpaper.png"),
+            currentPlacement: nil
+        )
+        let pack = makeThemePackWithWallpaper()
+        let runtime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: [pack],
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: [display])),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+
+        runtime.selectFixedThemeVariant("pack-wallpaper/variant-wallpaper")
+        let snapshot = try await runtime.start()
+        let macosTarget = try XCTUnwrap(snapshot.targets.first { $0.id == "macos" })
+        XCTAssertEqual(macosTarget.instances.count, 2)
+
+        let appearance = try XCTUnwrap(macosTarget.instances.first { $0.adapterID == "macos.appearance" })
+        let wallpaper = try XCTUnwrap(macosTarget.instances.first { $0.adapterID == "macos.wallpaper" })
+
+        // Both are recommended when theme contains wallpaper
+        XCTAssertTrue(appearance.isRecommended)
+        XCTAssertTrue(wallpaper.isRecommended)
+        XCTAssertNil(wallpaper.exclusionReason)
+
+        // Neither is opted in initially
+        XCTAssertFalse(appearance.isOptedIn)
+        XCTAssertFalse(wallpaper.isOptedIn)
+
+        // Independent opt-in: Opt into wallpaper display only
+        let displayOptedInSnapshot = try await runtime.setTargetOptIn(instanceID: wallpaper.id, isOptedIn: true)
+        XCTAssertTrue(displayOptedInSnapshot.workspace.isOptedIn(wallpaper.id))
+        XCTAssertFalse(displayOptedInSnapshot.workspace.isOptedIn(appearance.id))
+
+        // Independent opt-out: Opt out of wallpaper display
+        let displayOptedOutSnapshot = try await runtime.setTargetOptIn(instanceID: wallpaper.id, isOptedIn: false)
+        XCTAssertFalse(displayOptedOutSnapshot.workspace.isOptedIn(wallpaper.id))
+        XCTAssertFalse(displayOptedOutSnapshot.workspace.isOptedIn(appearance.id))
+
+        // Select All Recommended opts into both System Appearance and Display
+        let allRecommendedSnapshot = try await runtime.selectAllRecommended()
+        XCTAssertTrue(allRecommendedSnapshot.workspace.isOptedIn(appearance.id))
+        XCTAssertTrue(allRecommendedSnapshot.workspace.isOptedIn(wallpaper.id))
+    }
+
+    func testSingleWallpaperDisplayWithThemeWithoutWallpaperIsExcludedFromRecommendation() async throws {
+        let display = MacOSWallpaperConnectedDisplay(
+            displayID: 1,
+            currentImageURL: URL(fileURLWithPath: "/tmp/wallpaper.png"),
+            currentPlacement: nil
+        )
+        let pack = makeThemePackWithoutWallpaper()
+        let runtime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: [pack],
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: [display])),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+
+        runtime.selectFixedThemeVariant("pack-plain/variant-plain")
+        let snapshot = try await runtime.start()
+        let macosTarget = try XCTUnwrap(snapshot.targets.first { $0.id == "macos" })
+
+        let appearance = try XCTUnwrap(macosTarget.instances.first { $0.adapterID == "macos.appearance" })
+        let wallpaper = try XCTUnwrap(macosTarget.instances.first { $0.adapterID == "macos.wallpaper" })
+
+        // Appearance is recommended, but wallpaper display is excluded because theme has no wallpaper
+        XCTAssertTrue(appearance.isRecommended)
+        XCTAssertFalse(wallpaper.isRecommended)
+        XCTAssertEqual(wallpaper.exclusionReason, .unavailable)
+        XCTAssertEqual(wallpaper.exclusionDetail, "The selected theme does not contain a wallpaper.")
+
+        // Wallpaper display can still be manually opted in by user intent
+        let manualOptIn = try await runtime.setTargetOptIn(instanceID: wallpaper.id, isOptedIn: true)
+        XCTAssertTrue(manualOptIn.workspace.isOptedIn(wallpaper.id))
+        XCTAssertFalse(manualOptIn.workspace.isOptedIn(appearance.id))
+
+        // Opt back out to test Select All Recommended
+        _ = try await runtime.setTargetOptIn(instanceID: wallpaper.id, isOptedIn: false)
+
+        // Select All Recommended opts in System Appearance but NOT the wallpaper display
+        let selectedAll = try await runtime.selectAllRecommended()
+        XCTAssertTrue(selectedAll.workspace.isOptedIn(appearance.id))
+        XCTAssertFalse(selectedAll.workspace.isOptedIn(wallpaper.id))
+    }
+
+    func testAppearancePairUsesCurrentSystemAppearanceForWallpaperRecommendation() async throws {
+        let display = MacOSWallpaperConnectedDisplay(
+            displayID: 1,
+            currentImageURL: URL(fileURLWithPath: "/tmp/wallpaper.png"),
+            currentPlacement: nil
+        )
+        let pair = ThemeAssignment.appearancePair(
+            lightVariantID: "pack-plain/variant-plain",
+            darkVariantID: "pack-wallpaper/variant-wallpaper"
+        )
+        try persistence.saveWorkspace(
+            Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [],
+                themeAssignment: pair
+            )
+        )
+        let discoveryProvider: WorkspaceTargetDiscoveryProvider = {
+            WorkspaceTargetDiscovery(
+                ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: [display])),
+                starship: .failure(DiscoveryUnavailable.expectedInTest),
+                vscode: .failure(DiscoveryUnavailable.expectedInTest)
+            )
+        }
+        let themePacks = [
+            makeThemePackWithWallpaper(),
+            makeThemePackWithoutWallpaper(appearance: .light),
+        ]
+
+        let lightRuntime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: themePacks,
+            targetDiscoveryProvider: discoveryProvider,
+            currentThemeAppearanceProvider: { .light },
+            vscodeCompanionBootstrap: { nil }
+        )
+        let lightSnapshot = try await lightRuntime.refreshTargets()
+        let lightWallpaper = try XCTUnwrap(
+            lightSnapshot.targets.first { $0.id == "macos" }?.instances.first {
+                $0.id == display.targetInstanceID
+            }
+        )
+        XCTAssertFalse(lightWallpaper.isRecommended)
+
+        let darkRuntime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: themePacks,
+            targetDiscoveryProvider: discoveryProvider,
+            currentThemeAppearanceProvider: { .dark },
+            vscodeCompanionBootstrap: { nil }
+        )
+        let darkSnapshot = try await darkRuntime.refreshTargets()
+        let darkWallpaper = try XCTUnwrap(
+            darkSnapshot.targets.first { $0.id == "macos" }?.instances.first {
+                $0.id == display.targetInstanceID
+            }
+        )
+        XCTAssertTrue(darkWallpaper.isRecommended)
+    }
+
+    func testMultipleWallpaperDisplaysHaveIndependentOptInsAndSelection() async throws {
+        let display1 = MacOSWallpaperConnectedDisplay(
+            displayID: 1,
+            currentImageURL: URL(fileURLWithPath: "/tmp/display1.png"),
+            currentPlacement: nil
+        )
+        let display2 = MacOSWallpaperConnectedDisplay(
+            displayID: 2,
+            currentImageURL: URL(fileURLWithPath: "/tmp/display2.png"),
+            currentPlacement: nil
+        )
+        let display3 = MacOSWallpaperConnectedDisplay(
+            displayID: 3,
+            currentImageURL: URL(fileURLWithPath: "/tmp/display3.png"),
+            currentPlacement: nil
+        )
+        let packWithWallpaper = makeThemePackWithWallpaper()
+        let packWithoutWallpaper = makeThemePackWithoutWallpaper()
+        let runtime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: [packWithWallpaper, packWithoutWallpaper],
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: [display1, display2, display3])),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+
+        runtime.selectFixedThemeVariant("pack-wallpaper/variant-wallpaper")
+        let snapshot = try await runtime.start()
+        let macosTarget = try XCTUnwrap(snapshot.targets.first { $0.id == "macos" })
+        XCTAssertEqual(macosTarget.instances.count, 4)  // Appearance + 3 displays
+
+        let appearanceID = MacOSAppearanceAdapter.systemTargetInstanceID
+        let display1ID = display1.targetInstanceID
+        let display2ID = display2.targetInstanceID
+        let display3ID = display3.targetInstanceID
+
+        // Opt in only Display 2
+        let optIn2 = try await runtime.setTargetOptIn(instanceID: display2ID, isOptedIn: true)
+        XCTAssertTrue(optIn2.workspace.isOptedIn(display2ID))
+        XCTAssertFalse(optIn2.workspace.isOptedIn(display1ID))
+        XCTAssertFalse(optIn2.workspace.isOptedIn(display3ID))
+        XCTAssertFalse(optIn2.workspace.isOptedIn(appearanceID))
+
+        // Select All Recommended opts into all remaining recommended instances
+        let allOpted = try await runtime.selectAllRecommended()
+        XCTAssertTrue(allOpted.workspace.isOptedIn(appearanceID))
+        XCTAssertTrue(allOpted.workspace.isOptedIn(display1ID))
+        XCTAssertTrue(allOpted.workspace.isOptedIn(display2ID))
+        XCTAssertTrue(allOpted.workspace.isOptedIn(display3ID))
+
+        // Switching to theme without wallpaper preserves opt-ins but excludes from recommendation
+        runtime.selectFixedThemeVariant("pack-plain/variant-plain")
+        let refreshed = try await runtime.refreshTargets()
+        let refreshedMacos = try XCTUnwrap(refreshed.targets.first { $0.id == "macos" })
+        for instance in refreshedMacos.instances where instance.adapterID == "macos.wallpaper" {
+            XCTAssertFalse(instance.isRecommended)
+            XCTAssertEqual(instance.exclusionReason, .unavailable)
+            XCTAssertTrue(instance.isOptedIn)  // Existing opt-in survives theme change
+        }
+    }
+
+    func testDisappearingDisplayBecomesUnavailableWithoutTransferringOptInToAnotherDisplay() async throws {
+        let display1 = MacOSWallpaperConnectedDisplay(
+            displayID: 1,
+            currentImageURL: URL(fileURLWithPath: "/tmp/disp1.png"),
+            currentPlacement: nil
+        )
+        let display2 = MacOSWallpaperConnectedDisplay(
+            displayID: 2,
+            currentImageURL: URL(fileURLWithPath: "/tmp/disp2.png"),
+            currentPlacement: nil
+        )
+        var discoveryCalls = 0
+        let pack = makeThemePackWithWallpaper()
+        let runtime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: [pack],
+            targetDiscoveryProvider: {
+                discoveryCalls += 1
+                return WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(
+                        MacOSWallpaperDiscoveryReport(
+                            displays: discoveryCalls == 1 ? [display1, display2] : [display2]
+                        )
+                    ),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+
+        runtime.selectFixedThemeVariant("pack-wallpaper/variant-wallpaper")
+        let initialSnapshot = try await runtime.start()
+        let display1ID = display1.targetInstanceID
+        let display2ID = display2.targetInstanceID
+
+        // User opts in Display 1 only
+        _ = try await runtime.setTargetOptIn(instanceID: display1ID, isOptedIn: true)
+        XCTAssertTrue(runtime.workspace.isOptedIn(display1ID))
+        XCTAssertFalse(runtime.workspace.isOptedIn(display2ID))
+
+        // Display 1 disappears; Display 2 remains
+        let refreshedSnapshot = try await runtime.refreshTargets()
+        let macosTarget = try XCTUnwrap(refreshedSnapshot.targets.first { $0.id == "macos" })
+
+        let item1 = try XCTUnwrap(macosTarget.instances.first { $0.id == display1ID })
+        let item2 = try XCTUnwrap(macosTarget.instances.first { $0.id == display2ID })
+
+        // Display 1 is unavailable and needs attention
+        XCTAssertTrue(item1.isOptedIn)
+        XCTAssertEqual(item1.managementState, .needsAttention)
+        XCTAssertEqual(item1.exclusionReason, .unavailable)
+        XCTAssertFalse(item1.isRecommended)
+
+        // Display 2 did NOT inherit Display 1's opt-in!
+        XCTAssertFalse(item2.isOptedIn)
+        XCTAssertTrue(item2.isRecommended)
+        XCTAssertNil(item2.exclusionReason)
+
+        // Select All Recommended does NOT opt into unavailable Display 1, but opts into available Display 2
+        let snapshotAfterSelect = try await runtime.selectAllRecommended()
+        XCTAssertTrue(snapshotAfterSelect.workspace.isOptedIn(display1ID))  // preserved
+        XCTAssertTrue(snapshotAfterSelect.workspace.isOptedIn(display2ID))  // newly selected
+    }
+
+    private func makeThemePackWithWallpaper() -> ThemePack {
+        ThemePack(
+            schemaVersion: 1,
+            id: "pack-wallpaper",
+            displayName: "Wallpaper Pack",
+            author: "Tester",
+            source: ThemeSource(
+                type: .upstream,
+                url: URL(string: "https://example.com")!,
+                revision: "1.0",
+                license: "MIT",
+                attribution: "Tester"
+            ),
+            variants: [
+                ThemeVariant(
+                    id: "variant-wallpaper",
+                    displayName: "Wallpaper Variant",
+                    appearance: .dark,
+                    contentDigest: "variant-digest",
+                    roles: [:],
+                    wallpaper: ThemeWallpaper(
+                        assetPath: "test.jpg",
+                        contentDigest: "wallpaper-digest",
+                        attribution: "Test Attribution"
+                    )
+                )
+            ]
+        )
+    }
+
+    private func makeThemePackWithoutWallpaper(appearance: ThemeAppearance = .dark) -> ThemePack {
+        ThemePack(
+            schemaVersion: 1,
+            id: "pack-plain",
+            displayName: "Plain Pack",
+            author: "Tester",
+            source: ThemeSource(
+                type: .upstream,
+                url: URL(string: "https://example.com")!,
+                revision: "1.0",
+                license: "MIT",
+                attribution: "Tester"
+            ),
+            variants: [
+                ThemeVariant(
+                    id: "variant-plain",
+                    displayName: "Plain Variant",
+                    appearance: appearance,
+                    contentDigest: "variant-digest",
+                    roles: [:],
+                    wallpaper: nil
+                )
+            ]
+        )
     }
 
     private func makeRuntime(
