@@ -23,6 +23,15 @@
 		D00100000000000000000001 /* WorkspaceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00100000000000000000002 /* WorkspaceRuntime.swift */; };
 		D00200000000000000000001 /* FakeWorkspaceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00200000000000000000002 /* FakeWorkspaceRuntime.swift */; };
 		D00300000000000000000001 /* ProductionWorkspaceRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */; };
+		E00100000000000000000001 /* AppPresencePlatform.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00100000000000000000002 /* AppPresencePlatform.swift */; };
+		E00200000000000000000001 /* AppPresenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00200000000000000000002 /* AppPresenceController.swift */; };
+		E00300000000000000000001 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00300000000000000000002 /* MainWindowView.swift */; };
+		E00400000000000000000001 /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00400000000000000000002 /* OverviewView.swift */; };
+		E00500000000000000000001 /* ThemesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00500000000000000000002 /* ThemesView.swift */; };
+		E00600000000000000000001 /* AppsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00600000000000000000002 /* AppsView.swift */; };
+		E00700000000000000000001 /* MenuBarContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00700000000000000000002 /* MenuBarContentView.swift */; };
+		E00800000000000000000001 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00800000000000000000002 /* SettingsView.swift */; };
+		E00900000000000000000001 /* AppPresenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00900000000000000000002 /* AppPresenceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +66,15 @@
 		D00100000000000000000002 /* WorkspaceRuntime.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceRuntime.swift; sourceTree = "<group>"; };
 		D00200000000000000000002 /* FakeWorkspaceRuntime.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FakeWorkspaceRuntime.swift; sourceTree = "<group>"; };
 		D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProductionWorkspaceRuntimeTests.swift; sourceTree = "<group>"; };
+		E00100000000000000000002 /* AppPresencePlatform.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPresencePlatform.swift; sourceTree = "<group>"; };
+		E00200000000000000000002 /* AppPresenceController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPresenceController.swift; sourceTree = "<group>"; };
+		E00300000000000000000002 /* MainWindowView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
+		E00400000000000000000002 /* OverviewView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
+		E00500000000000000000002 /* ThemesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ThemesView.swift; sourceTree = "<group>"; };
+		E00600000000000000000002 /* AppsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppsView.swift; sourceTree = "<group>"; };
+		E00700000000000000000002 /* MenuBarContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarContentView.swift; sourceTree = "<group>"; };
+		E00800000000000000000002 /* SettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		E00900000000000000000002 /* AppPresenceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPresenceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -94,6 +112,16 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		E00000000000000000000001 /* AppPresence */ = {
+			isa = PBXGroup;
+			children = (
+				E00100000000000000000002 /* AppPresencePlatform.swift */,
+				E00200000000000000000002 /* AppPresenceController.swift */,
+			);
+			name = AppPresence;
+			path = AppPresence;
+			sourceTree = "<group>";
+		};
 		2A4BABC391C431046E3B0F2B /* AppComposition */ = {
 			isa = PBXGroup;
 			children = (
@@ -114,6 +142,7 @@
 				F618B0C82D8C8629B72C82A1 /* MenuBarLifecycleTests.swift */,
 				4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */,
 				D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */,
+				E00900000000000000000002 /* AppPresenceTests.swift */,
 			);
 			name = OhMyThemeAppTests;
 			path = OhMyThemeAppTests;
@@ -135,6 +164,12 @@
 			children = (
 				9EC15806E271DF4577C8E93D /* WorkspaceMenuModel.swift */,
 				493A5E2DC28F969912BC7DAF /* WorkspaceMenuView.swift */,
+				E00300000000000000000002 /* MainWindowView.swift */,
+				E00400000000000000000002 /* OverviewView.swift */,
+				E00500000000000000000002 /* ThemesView.swift */,
+				E00600000000000000000002 /* AppsView.swift */,
+				E00700000000000000000002 /* MenuBarContentView.swift */,
+				E00800000000000000000002 /* SettingsView.swift */,
 			);
 			name = UI;
 			path = UI;
@@ -144,6 +179,7 @@
 			isa = PBXGroup;
 			children = (
 				AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */,
+				E00000000000000000000001 /* AppPresence */,
 				2A4BABC391C431046E3B0F2B /* AppComposition */,
 				6C32E16D3870C2673D3C0502 /* UI */,
 				B00100000000000000000003 /* Resources */,
@@ -321,6 +357,7 @@
 				13371C830467E02D8FE2EEB3 /* MenuBarLifecycleTests.swift in Sources */,
 				EAA17A7543ACA9E7C3AC398A /* WorkspaceMenuModelTests.swift in Sources */,
 				D00300000000000000000001 /* ProductionWorkspaceRuntimeTests.swift in Sources */,
+				E00900000000000000000001 /* AppPresenceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -337,6 +374,14 @@
 				EEAAC4694FEECBAA36C561E2 /* WorkspaceMenuView.swift in Sources */,
 				D00100000000000000000001 /* WorkspaceRuntime.swift in Sources */,
 				D00200000000000000000001 /* FakeWorkspaceRuntime.swift in Sources */,
+				E00100000000000000000001 /* AppPresencePlatform.swift in Sources */,
+				E00200000000000000000001 /* AppPresenceController.swift in Sources */,
+				E00300000000000000000001 /* MainWindowView.swift in Sources */,
+				E00400000000000000000001 /* OverviewView.swift in Sources */,
+				E00500000000000000000001 /* ThemesView.swift in Sources */,
+				E00600000000000000000001 /* AppsView.swift in Sources */,
+				E00700000000000000000001 /* MenuBarContentView.swift in Sources */,
+				E00800000000000000000001 /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
