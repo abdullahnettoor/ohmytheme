@@ -26,6 +26,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
     public let opaquePayload: Data?
     public let requiresApproval: Bool
     public let baselineWasPreviouslyStored: Bool
+    public let activationReach: ActivationReach
 
     public init(
         targetInstanceID: TargetInstanceID,
@@ -39,7 +40,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         userActions: [UserAction] = [],
         opaquePayload: Data? = nil,
         requiresApproval: Bool = false,
-        baselineWasPreviouslyStored: Bool = false
+        baselineWasPreviouslyStored: Bool = false,
+        activationReach: ActivationReach = .currentInstances
     ) {
         self.targetInstanceID = targetInstanceID
         self.adapterID = adapterID
@@ -53,6 +55,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         self.opaquePayload = opaquePayload
         self.requiresApproval = requiresApproval
         self.baselineWasPreviouslyStored = baselineWasPreviouslyStored
+        self.activationReach = activationReach
     }
 
     public func approvingReviewedSetup() -> ConnectionPlan {
@@ -68,7 +71,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             userActions: userActions,
             opaquePayload: opaquePayload,
             requiresApproval: false,
-            baselineWasPreviouslyStored: baselineWasPreviouslyStored
+            baselineWasPreviouslyStored: baselineWasPreviouslyStored,
+            activationReach: activationReach
         )
     }
 
@@ -85,7 +89,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             userActions: userActions,
             opaquePayload: opaquePayload,
             requiresApproval: requiresApproval,
-            baselineWasPreviouslyStored: wasPreviouslyStored
+            baselineWasPreviouslyStored: wasPreviouslyStored,
+            activationReach: activationReach
         )
     }
 
@@ -102,6 +107,7 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
         case opaquePayload
         case requiresApproval
         case baselineWasPreviouslyStored
+        case activationReach
     }
 
     public init(from decoder: Decoder) throws {
@@ -121,7 +127,8 @@ public struct ConnectionPlan: Codable, Equatable, Sendable {
             baselineWasPreviouslyStored: try container.decodeIfPresent(
                 Bool.self,
                 forKey: .baselineWasPreviouslyStored
-            ) ?? false
+            ) ?? false,
+            activationReach: try container.decodeIfPresent(ActivationReach.self, forKey: .activationReach) ?? .currentInstances
         )
     }
 }
@@ -197,10 +204,10 @@ public struct WriteBoundaryConflict: ConnectionMutationNotStartedError, Equatabl
 /// - Perform **no writes** during any `prepare*` call.
 /// - Produce **restart-safe** (immutable, serializable) plans that survive a crash.
 /// - Be **idempotent** across the mutation seam **or** classify current state as
-///   `beforeChange`, `intendedAfterChange`, or `conflicting` via ``classifyApply(plan:)``.
-/// - Revalidate at the write boundary via ``revalidateApply(plan:)``; a stale plan
+///   `beforeChange`, `intendedAfterChange`, or `conflicting` via ``classifyApply(plan:)`` .
+/// - Revalidate at the write boundary via ``revalidateApply(plan:)`` ; a stale plan
 ///   throws ``WriteBoundaryConflict`` and no mutation is performed.
-/// - Provide a **guarded** rollback in ``rollbackApply(plan:receipt:)``; the rollback
+/// - Provide a **guarded** rollback in ``rollbackApply(plan:receipt:)`` ; the rollback
 ///   must refuse to overwrite state it cannot prove it still owns.
 /// - Stop and report on **external edits**, never force-overwrite.
 /// - Never leak baseline bytes or other **sensitive data** into logs or reports.

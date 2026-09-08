@@ -956,7 +956,7 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         )
 
         runtime.selectFixedThemeVariant("pack-wallpaper/variant-wallpaper")
-        let initialSnapshot = try await runtime.start()
+        _ = try await runtime.start()
         let display1ID = display1.targetInstanceID
         let display2ID = display2.targetInstanceID
 
@@ -1064,5 +1064,40 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
             },
             vscodeCompanionBootstrap: { nil }
         )
+    }
+
+    func testProductionWorkspaceRuntimePrepareSetupPlanAndValidation() async throws {
+        let adapter = RecordingWritableAdapter(id: "recording")
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+
+        _ = try await runtime.start()
+
+        // Before opt-in, unresolved opted in list is empty -> prepareSetupPlan returns empty targets
+        let emptyPlan = try await runtime.prepareSetupPlan()
+        XCTAssertTrue(emptyPlan.targetInstanceIDs.isEmpty)
+        XCTAssertTrue(emptyPlan.targetPlans.isEmpty)
+
+        // Opt in candidate
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+
+        let plan = try await runtime.prepareSetupPlan()
+        XCTAssertEqual(plan.workspaceID, runtime.workspace.id)
+        XCTAssertEqual(plan.targetInstanceIDs, [candidateID])
+        XCTAssertEqual(plan.targetPlans.count, 1)
+        XCTAssertTrue(plan.isFullyReady)
+
+        // Validation against current state is valid
+        let validation = await runtime.validateSetupPlanPreconditions(plan)
+        XCTAssertEqual(validation, .valid)
+
+        // Modify adapter externally -> validation fails with invalidation
+        await adapter.mutateWorldExternally(Data("external-mutation".utf8))
+        let invalidatedValidation = await runtime.validateSetupPlanPreconditions(plan)
+        guard case .invalidated(let reason) = invalidatedValidation else {
+            XCTFail("Expected invalidated validation")
+            return
+        }
+        XCTAssertTrue(reason.contains("externally modified"))
     }
 }

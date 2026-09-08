@@ -24,6 +24,10 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var restoreAndDisconnectResult: WorkspaceConnectionResult?
     var restoreAndDisconnectError: (any Error)?
 
+    var setupPlanToReturn: SetupPlan?
+    var setupPlanError: (any Error)?
+    var setupPlanValidationResult: SetupPlanPreconditionValidation = .valid
+
     var prepareApplyPlanResult: ApplyPlan?
     var prepareApplyPlanError: (any Error)?
 
@@ -41,6 +45,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     private(set) var reviewCalls = 0
     private(set) var connectCalls = 0
     private(set) var disconnectCalls = 0
+    private(set) var prepareSetupPlanCalls = 0
+    private(set) var validateSetupPlanCalls = 0
     private(set) var prepareCalls = 0
     private(set) var applyCalls: [UUID] = []
     private(set) var undoCalls = 0
@@ -190,6 +196,32 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
                 detail: "Restored and disconnected."
             )
         )
+    }
+
+    func prepareSetupPlan() async throws -> SetupPlan {
+        prepareSetupPlanCalls += 1
+        if let setupPlanError {
+            throw setupPlanError
+        }
+        if let setupPlanToReturn {
+            return setupPlanToReturn
+        }
+        let unresolvedIDs = workspace.targetOptIns.filter { !workspace.isConnected($0) }
+        return SetupPlan(
+            workspaceID: workspace.id,
+            targetInstanceIDs: Array(unresolvedIDs),
+            targetPlans: [],
+            discoveryAndSelectionDigest: "fake-digest"
+        )
+    }
+
+    func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation {
+        validateSetupPlanCalls += 1
+        let currentUnresolved = Set(workspace.targetOptIns.filter { !workspace.isConnected($0) })
+        if currentUnresolved != Set(plan.targetInstanceIDs) {
+            return .invalidated(reason: "Target Opt-ins changed since the plan was prepared.")
+        }
+        return setupPlanValidationResult
     }
 
     func prepareApplyPlan() async throws -> ApplyPlan {
@@ -383,6 +415,29 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     private func defaultTargets(for workspace: Workspace) -> [WorkspacePresentationModel.ApplicationTarget] {
         var targets: [WorkspacePresentationModel.ApplicationTarget] = []
+        for optInID in workspace.targetOptIns where !workspace.isConnected(optInID) {
+            let item = WorkspacePresentationModel.TargetInstanceItem(
+                id: optInID,
+                displayName: optInID.rawValue,
+                adapterID: "fake",
+                managementState: .setupNeeded,
+                isOptedIn: true,
+                isConnected: false,
+                isRecommended: true
+            )
+            targets.append(
+                WorkspacePresentationModel.ApplicationTarget(
+                    id: optInID.rawValue,
+                    name: optInID.rawValue,
+                    systemImage: "app",
+                    state: .setupNeeded,
+                    summary: "Setup Needed",
+                    instanceDetails: [optInID.rawValue],
+                    connectionOptions: [],
+                    instances: [item]
+                )
+            )
+        }
         for instance in workspace.connectedTargetInstances {
             let item = WorkspacePresentationModel.TargetInstanceItem(
                 id: instance.id,

@@ -755,7 +755,7 @@ public actor ThemeEngine {
         return (fallbackState, .unavailable, fallbackDetail ?? String(describing: error))
     }
 
-    private static func worstReach(_ left: ActivationReach, _ right: ActivationReach) -> ActivationReach {
+    static func worstReach(_ left: ActivationReach, _ right: ActivationReach) -> ActivationReach {
         let order: [ActivationReach] = [
             .currentInstances,
             .nextPrompt,

@@ -610,4 +610,36 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertEqual(item.exclusionReason, .ambiguous)
         XCTAssertEqual(item.exclusionDetail, "Multiple installations found")
     }
+
+    func testSetupPlanReviewFlowAndInvalidation() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertTrue(model.canReviewSetupPlan)
+        XCTAssertEqual(model.unresolvedOptedInCount, 1)
+        XCTAssertNil(model.setupPlan)
+
+        // Prepare setup plan
+        try await model.prepareSetupPlan()
+        XCTAssertEqual(runtime.prepareSetupPlanCalls, 1)
+        XCTAssertNotNil(model.setupPlan)
+        XCTAssertFalse(model.isSetupPlanInvalidated)
+
+        // Invalidate by opting out
+        try await model.setTargetOptIn(instanceID, isOptedIn: false)
+        XCTAssertTrue(model.isSetupPlanInvalidated)
+        XCTAssertNotNil(model.setupPlanInvalidationReason)
+
+        // Dismiss setup plan
+        model.dismissSetupPlan()
+        XCTAssertNil(model.setupPlan)
+        XCTAssertNil(model.setupPlanInvalidationReason)
+    }
 }

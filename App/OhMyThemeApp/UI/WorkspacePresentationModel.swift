@@ -169,6 +169,9 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var workspace: Workspace
     @Published private(set) var applicationTargets: [ApplicationTarget]
     @Published private(set) var applyPlan: ApplyPlan?
+    @Published private(set) var setupPlan: SetupPlan?
+    @Published private(set) var setupPlanInvalidationReason: String?
+    @Published private(set) var isPreparingSetupPlan = false
 
     @Published private(set) var report: PresentedReport?
     @Published private(set) var canUndoLastThemeChange = false
@@ -227,6 +230,26 @@ final class WorkspacePresentationModel: ObservableObject {
 
     var canSelectAllRecommended: Bool {
         applicationTargets.contains(where: \.canSelectRecommended)
+    }
+
+    var hasUnresolvedOptedInTargets: Bool {
+        unresolvedOptedInCount > 0
+    }
+
+    var unresolvedOptedInCount: Int {
+        let countFromInstances = applicationTargets.flatMap(\.instances).filter { $0.isOptedIn && !$0.isConnected }.count
+        if countFromInstances > 0 || !applicationTargets.flatMap(\.instances).isEmpty {
+            return countFromInstances
+        }
+        return workspace.targetOptIns.filter { !workspace.isConnected($0) }.count
+    }
+
+    var canReviewSetupPlan: Bool {
+        hasUnresolvedOptedInTargets && !isBusy
+    }
+
+    var isSetupPlanInvalidated: Bool {
+        setupPlanInvalidationReason != nil
     }
 
     var selectedThemeVariantID: String? { desiredThemePresentation.variantID }
@@ -311,21 +334,54 @@ final class WorkspacePresentationModel: ObservableObject {
     func refreshTargets() async throws {
         let snapshot = try await runtime.refreshTargets()
         replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        await revalidateSetupPlan()
     }
 
     func setTargetOptIn(_ instanceID: TargetInstanceID, isOptedIn: Bool) async throws {
         let snapshot = try await runtime.setTargetOptIn(instanceID: instanceID, isOptedIn: isOptedIn)
         replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        await revalidateSetupPlan()
     }
 
     func selectAllRecommended() async throws {
         let snapshot = try await runtime.selectAllRecommended()
         replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        await revalidateSetupPlan()
     }
 
     func selectRecommended(for applicationID: String) async throws {
         let snapshot = try await runtime.selectRecommended(applicationID: applicationID)
         replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        await revalidateSetupPlan()
+    }
+
+    func prepareSetupPlan() async {
+        isPreparingSetupPlan = true
+        operationError = nil
+        defer { isPreparingSetupPlan = false }
+        do {
+            setupPlan = try await runtime.prepareSetupPlan()
+            setupPlanInvalidationReason = nil
+        } catch {
+            operationError = Self.describe(error)
+            setupPlan = nil
+        }
+    }
+
+    func dismissSetupPlan() {
+        setupPlan = nil
+        setupPlanInvalidationReason = nil
+    }
+
+    func revalidateSetupPlan() async {
+        guard let plan = setupPlan else { return }
+        let result = await runtime.validateSetupPlanPreconditions(plan)
+        switch result {
+        case .valid:
+            setupPlanInvalidationReason = nil
+        case .invalidated(let reason):
+            setupPlanInvalidationReason = reason
+        }
     }
 
     func selectThemeVariant(_ variantID: String?) {

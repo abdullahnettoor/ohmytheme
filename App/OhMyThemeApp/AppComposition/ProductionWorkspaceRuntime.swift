@@ -294,6 +294,80 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         return discovery
     }
 
+    func prepareSetupPlan() async throws -> SetupPlan {
+        let themeEngine = try requiredThemeEngine()
+        let discovery = await discoverAndRememberTargets()
+        let snapshot = makeSnapshot(discovery: discovery)
+        let snapshotItems = Dictionary(
+            uniqueKeysWithValues: snapshot.targets.flatMap(\.instances).map { ($0.id, $0) }
+        )
+
+        let unresolvedOptedInIDs = workspace.targetOptIns.filter { !workspace.isConnected($0) }
+        var instancesToPrepare: [ConnectedTargetInstance] = []
+
+        for optionID in unresolvedOptedInIDs {
+            if let candidate = candidates[optionID] {
+                if let installation = candidate.vscodeInstallation {
+                    await themeEngine.register(adapter: try makeVSCodeAdapter(for: installation))
+                }
+                instancesToPrepare.append(candidate.instance)
+            } else if let item = snapshotItems[optionID] {
+                instancesToPrepare.append(
+                    ConnectedTargetInstance(
+                        id: item.id,
+                        displayName: item.displayName,
+                        adapterID: item.adapterID
+                    )
+                )
+            } else {
+                instancesToPrepare.append(
+                    ConnectedTargetInstance(
+                        id: optionID,
+                        displayName: optionID.rawValue,
+                        adapterID: "unknown"
+                    )
+                )
+            }
+        }
+
+        return try await themeEngine.prepareSetup(
+            workspace: workspace,
+            instances: instancesToPrepare
+        )
+    }
+
+    func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation {
+        guard let themeEngine else {
+            return .invalidated(reason: "Theme Engine is unavailable.")
+        }
+        let discovery = await discoverAndRememberTargets()
+        let snapshot = makeSnapshot(discovery: discovery)
+        let snapshotItems = Dictionary(
+            uniqueKeysWithValues: snapshot.targets.flatMap(\.instances).map { ($0.id, $0) }
+        )
+
+        var availableInstances: [ConnectedTargetInstance] = []
+        for id in plan.targetInstanceIDs {
+            if let candidate = candidates[id] {
+                availableInstances.append(candidate.instance)
+            } else if let item = snapshotItems[id] {
+                availableInstances.append(
+                    ConnectedTargetInstance(
+                        id: item.id,
+                        displayName: item.displayName,
+                        adapterID: item.adapterID
+                    )
+                )
+            }
+        }
+
+        return await themeEngine.validateSetupPlanPreconditions(
+            plan: plan,
+            workspace: workspace,
+            availableInstances: availableInstances
+        )
+    }
+
     func prepareApplyPlan() async throws -> ApplyPlan {
         try await requiredThemeEngine().prepare(workspace: workspace)
     }

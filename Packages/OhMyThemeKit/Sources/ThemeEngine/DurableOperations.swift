@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Persistence
 import ThemeModel
@@ -61,6 +62,302 @@ public struct UndoReport: Codable, Equatable, Sendable {
 }
 
 // MARK: - ThemeEngine additions
+
+extension ThemeEngine {
+    // MARK: Setup Plan
+
+    public func prepareSetup(
+        workspace: Workspace,
+        instances: [ConnectedTargetInstance]
+    ) async throws -> SetupPlan {
+        let orderedInstances = WorkspaceTargetOrder.ordered(instances)
+        var targetPlans: [ConnectionPlan] = []
+        var preparationFailures: [TargetSetupPreparationFailure] = []
+        var expectedSideEffects: [String] = []
+        var requiredPermissions: [String] = []
+        var userActions: [UserAction] = []
+        var ownershipDetails: [SetupOwnershipDetail] = []
+
+        for instance in orderedInstances {
+            guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
+                let failure = TargetSetupPreparationFailure(
+                    targetInstanceID: instance.id,
+                    adapterID: instance.adapterID,
+                    detail: "The adapter is unavailable or does not support connect."
+                )
+                preparationFailures.append(failure)
+                ownershipDetails.append(
+                    SetupOwnershipDetail(
+                        targetInstanceID: instance.id,
+                        adapterID: instance.adapterID,
+                        summary: "Adapter unavailable for \(instance.displayName).",
+                        routineDetails: [],
+                        isConsequential: false,
+                        consequentialDetail: nil
+                    )
+                )
+                continue
+            }
+
+            do {
+                let plan = try await adapter.prepareConnection(
+                    instance: instance,
+                    approveLinkedSource: false
+                )
+                targetPlans.append(plan)
+
+                for effect in plan.expectedSideEffects where !expectedSideEffects.contains(effect) {
+                    expectedSideEffects.append(effect)
+                }
+                for permission in plan.requiredPermissions where !requiredPermissions.contains(permission) {
+                    requiredPermissions.append(permission)
+                }
+                for action in plan.userActions where !userActions.contains(action) {
+                    userActions.append(action)
+                }
+
+                let ownership = Self.deriveOwnershipDetail(
+                    for: instance,
+                    plan: plan
+                )
+                ownershipDetails.append(ownership)
+            } catch {
+                let failure = TargetSetupPreparationFailure(
+                    targetInstanceID: instance.id,
+                    adapterID: instance.adapterID,
+                    detail: String(describing: error)
+                )
+                preparationFailures.append(failure)
+                ownershipDetails.append(
+                    SetupOwnershipDetail(
+                        targetInstanceID: instance.id,
+                        adapterID: instance.adapterID,
+                        summary: "Failed to prepare connection for \(instance.displayName).",
+                        routineDetails: [],
+                        isConsequential: false,
+                        consequentialDetail: nil
+                    )
+                )
+            }
+        }
+
+        let sharedEffects = Self.deriveSharedEffects(
+            instances: orderedInstances,
+            plans: targetPlans
+        )
+
+        let reach: ActivationReach
+        if targetPlans.isEmpty {
+            reach = .unavailable
+        } else if !preparationFailures.isEmpty {
+            reach = .unavailable
+        } else {
+            reach = targetPlans.map(\.activationReach).reduce(.currentInstances, Self.worstReach)
+        }
+
+        let digest = Self.computeDiscoveryAndSelectionDigest(
+            instances: orderedInstances,
+            workspace: workspace,
+            targetPlans: targetPlans
+        )
+
+        return SetupPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: orderedInstances.map(\.id),
+            targetPlans: targetPlans,
+            preparationFailures: preparationFailures,
+            expectedSideEffects: expectedSideEffects,
+            requiredPermissions: requiredPermissions,
+            userActions: userActions,
+            activationReach: reach,
+            ownershipDetails: ownershipDetails,
+            recoveryBehavior: "Oh My Theme captures a baseline of existing target configurations before any mutation. If setup is cancelled or disconnected, the baseline can be restored safely without force-overwriting external changes.",
+            discoveryAndSelectionDigest: digest,
+            sharedEffects: sharedEffects
+        )
+    }
+
+    private static func deriveOwnershipDetail(
+        for instance: ConnectedTargetInstance,
+        plan: ConnectionPlan
+    ) -> SetupOwnershipDetail {
+        let summary: String
+        let routineDetails: [String]
+        switch instance.adapterID {
+        case "ghostty":
+            summary = "Configures Ghostty theme fragment and include directive."
+            routineDetails = ["~/.config/ghostty/config", "themes/oh-my-theme-managed-fragment"]
+        case "starship":
+            summary = "Configures Starship palette and managed settings."
+            routineDetails = ["~/.config/starship.toml"]
+        case let id where id.starts(with: "vscode"):
+            summary = "Installs Oh My Theme companion extension and communicates via Unix socket."
+            routineDetails = ["VS Code extension: oh-my-theme-companion"]
+        case "macos.appearance":
+            summary = "Controls macOS dark/light mode appearance via System Events."
+            routineDetails = ["macOS System Events Dark Mode"]
+        case "macos.wallpaper":
+            summary = "Controls desktop wallpaper for \(instance.displayName)."
+            routineDetails = ["macOS Desktop Picture"]
+        default:
+            summary = "Manages configuration for \(instance.displayName)."
+            routineDetails = plan.expectedSideEffects
+        }
+
+        let isConsequential: Bool
+        let consequentialDetail: String?
+        if plan.requiresApproval {
+            isConsequential = true
+            consequentialDetail = "Approval required before modifying existing configuration or linked dotfile."
+        } else if !plan.requiredPermissions.isEmpty {
+            isConsequential = true
+            consequentialDetail = "Requires permission: \(plan.requiredPermissions.joined(separator: ", "))"
+        } else {
+            isConsequential = false
+            consequentialDetail = nil
+        }
+
+        return SetupOwnershipDetail(
+            targetInstanceID: instance.id,
+            adapterID: instance.adapterID,
+            summary: summary,
+            routineDetails: routineDetails,
+            isConsequential: isConsequential,
+            consequentialDetail: consequentialDetail
+        )
+    }
+
+    private static func deriveSharedEffects(
+        instances: [ConnectedTargetInstance],
+        plans: [ConnectionPlan]
+    ) -> [SetupSharedEffect] {
+        var shared: [SetupSharedEffect] = []
+        var effectsToInstances: [String: [(id: TargetInstanceID, name: String)]] = [:]
+
+        for plan in plans {
+            guard let instance = instances.first(where: { $0.id == plan.targetInstanceID }) else { continue }
+            for effect in plan.expectedSideEffects {
+                effectsToInstances[effect, default: []].append((id: instance.id, name: instance.displayName))
+            }
+            for perm in plan.requiredPermissions {
+                effectsToInstances[perm, default: []].append((id: instance.id, name: instance.displayName))
+            }
+        }
+
+        for (effect, targets) in effectsToInstances where targets.count > 1 {
+            let isConsequential = plans.contains { plan in
+                plan.requiredPermissions.contains(effect) || (plan.requiresApproval && plan.expectedSideEffects.contains(effect))
+            }
+            shared.append(
+                SetupSharedEffect(
+                    name: effect,
+                    detail: nil,
+                    affectedTargetIDs: targets.map(\.id),
+                    affectedTargetNames: targets.map(\.name),
+                    isConsequential: isConsequential
+                )
+            )
+        }
+
+        let wallpaperInstances = instances.filter { $0.adapterID == "macos.wallpaper" }
+        if wallpaperInstances.count > 1 {
+            let sharedName = "Desktop Wallpaper Management"
+            if !shared.contains(where: { $0.name == sharedName }) {
+                shared.append(
+                    SetupSharedEffect(
+                        name: sharedName,
+                        detail: "Applies desktop wallpapers across all selected displays",
+                        affectedTargetIDs: wallpaperInstances.map(\.id),
+                        affectedTargetNames: wallpaperInstances.map(\.displayName),
+                        isConsequential: false
+                    )
+                )
+            }
+        }
+
+        return shared.sorted { $0.name < $1.name }
+    }
+
+    public func validateSetupPlanPreconditions(
+        plan: SetupPlan,
+        workspace: Workspace,
+        availableInstances: [ConnectedTargetInstance]
+    ) async -> SetupPlanPreconditionValidation {
+        let currentUnresolvedOptIns = Set(workspace.targetOptIns.filter { !workspace.isConnected($0) })
+        let planTargets = Set(plan.targetInstanceIDs)
+        if currentUnresolvedOptIns != planTargets {
+            return .invalidated(
+                reason: "Target Opt-ins changed since the plan was prepared."
+            )
+        }
+
+        let availableMap = Dictionary(uniqueKeysWithValues: availableInstances.map { ($0.id, $0) })
+        for targetID in plan.targetInstanceIDs {
+            if availableMap[targetID] == nil {
+                return .invalidated(
+                    reason: "Target instance \(targetID.rawValue) is no longer available."
+                )
+            }
+        }
+
+        for targetPlan in plan.targetPlans {
+            guard let adapter = self.connectionAdapter(for: targetPlan.adapterID) else {
+                return .invalidated(
+                    reason: "Adapter \(targetPlan.adapterID) is no longer available."
+                )
+            }
+            do {
+                try await adapter.revalidateConnection(plan: targetPlan)
+            } catch {
+                return .invalidated(
+                    reason: "Configuration for \(targetPlan.targetInstanceID.rawValue) was externally modified: \(error.localizedDescription)"
+                )
+            }
+        }
+
+        let orderedAvailable = WorkspaceTargetOrder.ordered(plan.targetInstanceIDs.compactMap { availableMap[$0] })
+        let currentDigest = Self.computeDiscoveryAndSelectionDigest(
+            instances: orderedAvailable,
+            workspace: workspace,
+            targetPlans: plan.targetPlans
+        )
+        if currentDigest != plan.discoveryAndSelectionDigest {
+            return .invalidated(
+                reason: "Material preconditions or discovery digest changed since the plan was prepared."
+            )
+        }
+
+        return .valid
+    }
+
+    static func computeDiscoveryAndSelectionDigest(
+        instances: [ConnectedTargetInstance],
+        workspace: Workspace,
+        targetPlans: [ConnectionPlan]
+    ) -> String {
+        var hasher = SHA256()
+        hasher.update(data: Data(workspace.id.rawValue.utf8))
+        for instance in instances {
+            hasher.update(data: Data(instance.id.rawValue.utf8))
+            hasher.update(data: Data(instance.adapterID.utf8))
+        }
+        for optIn in workspace.targetOptIns.map(\.rawValue).sorted() {
+            hasher.update(data: Data(optIn.utf8))
+        }
+        for plan in targetPlans {
+            hasher.update(data: Data(plan.targetInstanceID.rawValue.utf8))
+            hasher.update(data: Data(plan.adapterID.utf8))
+            hasher.update(data: Data(plan.adapterVersion.utf8))
+            hasher.update(data: Data(plan.intendedChangeDigest.utf8))
+            if let token = plan.staleStateToken {
+                hasher.update(data: Data(token.utf8))
+            }
+            hasher.update(data: plan.capturedPreChangeState)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 extension ThemeEngine {
     // MARK: Connect

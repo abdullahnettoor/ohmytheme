@@ -1,3 +1,4 @@
+import ThemeEngine
 import SwiftUI
 import ThemeModel
 
@@ -36,6 +37,12 @@ struct AppsView: View {
                 try await model.refreshTargets()
             }
         }
+        .sheet(item: Binding(
+            get: { model.setupPlan },
+            set: { if $0 == nil { model.dismissSetupPlan() } }
+        )) { plan in
+            SetupPlanReviewView(model: model, plan: plan)
+        }
     }
 
     private var header: some View {
@@ -51,6 +58,19 @@ struct AppsView: View {
             Spacer()
 
             HStack(spacing: 8) {
+                if model.hasUnresolvedOptedInTargets {
+                    Button {
+                        Task {
+                            await model.prepareSetupPlan()
+                        }
+                    } label: {
+                        Label("Review Setup Plan (\(model.unresolvedOptedInCount))", systemImage: "checklist")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy || model.isPreparingSetupPlan)
+                    .accessibilityIdentifier("review-setup-plan-button")
+                }
+
                 if model.canSelectAllRecommended {
                     Button {
                         model.perform {

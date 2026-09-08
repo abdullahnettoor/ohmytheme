@@ -20,6 +20,8 @@ protocol WorkspaceRuntime: AnyObject {
     func restoreAndDisconnect(
         targetInstanceID: TargetInstanceID
     ) async throws -> WorkspaceConnectionResult
+    func prepareSetupPlan() async throws -> SetupPlan
+    func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation
     func prepareApplyPlan() async throws -> ApplyPlan
     func apply(planID: UUID) async throws -> DurableApplyReport
     func undoLast() async throws -> UndoReport

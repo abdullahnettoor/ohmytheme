@@ -36,15 +36,24 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
     private let reportsUnchangedForSameBytes: Bool
     private var interruptions: Set<InterruptionPoint> = []
     private var connectedInstances: Set<TargetInstanceID> = []
+    private let configuredReach: ActivationReach
+    private let configuredSideEffects: [String]
+    private let configuredPermissions: [String]
 
     public init(
         id: String = "recording",
         initialWorld: Data = Data("recording-world-initial".utf8),
-        reportsUnchangedForSameBytes: Bool = false
+        reportsUnchangedForSameBytes: Bool = false,
+        activationReach: ActivationReach = .currentInstances,
+        expectedSideEffects: [String] = ["recording-world:include"],
+        requiredPermissions: [String] = []
     ) {
         self.id = id
         self.worldState = WorldState(bytes: initialWorld, revision: "rev-0")
         self.reportsUnchangedForSameBytes = reportsUnchangedForSameBytes
+        self.configuredReach = activationReach
+        self.configuredSideEffects = expectedSideEffects
+        self.configuredPermissions = requiredPermissions
     }
 
     public func setInterruption(_ point: InterruptionPoint, enabled: Bool) {
@@ -135,8 +144,9 @@ public actor RecordingWritableAdapter: WritableThemeAdapter {
             capturedPreChangeState: worldState.bytes,
             intendedChangeDigest: "connect.\(instance.id.rawValue)",
             staleStateToken: worldState.revision,
-            expectedSideEffects: ["recording-world:include"],
-            requiredPermissions: []
+            expectedSideEffects: configuredSideEffects,
+            requiredPermissions: configuredPermissions,
+            activationReach: configuredReach
         )
     }
 
