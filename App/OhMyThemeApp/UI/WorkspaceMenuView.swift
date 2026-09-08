@@ -590,8 +590,10 @@ struct WorkspaceMenuView: View {
 #Preview {
     WorkspaceMenuView(
         model: WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
-            themePacks: (try? BundledThemeCatalog().load()) ?? [],
+            runtime: FakeWorkspaceRuntime(
+                workspace: WorkspaceStore().workspace,
+                themePacks: (try? BundledThemeCatalog().load()) ?? []
+            ),
             quitAction: {}
         )
     )

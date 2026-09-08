@@ -95,51 +95,30 @@ final class WorkspaceMenuModel: ObservableObject {
     @Published private(set) var isChangingLaunchAtLogin = false
     @Published private(set) var launchAtLoginError: String?
 
+    private let runtime: any WorkspaceRuntime
     private let launchAtLogin: any LaunchAtLoginPlatform
     private let quitAction: @MainActor () -> Void
-    private let themePacks: [ThemePack]
-    private let themeEngine: ThemeEngine?
-    private let themeVariantSelection: (String) -> Void
-    private let runtime: (any WorkspaceRuntime)?
-    let persistenceError: String?
 
     init(
-        workspace: Workspace,
-        themePacks: [ThemePack]? = nil,
-        themeEngine: ThemeEngine? = nil,
-        applicationTargets: [ApplicationTarget]? = nil,
-        runtime: (any WorkspaceRuntime)? = nil,
-        themeVariantSelection: @escaping (String) -> Void = { _ in },
-        persistenceError: String? = nil,
+        runtime: any WorkspaceRuntime,
         launchAtLogin: any LaunchAtLoginPlatform = LaunchAtLoginClient(),
         quitAction: @escaping @MainActor () -> Void = { NSApplication.shared.terminate(nil) }
     ) {
-        self.workspace = workspace
-        self.themePacks = themePacks ?? ((try? BundledThemeCatalog().load()) ?? [])
-        self.themeEngine = themeEngine
         self.runtime = runtime
-        self.themeVariantSelection = themeVariantSelection
-        self.persistenceError = persistenceError
         self.launchAtLogin = launchAtLogin
         self.launchAtLoginStatus = launchAtLogin.status
         self.quitAction = quitAction
-        self.applicationTargets = applicationTargets ?? Self.connectedApplicationTargets(in: workspace)
-        self.isReady = runtime == nil
+        self.workspace = runtime.workspace
+        self.applicationTargets = Self.connectedApplicationTargets(in: runtime.workspace)
+        self.isReady = true
     }
 
-    convenience init(
-        runtime: any WorkspaceRuntime,
-        launchAtLogin: any LaunchAtLoginPlatform = LaunchAtLoginClient()
-    ) {
-        self.init(
-            workspace: runtime.workspace,
-            themePacks: runtime.themePacks,
-            themeEngine: runtime.themeEngine,
-            runtime: runtime,
-            themeVariantSelection: { variantID in runtime.selectFixedThemeVariant(variantID) },
-            persistenceError: runtime.persistenceError,
-            launchAtLogin: launchAtLogin
-        )
+    var persistenceError: String? {
+        runtime.persistenceError
+    }
+
+    var themePacks: [ThemePack] {
+        runtime.themePacks
     }
 
     var workspaceName: String {
@@ -192,7 +171,7 @@ final class WorkspaceMenuModel: ObservableObject {
     }
 
     var canApplyThemes: Bool {
-        themeEngine != nil && persistenceError == nil && isReady
+        runtime.canApplyThemes && persistenceError == nil && isReady
             && !workspace.connectedTargetInstances.isEmpty
     }
 
@@ -222,10 +201,6 @@ final class WorkspaceMenuModel: ObservableObject {
 
     func start() async {
         launchAtLoginStatus = launchAtLogin.status
-        guard let runtime else {
-            await refreshUndoAvailability()
-            return
-        }
         isReady = false
         operationError = nil
         do {
@@ -240,7 +215,6 @@ final class WorkspaceMenuModel: ObservableObject {
     }
 
     func reviewConnection(_ optionID: TargetInstanceID) async throws {
-        guard let runtime else { throw ThemeEngineError.engineUnavailable }
         connectionReview = try await runtime.reviewConnection(optionID: optionID)
         approvalRequiredFor = optionID
         report = nil
@@ -248,9 +222,11 @@ final class WorkspaceMenuModel: ObservableObject {
     }
 
     func connect(_ optionID: TargetInstanceID) async throws {
-        guard let runtime, let connectionReview,
+        guard let connectionReview,
             connectionReview.targetInstanceID == optionID
-        else { throw ThemeEngineError.engineUnavailable }
+        else {
+            throw ThemeEngineError.engineUnavailable
+        }
         let result = try await runtime.connect(
             optionID: optionID,
             reviewedPlan: connectionReview
@@ -264,37 +240,22 @@ final class WorkspaceMenuModel: ObservableObject {
 
     func selectThemeVariant(_ variantID: String?) {
         guard let variantID else { return }
-        workspace = Workspace(
-            id: workspace.id,
-            displayName: workspace.displayName,
-            connectedTargetInstances: workspace.connectedTargetInstances,
-            themeAssignment: .fixed(variantID: variantID)
-        )
+        runtime.selectFixedThemeVariant(variantID)
+        workspace = runtime.workspace
         applyPlan = nil
         report = nil
         operationError = nil
-        themeVariantSelection(variantID)
     }
 
     @discardableResult
     func prepare(themeVariantID: String) async throws -> ApplyPlan {
-        guard let themeEngine else {
-            throw ThemeEngineError.engineUnavailable
-        }
         selectThemeVariant(themeVariantID)
-        let prepared = try await themeEngine.prepare(workspace: workspace)
-        applyPlan = prepared
-        report = nil
-        operationError = nil
-        return prepared
+        return try await prepareSelectedTheme()
     }
 
     @discardableResult
     func prepareSelectedTheme() async throws -> ApplyPlan {
-        guard let themeEngine else {
-            throw ThemeEngineError.engineUnavailable
-        }
-        let prepared = try await themeEngine.prepare(workspace: workspace)
+        let prepared = try await runtime.prepareApplyPlan()
         applyPlan = prepared
         report = nil
         operationError = nil
@@ -303,10 +264,7 @@ final class WorkspaceMenuModel: ObservableObject {
 
     @discardableResult
     func apply(planID: UUID) async throws -> DurableApplyReport {
-        guard let themeEngine else {
-            throw ThemeEngineError.engineUnavailable
-        }
-        let applied = try await themeEngine.applyDurable(planID: planID, workspace: workspace)
+        let applied = try await runtime.apply(planID: planID)
         applyPlan = nil
         report = present(outcomes: applied.outcomes, kind: .apply)
         await refreshUndoAvailability()
@@ -323,7 +281,6 @@ final class WorkspaceMenuModel: ObservableObject {
     }
 
     func restoreAndDisconnect(_ targetInstanceID: TargetInstanceID) async throws {
-        guard let runtime else { throw ThemeEngineError.engineUnavailable }
         let result = try await runtime.restoreAndDisconnect(targetInstanceID: targetInstanceID)
         report = present(outcomes: result.report.outcomes, kind: .disconnect)
         replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
@@ -333,10 +290,7 @@ final class WorkspaceMenuModel: ObservableObject {
 
     @discardableResult
     func undoLastThemeChange() async throws -> UndoReport {
-        guard let themeEngine else {
-            throw ThemeEngineError.engineUnavailable
-        }
-        let undone = try await themeEngine.undoLast(workspace: workspace)
+        let undone = try await runtime.undoLast()
         report = present(outcomes: undone.outcomes, kind: .undo)
         await refreshUndoAvailability()
         operationError = nil
@@ -344,12 +298,8 @@ final class WorkspaceMenuModel: ObservableObject {
     }
 
     func refreshUndoAvailability() async {
-        guard let themeEngine else {
-            canUndoLastThemeChange = false
-            return
-        }
         do {
-            canUndoLastThemeChange = try await themeEngine.undoAvailability(workspace: workspace) != .unavailable
+            canUndoLastThemeChange = try await runtime.undoAvailability() != .unavailable
         } catch {
             canUndoLastThemeChange = false
             operationError = Self.describe(error)
@@ -554,33 +504,4 @@ final class WorkspaceMenuModel: ObservableObject {
         let sourceRevision: String
         let attribution: String
     }
-}
-
-@MainActor
-protocol WorkspaceRuntime: AnyObject {
-    var workspace: Workspace { get }
-    var themePacks: [ThemePack] { get }
-    var themeEngine: ThemeEngine? { get }
-    var persistenceError: String? { get }
-
-    func selectFixedThemeVariant(_ variantID: String)
-    func start() async throws -> WorkspaceTargetSnapshot
-    func reviewConnection(optionID: TargetInstanceID) async throws -> ConnectionPlan
-    func connect(
-        optionID: TargetInstanceID,
-        reviewedPlan: ConnectionPlan
-    ) async throws -> WorkspaceConnectionResult
-    func restoreAndDisconnect(
-        targetInstanceID: TargetInstanceID
-    ) async throws -> WorkspaceConnectionResult
-}
-
-struct WorkspaceTargetSnapshot: Equatable {
-    let workspace: Workspace
-    let targets: [WorkspaceMenuModel.ApplicationTarget]
-}
-
-struct WorkspaceConnectionResult: Equatable {
-    let snapshot: WorkspaceTargetSnapshot
-    let report: ConnectionReport
 }

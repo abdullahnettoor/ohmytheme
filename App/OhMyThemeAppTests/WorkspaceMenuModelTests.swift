@@ -1,5 +1,4 @@
 import Foundation
-import Persistence
 import PlatformClients
 import ThemeEngine
 import ThemeModel
@@ -11,13 +10,13 @@ import XCTest
 @MainActor
 final class WorkspaceMenuModelTests: XCTestCase {
     func testMenuPresentsTheMyMacWorkspace() {
-        let model = WorkspaceMenuModel(workspace: WorkspaceStore().workspace, quitAction: {})
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: .myMac), quitAction: {})
 
         XCTAssertEqual(model.workspaceName, "My Mac")
     }
 
     func testMenuExplainsThatNothingIsConnectedYet() throws {
-        let model = WorkspaceMenuModel(workspace: .myMac, quitAction: {})
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: .myMac), quitAction: {})
 
         let message = try XCTUnwrap(model.emptyStateMessage)
         XCTAssertTrue(message.contains("No Targets are connected yet"))
@@ -42,7 +41,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
             ]
         )
 
-        let model = WorkspaceMenuModel(workspace: workspace, quitAction: {})
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: workspace), quitAction: {})
 
         XCTAssertNil(model.emptyStateMessage)
         XCTAssertEqual(model.applicationTargets.map(\.name), ["Ghostty", "Visual Studio Code"])
@@ -71,9 +70,9 @@ final class WorkspaceMenuModelTests: XCTestCase {
     }
 
     func testMenuListsBundledThemeVariantsWithProvenance() throws {
+        let packs = try BundledThemeCatalog().load()
         let model = WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
-            themePacks: try BundledThemeCatalog().load()
+            runtime: FakeWorkspaceRuntime(workspace: .myMac, themePacks: packs)
         )
 
         XCTAssertEqual(
@@ -84,7 +83,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertTrue(model.bundledThemeVariants.allSatisfy { !$0.sourceRevision.isEmpty && !$0.attribution.isEmpty })
     }
 
-    func testMenuRequestsApplyPlanThroughThemeEngine() async throws {
+    func testMenuRequestsApplyPlanThroughRuntime() async throws {
         let workspace = Workspace(
             id: .myMac,
             displayName: "My Mac",
@@ -97,11 +96,9 @@ final class WorkspaceMenuModelTests: XCTestCase {
             ]
         )
         let pack = try XCTUnwrap(try BundledThemeCatalog().load().first)
-        let engine = ThemeEngine(packs: [pack], adapters: [RecordingThemeAdapter()])
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: [pack])
         let model = WorkspaceMenuModel(
-            workspace: workspace,
-            themePacks: [pack],
-            themeEngine: engine,
+            runtime: runtime,
             quitAction: {}
         )
 
@@ -110,6 +107,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertEqual(plan.targetPlans.count, 1)
         XCTAssertEqual(plan.variantID, pack.variants[0].qualifiedID)
         XCTAssertEqual(model.applyPlan?.id, plan.id)
+        XCTAssertEqual(runtime.prepareCalls, 1)
     }
 
     func testChangingThemeSelectionInvalidatesAnExistingApplyPlan() async throws {
@@ -126,11 +124,9 @@ final class WorkspaceMenuModelTests: XCTestCase {
             themeAssignment: .fixed(variantID: "catppuccin/mocha")
         )
         let packs = try BundledThemeCatalog().load()
-        let engine = ThemeEngine(packs: packs, adapters: [RecordingThemeAdapter()])
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
         let model = WorkspaceMenuModel(
-            workspace: workspace,
-            themePacks: packs,
-            themeEngine: engine,
+            runtime: runtime,
             quitAction: {}
         )
 
@@ -144,17 +140,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
     }
 
     func testDurableApplyAndUndoRemainAvailableAfterAChangedTarget() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("oh-my-theme-menu-model-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let persistence = try PersistenceStore(
-            databaseURL: directory.appendingPathComponent("state.sqlite"),
-            contentStoreURL: directory.appendingPathComponent("recovery", isDirectory: true)
-        )
         let packs = try BundledThemeCatalog().load()
-        let adapter = RecordingWritableAdapter()
-        let engine = ThemeEngine(packs: packs, adapters: [adapter], persistence: persistence)
         let workspace = Workspace(
             id: .myMac,
             displayName: "My Mac",
@@ -167,10 +153,9 @@ final class WorkspaceMenuModelTests: XCTestCase {
             ],
             themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
         )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
         let model = WorkspaceMenuModel(
-            workspace: workspace,
-            themePacks: packs,
-            themeEngine: engine,
+            runtime: runtime,
             quitAction: {}
         )
 
@@ -191,7 +176,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
     }
 
     func testConnectionReviewDoesNotMutateBeforeApproval() async throws {
-        let runtime = RecordingWorkspaceRuntime()
+        let runtime = FakeWorkspaceRuntime()
         let model = WorkspaceMenuModel(runtime: runtime)
         let optionID = TargetInstanceID(rawValue: "recording.review")
 
@@ -227,7 +212,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
                 ),
             ]
         )
-        let model = WorkspaceMenuModel(workspace: workspace, quitAction: {})
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: workspace), quitAction: {})
         let report = model.present(
             outcomes: [
                 TargetCapabilityOutcome(
@@ -262,72 +247,74 @@ final class WorkspaceMenuModelTests: XCTestCase {
             kind: .apply
         )
 
+        XCTAssertEqual(report.title, "Theme applied")
+        XCTAssertEqual(report.groups.count, 2)
+        XCTAssertEqual(report.groups[0].targetName, "Ghostty")
+        XCTAssertEqual(report.groups[0].outcomes[0].configuration, "Updated")
         XCTAssertEqual(report.groups[0].outcomes[0].reach, "Reload required")
-        XCTAssertEqual(report.groups[0].outcomes[0].userAction, "Reload Ghostty to use the saved theme.")
+        XCTAssertEqual(report.groups[0].outcomes[0].userActions, ["Reload Ghostty to use the saved theme."])
+        XCTAssertEqual(report.groups[1].targetName, "Starship")
         XCTAssertEqual(report.groups[1].outcomes[0].reach, "Next prompt")
-        XCTAssertEqual(report.groups[1].outcomes[0].userAction, "Start a new prompt to use the saved theme.")
+        XCTAssertEqual(report.groups[1].outcomes[0].userActions, ["Start a new prompt to use the saved theme."])
     }
 
     func testReportNamesPermissionsConflictsFailuresAndNextLaunch() {
         let target = ConnectedTargetInstance(
-            id: TargetInstanceID(rawValue: "recording.states"),
-            displayName: "State Target",
-            adapterID: "recording"
+            id: TargetInstanceID(rawValue: "macos.system-appearance"),
+            displayName: "macOS",
+            adapterID: "macos.appearance"
         )
-        let model = WorkspaceMenuModel(
-            workspace: Workspace(
-                id: .myMac,
-                displayName: "My Mac",
-                connectedTargetInstances: [target]
-            ),
-            quitAction: {}
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [target]
         )
-        let states: [ConfigurationState] = [.permissionRequired, .conflicted, .failed]
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: workspace), quitAction: {})
         let report = model.present(
-            outcomes: states.enumerated().map { index, state in
+            outcomes: [
                 TargetCapabilityOutcome(
                     targetInstanceID: target.id,
                     adapterID: target.adapterID,
-                    capabilityID: "state-\(index)",
+                    capabilityID: "appearance",
                     sourceType: .generated,
                     sourceRevision: "1",
-                    configurationState: state,
-                    runningInstanceReach: index == 2 ? .newProcessesOnly : .unavailable,
-                    detail: "detail",
-                    rollbackState: state == .conflicted ? .blocked : .notNeeded,
-                    userActions: state == .permissionRequired
-                        ? [UserAction(title: "Grant permission", detail: "Use the requested permission action.")]
-                        : []
+                    configurationState: .permissionRequired,
+                    runningInstanceReach: .newProcessesOnly,
+                    detail: "Allow Automation control in System Settings.",
+                    rollbackState: .undoAvailable,
+                    userActions: [
+                        UserAction(
+                            title: "Open System Settings",
+                            detail: "Turn on Automation for Oh My Theme in System Settings > Privacy & Security > Automation."
+                        )
+                    ]
                 )
-            },
+            ],
             kind: .apply
         )
 
-        XCTAssertEqual(
-            report.groups[0].outcomes.map(\.configuration),
-            ["Permission required", "Conflict", "Failed"]
-        )
-        XCTAssertEqual(report.groups[0].outcomes[2].reach, "Next launch")
         XCTAssertEqual(report.title, "Theme not applied")
-        XCTAssertEqual(report.groups[0].outcomes[0].userAction, "Use the requested permission action.")
-        XCTAssertEqual(report.groups[0].outcomes[1].rollback, "Restore blocked")
+        XCTAssertEqual(report.groups[0].outcomes[0].capability, "Appearance")
+        XCTAssertEqual(report.groups[0].outcomes[0].configuration, "Permission required")
+        XCTAssertEqual(report.groups[0].outcomes[0].reach, "Next launch")
+        XCTAssertEqual(
+            report.groups[0].outcomes[0].userActions,
+            ["Turn on Automation for Oh My Theme in System Settings > Privacy & Security > Automation."]
+        )
     }
 
     func testNoChangeApplyUsesAnHonestReportTitle() {
         let target = ConnectedTargetInstance(
-            id: TargetInstanceID(rawValue: "recording.unchanged"),
-            displayName: "Unchanged Target",
-            adapterID: "recording"
+            id: TargetInstanceID(rawValue: "ghostty.default"),
+            displayName: "Ghostty",
+            adapterID: "ghostty"
         )
-        let model = WorkspaceMenuModel(
-            workspace: Workspace(
-                id: .myMac,
-                displayName: "My Mac",
-                connectedTargetInstances: [target]
-            ),
-            quitAction: {}
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [target]
         )
-
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: workspace), quitAction: {})
         let report = model.present(
             outcomes: [
                 TargetCapabilityOutcome(
@@ -337,7 +324,8 @@ final class WorkspaceMenuModelTests: XCTestCase {
                     sourceType: .generated,
                     sourceRevision: "1",
                     configurationState: .unchanged,
-                    runningInstanceReach: .currentInstances
+                    runningInstanceReach: .currentInstances,
+                    rollbackState: .notNeeded
                 )
             ],
             kind: .apply
@@ -348,25 +336,22 @@ final class WorkspaceMenuModelTests: XCTestCase {
 
     func testPartialApplyUsesAnHonestReportTitle() {
         let target = ConnectedTargetInstance(
-            id: TargetInstanceID(rawValue: "recording.partial"),
-            displayName: "Partial Target",
-            adapterID: "recording"
+            id: TargetInstanceID(rawValue: "macos.system-appearance"),
+            displayName: "macOS",
+            adapterID: "macos.appearance"
         )
-        let model = WorkspaceMenuModel(
-            workspace: Workspace(
-                id: .myMac,
-                displayName: "My Mac",
-                connectedTargetInstances: [target]
-            ),
-            quitAction: {}
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [target]
         )
-
+        let model = WorkspaceMenuModel(runtime: FakeWorkspaceRuntime(workspace: workspace), quitAction: {})
         let report = model.present(
             outcomes: [
                 TargetCapabilityOutcome(
                     targetInstanceID: target.id,
                     adapterID: target.adapterID,
-                    capabilityID: "theme",
+                    capabilityID: "appearance",
                     sourceType: .generated,
                     sourceRevision: "1",
                     configurationState: .updated,
@@ -396,30 +381,31 @@ final class WorkspaceMenuModelTests: XCTestCase {
             displayName: "My Mac",
             themeAssignment: .fixed(variantID: "aurora/light")
         )
-        var selectedVariantID: String?
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
         let model = WorkspaceMenuModel(
-            workspace: workspace,
-            themeVariantSelection: { selectedVariantID = $0 },
+            runtime: runtime,
             quitAction: {}
         )
 
         XCTAssertEqual(model.selectedThemeVariantID, "aurora/light")
         model.selectThemeVariant("aurora/dark")
 
-        XCTAssertEqual(selectedVariantID, "aurora/dark")
+        XCTAssertEqual(runtime.selectVariantCalls.last, "aurora/dark")
+        XCTAssertEqual(model.selectedThemeVariantID, "aurora/dark")
     }
 
     func testRestoreAndDisconnectPresentsTheOutcomeAndRemovesTheTarget() async throws {
-        let runtime = RecordingWorkspaceRuntime()
         let instance = ConnectedTargetInstance(
             id: TargetInstanceID(rawValue: "recording.disconnect"),
             displayName: "Recording",
             adapterID: "recording"
         )
-        runtime.workspace = Workspace(
-            id: .myMac,
-            displayName: "My Mac",
-            connectedTargetInstances: [instance]
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [instance]
+            )
         )
         let model = WorkspaceMenuModel(runtime: runtime)
 
@@ -434,7 +420,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
     func testLaunchAtLoginIsDisabledUntilTheUserOptsIn() {
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
         let model = WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
+            runtime: FakeWorkspaceRuntime(),
             launchAtLogin: launchAtLogin,
             quitAction: {}
         )
@@ -447,7 +433,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
     func testMenuExplainsWhenLaunchAtLoginRequiresApproval() {
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .requiresApproval)
         let model = WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
+            runtime: FakeWorkspaceRuntime(),
             launchAtLogin: launchAtLogin,
             quitAction: {}
         )
@@ -463,7 +449,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
     func testMenuDisablesUnavailableLaunchAtLogin() {
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .unavailable)
         let model = WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
+            runtime: FakeWorkspaceRuntime(),
             launchAtLogin: launchAtLogin,
             quitAction: {}
         )
@@ -479,7 +465,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
     func testMenuCanEnableAndDisableLaunchAtLogin() async {
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
         let model = WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
+            runtime: FakeWorkspaceRuntime(),
             launchAtLogin: launchAtLogin,
             quitAction: {}
         )
@@ -501,7 +487,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .disabled)
         launchAtLogin.failure = RecordingLaunchAtLoginError.denied
         let model = WorkspaceMenuModel(
-            workspace: WorkspaceStore().workspace,
+            runtime: FakeWorkspaceRuntime(),
             launchAtLogin: launchAtLogin,
             quitAction: {}
         )
@@ -516,11 +502,12 @@ final class WorkspaceMenuModelTests: XCTestCase {
     }
 
     func testStartingTheMenuDoesNotChangeThemeAssignmentOrLaunchAtLogin() async {
-        let runtime = RecordingWorkspaceRuntime()
-        runtime.workspace = Workspace(
-            id: .myMac,
-            displayName: "My Mac",
-            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+            )
         )
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .enabled)
         let model = WorkspaceMenuModel(runtime: runtime, launchAtLogin: launchAtLogin)
@@ -537,15 +524,17 @@ final class WorkspaceMenuModelTests: XCTestCase {
             displayName: "Ghostty",
             adapterID: "ghostty"
         )
-        let workspace = Workspace(
-            id: .myMac,
-            displayName: "My Mac",
-            connectedTargetInstances: [connectedInstance]
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [connectedInstance]
+            )
         )
         let launchAtLogin = RecordingLaunchAtLoginClient(status: .enabled)
         var terminationRequests = 0
         let model = WorkspaceMenuModel(
-            workspace: workspace,
+            runtime: runtime,
             launchAtLogin: launchAtLogin,
             quitAction: { terminationRequests += 1 }
         )
@@ -582,104 +571,5 @@ private enum RecordingLaunchAtLoginError: LocalizedError {
 
     var errorDescription: String? {
         "Registration was denied."
-    }
-}
-
-@MainActor
-private final class RecordingWorkspaceRuntime: WorkspaceRuntime {
-    private(set) var reviewCalls = 0
-    private(set) var connectCalls = 0
-    private(set) var disconnectCalls = 0
-    var workspace = Workspace.myMac
-    let themePacks: [ThemePack] = []
-    let themeEngine: ThemeEngine? = nil
-    let persistenceError: String? = nil
-
-    func selectFixedThemeVariant(_ variantID: String) {}
-
-    func start() async throws -> WorkspaceTargetSnapshot {
-        WorkspaceTargetSnapshot(workspace: workspace, targets: [])
-    }
-
-    func reviewConnection(optionID: TargetInstanceID) async throws -> ConnectionPlan {
-        reviewCalls += 1
-        return ConnectionPlan(
-            targetInstanceID: optionID,
-            adapterID: "recording",
-            adapterVersion: "1",
-            capturedPreChangeState: Data("before".utf8),
-            intendedChangeDigest: "reviewed",
-            expectedSideEffects: ["Record the connection baseline."],
-            requiresApproval: true
-        )
-    }
-
-    func connect(
-        optionID: TargetInstanceID,
-        reviewedPlan: ConnectionPlan
-    ) async throws -> WorkspaceConnectionResult {
-        connectCalls += 1
-        let instance = ConnectedTargetInstance(
-            id: optionID,
-            displayName: "Recording",
-            adapterID: "recording"
-        )
-        workspace = Workspace(
-            id: .myMac,
-            displayName: "My Mac",
-            connectedTargetInstances: [instance]
-        )
-        return WorkspaceConnectionResult(
-            snapshot: WorkspaceTargetSnapshot(workspace: workspace, targets: []),
-            report: connectionReport(
-                targetInstanceID: optionID,
-                capabilityID: "connection",
-                detail: "Connected."
-            )
-        )
-    }
-
-    func restoreAndDisconnect(
-        targetInstanceID: TargetInstanceID
-    ) async throws -> WorkspaceConnectionResult {
-        disconnectCalls += 1
-        workspace = Workspace(
-            id: workspace.id,
-            displayName: workspace.displayName,
-            connectedTargetInstances: workspace.connectedTargetInstances.filter {
-                $0.id != targetInstanceID
-            },
-            themeAssignment: workspace.themeAssignment
-        )
-        return WorkspaceConnectionResult(
-            snapshot: WorkspaceTargetSnapshot(workspace: workspace, targets: []),
-            report: connectionReport(
-                targetInstanceID: targetInstanceID,
-                capabilityID: "disconnect",
-                detail: "Restored and disconnected."
-            )
-        )
-    }
-
-    private func connectionReport(
-        targetInstanceID: TargetInstanceID,
-        capabilityID: String,
-        detail: String
-    ) -> ConnectionReport {
-        ConnectionReport(
-            operationID: UUID(),
-            outcomes: [
-                TargetCapabilityOutcome(
-                    targetInstanceID: targetInstanceID,
-                    adapterID: "recording",
-                    capabilityID: capabilityID,
-                    sourceType: .unavailable,
-                    sourceRevision: "n/a",
-                    configurationState: .updated,
-                    runningInstanceReach: .currentInstances,
-                    detail: detail
-                )
-            ]
-        )
     }
 }

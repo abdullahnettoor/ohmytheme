@@ -20,6 +20,9 @@
 		E9A867BC3E759729FFB2E7FE /* WorkspaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B5F4D06C3E027280DDBB84E /* WorkspaceStore.swift */; };
 		EAA17A7543ACA9E7C3AC398A /* WorkspaceMenuModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */; };
 		EEAAC4694FEECBAA36C561E2 /* WorkspaceMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 493A5E2DC28F969912BC7DAF /* WorkspaceMenuView.swift */; };
+		D00100000000000000000001 /* WorkspaceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00100000000000000000002 /* WorkspaceRuntime.swift */; };
+		D00200000000000000000001 /* FakeWorkspaceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00200000000000000000002 /* FakeWorkspaceRuntime.swift */; };
+		D00300000000000000000001 /* ProductionWorkspaceRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +54,9 @@
 		AC1394229797C3B7582E94AC /* OhMyThemeApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OhMyThemeApp.swift; sourceTree = "<group>"; };
 		EA9658908A51B95EDF2E6E3C /* OhMyThemeAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OhMyThemeAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F618B0C82D8C8629B72C82A1 /* MenuBarLifecycleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MenuBarLifecycleTests.swift; sourceTree = "<group>"; };
+		D00100000000000000000002 /* WorkspaceRuntime.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkspaceRuntime.swift; sourceTree = "<group>"; };
+		D00200000000000000000002 /* FakeWorkspaceRuntime.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FakeWorkspaceRuntime.swift; sourceTree = "<group>"; };
+		D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProductionWorkspaceRuntimeTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -95,6 +101,8 @@
 				8E3F5FF97E414F622F085EAF /* MenuBarPresence.swift */,
 				C00100000000000000000002 /* ProductionWorkspaceRuntime.swift */,
 				3B5F4D06C3E027280DDBB84E /* WorkspaceStore.swift */,
+				D00100000000000000000002 /* WorkspaceRuntime.swift */,
+				D00200000000000000000002 /* FakeWorkspaceRuntime.swift */,
 			);
 			name = AppComposition;
 			path = AppComposition;
@@ -105,6 +113,7 @@
 			children = (
 				F618B0C82D8C8629B72C82A1 /* MenuBarLifecycleTests.swift */,
 				4F82C574A892D0847241C7B7 /* WorkspaceMenuModelTests.swift */,
+				D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */,
 			);
 			name = OhMyThemeAppTests;
 			path = OhMyThemeAppTests;
@@ -311,6 +320,7 @@
 			files = (
 				13371C830467E02D8FE2EEB3 /* MenuBarLifecycleTests.swift in Sources */,
 				EAA17A7543ACA9E7C3AC398A /* WorkspaceMenuModelTests.swift in Sources */,
+				D00300000000000000000001 /* ProductionWorkspaceRuntimeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -325,6 +335,8 @@
 				E9A867BC3E759729FFB2E7FE /* WorkspaceStore.swift in Sources */,
 				8C903EBADD4D56FA3BC0C6C5 /* WorkspaceMenuModel.swift in Sources */,
 				EEAAC4694FEECBAA36C561E2 /* WorkspaceMenuView.swift in Sources */,
+				D00100000000000000000001 /* WorkspaceRuntime.swift in Sources */,
+				D00200000000000000000001 /* FakeWorkspaceRuntime.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

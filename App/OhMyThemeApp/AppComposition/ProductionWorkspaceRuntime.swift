@@ -19,6 +19,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     }
 
     private let store: WorkspaceStore
+    private let additionalAdapters: [any ThemeAdapter]
     private let appearanceAdapter: MacOSAppearanceAdapter
     private let wallpaperAdapter: MacOSWallpaperAdapter
     private let ghosttyAdapter: GhosttyConfigurationAdapter
@@ -43,8 +44,17 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             .nilIfEmpty
     }
 
-    init(store: WorkspaceStore = WorkspaceStore()) {
+    var canApplyThemes: Bool {
+        themeEngine != nil && persistenceError == nil
+    }
+
+    init(
+        store: WorkspaceStore = WorkspaceStore(),
+        themePacks: [ThemePack]? = nil,
+        additionalAdapters: [any ThemeAdapter] = []
+    ) {
         self.store = store
+        self.additionalAdapters = additionalAdapters
         appearanceAdapter = MacOSAppearanceAdapter()
         wallpaperAdapter = MacOSWallpaperAdapter(
             assetResolver: BundledWallpaperAssetResolver(
@@ -57,11 +67,15 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         starshipAdapter = StarshipConfigurationAdapter(xdgConfigHome: xdgConfigHome)
         vscodeDiscovery = VSCodeApplicationDiscovery()
 
-        do {
-            themePacks = try BundledThemeCatalog().load()
-        } catch {
-            themePacks = []
-            fatalStartupFailure = "Bundled Theme Catalog validation failed: \(error)"
+        if let themePacks {
+            self.themePacks = themePacks
+        } else {
+            do {
+                self.themePacks = try BundledThemeCatalog().load()
+            } catch {
+                self.themePacks = []
+                fatalStartupFailure = "Bundled Theme Catalog validation failed: \(error)"
+            }
         }
 
         var server: CompanionSocketServer?
@@ -101,13 +115,19 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         vscodePlatform = platform
         vscodeArtifact = artifact
 
-        guard !themePacks.isEmpty else {
+        guard !self.themePacks.isEmpty else {
             themeEngine = nil
             return
         }
+        let baseAdapters: [any ThemeAdapter] = [
+            appearanceAdapter,
+            wallpaperAdapter,
+            ghosttyAdapter,
+            starshipAdapter,
+        ]
         themeEngine = ThemeEngine(
-            packs: themePacks,
-            adapters: [appearanceAdapter, wallpaperAdapter, ghosttyAdapter, starshipAdapter],
+            packs: self.themePacks,
+            adapters: baseAdapters + additionalAdapters,
             sourcePolicy: .preferUpstream,
             persistence: store.persistenceStore
         )
@@ -200,6 +220,37 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         )
     }
 
+    func prepareApplyPlan() async throws -> ApplyPlan {
+        guard let themeEngine else {
+            throw ProductionWorkspaceRuntimeError.engineUnavailable(
+                fatalStartupFailure ?? "ThemeEngine is unavailable.")
+        }
+        return try await themeEngine.prepare(workspace: workspace)
+    }
+
+    func apply(planID: UUID) async throws -> DurableApplyReport {
+        guard let themeEngine else {
+            throw ProductionWorkspaceRuntimeError.engineUnavailable(
+                fatalStartupFailure ?? "ThemeEngine is unavailable.")
+        }
+        return try await themeEngine.applyDurable(planID: planID, workspace: workspace)
+    }
+
+    func undoLast() async throws -> UndoReport {
+        guard let themeEngine else {
+            throw ProductionWorkspaceRuntimeError.engineUnavailable(
+                fatalStartupFailure ?? "ThemeEngine is unavailable.")
+        }
+        return try await themeEngine.undoLast(workspace: workspace)
+    }
+
+    func undoAvailability() async throws -> UndoAvailability {
+        guard let themeEngine else {
+            return .unavailable
+        }
+        return try await themeEngine.undoAvailability(workspace: workspace)
+    }
+
     private struct Discovery {
         let ghostty: Result<GhosttyDiscoveryReport, Error>
         let wallpaper: Result<MacOSWallpaperDiscoveryReport, Error>
@@ -290,19 +341,42 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                 next[instance.id] = Candidate(instance: instance, vscodeInstallation: installation)
             }
         }
+
+        for adapter in additionalAdapters {
+            let instance = ConnectedTargetInstance(
+                id: TargetInstanceID(rawValue: "\(adapter.id).default"),
+                displayName: adapter.id.capitalized,
+                adapterID: adapter.id
+            )
+            next[instance.id] = Candidate(instance: instance, vscodeInstallation: nil)
+        }
+
         candidates = next
     }
 
     private func makeSnapshot(discovery: Discovery) -> WorkspaceTargetSnapshot {
         let workspace = store.workspace
+        let knownPrefixes = ["macos", "ghostty", "vscode", "starship"]
+        let otherConnected = workspace.connectedTargetInstances.filter { instance in
+            !knownPrefixes.contains { instance.adapterID.hasPrefix($0) }
+        }
+        var targets = [
+            macOSTarget(workspace: workspace, wallpaper: discovery.wallpaper),
+            ghosttyTarget(workspace: workspace, discovery: discovery.ghostty),
+            vscodeTarget(workspace: workspace, discovery: discovery.vscode),
+            starshipTarget(workspace: workspace, discovery: discovery.starship),
+        ]
+        for instance in otherConnected {
+            targets.append(readyTarget(
+                id: instance.adapterID,
+                name: instance.displayName,
+                image: "wrench.and.screwdriver",
+                instances: [instance]
+            ))
+        }
         return WorkspaceTargetSnapshot(
             workspace: workspace,
-            targets: [
-                macOSTarget(workspace: workspace, wallpaper: discovery.wallpaper),
-                ghosttyTarget(workspace: workspace, discovery: discovery.ghostty),
-                vscodeTarget(workspace: workspace, discovery: discovery.vscode),
-                starshipTarget(workspace: workspace, discovery: discovery.starship),
-            ]
+            targets: targets
         )
     }
 

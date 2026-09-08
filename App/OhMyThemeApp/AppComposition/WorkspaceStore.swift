@@ -10,7 +10,19 @@ final class WorkspaceStore {
     private let persistence: PersistenceStore?
     private(set) var persistenceError: String?
 
-    init() {
+    init(persistenceStore: PersistenceStore? = nil) {
+        if let persistenceStore {
+            self.persistence = persistenceStore
+            self.persistenceError = nil
+            do {
+                _ = try persistenceStore.loadWorkspace()
+            } catch PersistenceError.workspaceNotFound {
+                try? persistenceStore.saveWorkspace(.myMac)
+            } catch {
+                self.persistenceError = String(describing: error)
+            }
+            return
+        }
         do {
             let store = try Self.makePersistenceStore()
             do {
