@@ -567,7 +567,8 @@ struct WorkspaceControlsView: View {
         switch state {
         case .connected: .green
         case .setupNeeded: .orange
-        case .unavailable: .secondary
+        case .needsAttention: .red
+        case .notSelected, .unavailable: .secondary
         }
     }
 

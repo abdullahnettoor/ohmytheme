@@ -527,4 +527,87 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertEqual(model.selectedThemeVariantID, "catppuccin/mocha")
         XCTAssertEqual(model.desiredThemeStatus, "Desired")
     }
+
+    func testOptInAndRecommendationCapabilities() async throws {
+        let recInstanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let nonRecInstanceID = TargetInstanceID(rawValue: "custom.default")
+
+        let recItem = WorkspacePresentationModel.TargetInstanceItem(
+            id: recInstanceID,
+            displayName: "Ghostty",
+            adapterID: "ghostty",
+            managementState: .notSelected,
+            isOptedIn: false,
+            isConnected: false,
+            isRecommended: true
+        )
+        let nonRecItem = WorkspacePresentationModel.TargetInstanceItem(
+            id: nonRecInstanceID,
+            displayName: "Custom",
+            adapterID: "custom",
+            managementState: .notSelected,
+            isOptedIn: false,
+            isConnected: false,
+            isRecommended: false,
+            exclusionReason: .nonAllowlisted,
+            exclusionDetail: "Not allowlisted"
+        )
+
+        let appTarget = WorkspacePresentationModel.ApplicationTarget(
+            id: "ghostty",
+            name: "Ghostty",
+            systemImage: "terminal",
+            state: .notSelected,
+            summary: "Terminal",
+            instanceDetails: [],
+            connectionOptions: [],
+            instances: [recItem, nonRecItem]
+        )
+
+        let runtime = FakeWorkspaceRuntime()
+        let model = WorkspacePresentationModel(runtime: runtime)
+        model.replaceWorkspace(runtime.workspace, targets: [appTarget])
+
+        XCTAssertTrue(model.hasRecommendedTargets)
+        XCTAssertTrue(model.canSelectAllRecommended)
+        XCTAssertTrue(appTarget.hasRecommendedInstances)
+        XCTAssertTrue(appTarget.canSelectRecommended)
+        XCTAssertFalse(appTarget.allRecommendedOptedIn)
+
+        runtime.refreshTargetsResult = WorkspaceTargetSnapshot(
+            workspace: runtime.workspace,
+            targets: [appTarget]
+        )
+        try await model.refreshTargets()
+        XCTAssertEqual(runtime.refreshTargetsCalls, 1)
+
+        try await model.setTargetOptIn(recInstanceID, isOptedIn: true)
+        XCTAssertEqual(runtime.setTargetOptInCalls.count, 1)
+        XCTAssertEqual(runtime.setTargetOptInCalls.first?.instanceID, recInstanceID)
+        XCTAssertEqual(runtime.setTargetOptInCalls.first?.isOptedIn, true)
+
+        try await model.selectAllRecommended()
+        XCTAssertEqual(runtime.selectAllRecommendedCalls, 1)
+
+        try await model.selectRecommended(for: "ghostty")
+        XCTAssertEqual(runtime.selectRecommendedCalls, ["ghostty"])
+    }
+
+    func testExclusionReasonPresentationInTargetInstances() {
+        let item = WorkspacePresentationModel.TargetInstanceItem(
+            id: TargetInstanceID(rawValue: "vscode.ambiguous"),
+            displayName: "VS Code",
+            adapterID: "vscode",
+            managementState: .notSelected,
+            isOptedIn: false,
+            isConnected: false,
+            isRecommended: false,
+            exclusionReason: .ambiguous,
+            exclusionDetail: "Multiple installations found"
+        )
+
+        XCTAssertFalse(item.isRecommended)
+        XCTAssertEqual(item.exclusionReason, .ambiguous)
+        XCTAssertEqual(item.exclusionDetail, "Multiple installations found")
+    }
 }

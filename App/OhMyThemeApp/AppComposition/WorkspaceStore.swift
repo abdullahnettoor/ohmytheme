@@ -52,6 +52,7 @@ final class WorkspaceStore {
             id: current.id,
             displayName: current.displayName,
             connectedTargetInstances: current.connectedTargetInstances,
+            targetOptIns: current.targetOptIns,
             themeAssignment: .fixed(variantID: variantID)
         )
         guard let persistence else {
@@ -60,6 +61,69 @@ final class WorkspaceStore {
         }
         do {
             try persistence.saveWorkspace(updated)
+        } catch {
+            persistenceError = String(describing: error)
+        }
+    }
+
+    func setTargetOptIn(instance: ConnectedTargetInstance, isOptedIn: Bool) {
+        var optIns = workspace.targetOptIns
+        if isOptedIn {
+            optIns.insert(instance.id)
+        } else {
+            optIns.remove(instance.id)
+        }
+        setTargetOptIns(optIns, discoveredInstances: [instance])
+    }
+
+    func setTargetOptIns(
+        _ optIns: Set<TargetInstanceID>,
+        discoveredInstances: [ConnectedTargetInstance] = []
+    ) {
+        guard let persistence else {
+            persistenceError = persistenceError ?? "Workspace persistence is unavailable."
+            return
+        }
+        do {
+            let current = workspace
+            let updated = Workspace(
+                id: current.id,
+                displayName: current.displayName,
+                connectedTargetInstances: current.connectedTargetInstances,
+                targetOptIns: optIns,
+                themeAssignment: current.themeAssignment
+            )
+            var persistedInstancesByID = Dictionary(
+                uniqueKeysWithValues: targetInstances.map { ($0.id, $0) }
+            )
+            for instance in current.connectedTargetInstances {
+                persistedInstancesByID[instance.id] = PersistedTargetInstance(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: true,
+                    isOptedIn: true
+                )
+            }
+            for instance in discoveredInstances {
+                persistedInstancesByID[instance.id] = PersistedTargetInstance(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: current.isConnected(instance.id),
+                    isOptedIn: optIns.contains(instance.id)
+                )
+            }
+            let persistedInstances = persistedInstancesByID.values.map { instance in
+                PersistedTargetInstance(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: current.isConnected(instance.id),
+                    isOptedIn: optIns.contains(instance.id)
+                )
+            }
+            try persistence.saveWorkspace(updated, targetInstances: persistedInstances)
         } catch {
             persistenceError = String(describing: error)
         }

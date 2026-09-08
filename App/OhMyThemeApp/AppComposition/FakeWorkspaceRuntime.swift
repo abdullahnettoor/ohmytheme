@@ -12,6 +12,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     var startResult: WorkspaceTargetSnapshot?
     var startError: (any Error)?
+    var refreshTargetsResult: WorkspaceTargetSnapshot?
+    var refreshTargetsError: (any Error)?
 
     var reviewConnectionResult: ConnectionPlan?
     var reviewConnectionError: (any Error)?
@@ -35,6 +37,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     private(set) var selectVariantCalls: [String] = []
     private(set) var startCalls = 0
+    private(set) var refreshTargetsCalls = 0
     private(set) var reviewCalls = 0
     private(set) var connectCalls = 0
     private(set) var disconnectCalls = 0
@@ -42,6 +45,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     private(set) var applyCalls: [UUID] = []
     private(set) var undoCalls = 0
     private(set) var undoAvailabilityCalls = 0
+    private(set) var setTargetOptInCalls: [(instanceID: TargetInstanceID, isOptedIn: Bool)] = []
+    private(set) var selectAllRecommendedCalls = 0
+    private(set) var selectRecommendedCalls: [String] = []
 
     init(
         workspace: Workspace = .myMac,
@@ -63,6 +69,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             id: workspace.id,
             displayName: workspace.displayName,
             connectedTargetInstances: workspace.connectedTargetInstances,
+            targetOptIns: workspace.targetOptIns,
             themeAssignment: .fixed(variantID: variantID)
         )
     }
@@ -74,6 +81,21 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         }
         if let startResult {
             return startResult
+        }
+        return WorkspaceTargetSnapshot(
+            workspace: workspace,
+            targets: defaultTargets(for: workspace)
+        )
+    }
+
+    func refreshTargets() async throws -> WorkspaceTargetSnapshot {
+        refreshTargetsCalls += 1
+        if let refreshTargetsError {
+            throw refreshTargetsError
+        }
+        if let refreshTargetsResult {
+            workspace = refreshTargetsResult.workspace
+            return refreshTargetsResult
         }
         return WorkspaceTargetSnapshot(
             workspace: workspace,
@@ -120,6 +142,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             id: workspace.id,
             displayName: workspace.displayName,
             connectedTargetInstances: workspace.connectedTargetInstances + [instance],
+            targetOptIns: workspace.targetOptIns.union([optionID]),
             themeAssignment: workspace.themeAssignment
         )
         return WorkspaceConnectionResult(
@@ -145,12 +168,15 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         if let restoreAndDisconnectResult {
             return restoreAndDisconnectResult
         }
+        var newOptIns = workspace.targetOptIns
+        newOptIns.remove(targetInstanceID)
         workspace = Workspace(
             id: workspace.id,
             displayName: workspace.displayName,
             connectedTargetInstances: workspace.connectedTargetInstances.filter {
                 $0.id != targetInstanceID
             },
+            targetOptIns: newOptIns,
             themeAssignment: workspace.themeAssignment
         )
         return WorkspaceConnectionResult(
@@ -292,9 +318,81 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         return undoAvailabilityResult
     }
 
+    func setTargetOptIn(
+        instanceID: TargetInstanceID,
+        isOptedIn: Bool
+    ) async throws -> WorkspaceTargetSnapshot {
+        setTargetOptInCalls.append((instanceID, isOptedIn))
+        var optIns = workspace.targetOptIns
+        if isOptedIn {
+            optIns.insert(instanceID)
+        } else {
+            optIns.remove(instanceID)
+        }
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: workspace.connectedTargetInstances,
+            targetOptIns: optIns,
+            themeAssignment: workspace.themeAssignment
+        )
+        return WorkspaceTargetSnapshot(
+            workspace: workspace,
+            targets: defaultTargets(for: workspace)
+        )
+    }
+
+    func selectAllRecommended() async throws -> WorkspaceTargetSnapshot {
+        selectAllRecommendedCalls += 1
+        let targets = defaultTargets(for: workspace)
+        let recommendedIDs = targets.flatMap { $0.instances.filter(\.isRecommended).map(\.id) }
+        let optIns = workspace.targetOptIns.union(recommendedIDs)
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: workspace.connectedTargetInstances,
+            targetOptIns: optIns,
+            themeAssignment: workspace.themeAssignment
+        )
+        return WorkspaceTargetSnapshot(
+            workspace: workspace,
+            targets: defaultTargets(for: workspace)
+        )
+    }
+
+    func selectRecommended(
+        applicationID: String
+    ) async throws -> WorkspaceTargetSnapshot {
+        selectRecommendedCalls.append(applicationID)
+        let targets = defaultTargets(for: workspace)
+        let target = targets.first { $0.id == applicationID }
+        let recommendedIDs = target?.instances.filter(\.isRecommended).map(\.id) ?? []
+        let optIns = workspace.targetOptIns.union(recommendedIDs)
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: workspace.connectedTargetInstances,
+            targetOptIns: optIns,
+            themeAssignment: workspace.themeAssignment
+        )
+        return WorkspaceTargetSnapshot(
+            workspace: workspace,
+            targets: defaultTargets(for: workspace)
+        )
+    }
+
     private func defaultTargets(for workspace: Workspace) -> [WorkspacePresentationModel.ApplicationTarget] {
         var targets: [WorkspacePresentationModel.ApplicationTarget] = []
         for instance in workspace.connectedTargetInstances {
+            let item = WorkspacePresentationModel.TargetInstanceItem(
+                id: instance.id,
+                displayName: instance.displayName,
+                adapterID: instance.adapterID,
+                managementState: .connected,
+                isOptedIn: true,
+                isConnected: true,
+                isRecommended: RecommendedTargetPolicy.isAllowlisted(adapterID: instance.adapterID)
+            )
             targets.append(
                 WorkspacePresentationModel.ApplicationTarget(
                     id: instance.adapterID,
@@ -303,7 +401,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
                     state: .connected,
                     summary: "Connected",
                     instanceDetails: [instance.displayName],
-                    connectionOptions: []
+                    connectionOptions: [],
+                    instances: [item]
                 )
             )
         }

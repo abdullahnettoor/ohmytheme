@@ -36,6 +36,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     private let store: WorkspaceStore
     private let additionalAdapters: [any ThemeAdapter]
+    private let experimentalAdapterIDs: Set<String>
     private let appearanceAdapter: MacOSAppearanceAdapter
     private let wallpaperAdapter: MacOSWallpaperAdapter
     private let ghosttyAdapter: GhosttyConfigurationAdapter
@@ -46,6 +47,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     private let vscodeArtifact: VSCodeCompanionArtifact?
     private let socketServer: CompanionSocketServer?
     private var candidates: [TargetInstanceID: Candidate] = [:]
+    private var lastDiscovery: WorkspaceTargetDiscovery?
     private var fatalStartupFailure: String?
     private var vscodeStartupFailure: String?
 
@@ -69,11 +71,13 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         store: WorkspaceStore = WorkspaceStore(),
         themePacks: [ThemePack]? = nil,
         additionalAdapters: [any ThemeAdapter] = [],
+        experimentalAdapterIDs: Set<String> = [],
         targetDiscoveryProvider: WorkspaceTargetDiscoveryProvider? = nil,
         vscodeCompanionBootstrap: VSCodeCompanionBootstrap = ProductionWorkspaceRuntime.startVSCodeCompanion
     ) {
         self.store = store
         self.additionalAdapters = additionalAdapters
+        self.experimentalAdapterIDs = experimentalAdapterIDs
         self.targetDiscoveryProvider = targetDiscoveryProvider
         appearanceAdapter = MacOSAppearanceAdapter()
         wallpaperAdapter = MacOSWallpaperAdapter(
@@ -137,15 +141,25 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     func start() async throws -> WorkspaceTargetSnapshot {
         let themeEngine = try requiredThemeEngine()
-        let discovery = await discoverTargets()
+        let discovery = await discoverAndRememberTargets()
         await registerAdapterForPersistedVSCodeTarget(from: discovery.vscode)
         try await themeEngine.reconcileInterruptedOperations()
         return makeSnapshot(discovery: discovery)
     }
 
+    func refreshTargets() async throws -> WorkspaceTargetSnapshot {
+        _ = try requiredThemeEngine()
+        let discovery = await discoverAndRememberTargets()
+        await registerAdapterForPersistedVSCodeTarget(from: discovery.vscode)
+        return makeSnapshot(discovery: discovery)
+    }
+
     func reviewConnection(optionID: TargetInstanceID) async throws -> ConnectionPlan {
         let themeEngine = try requiredThemeEngine()
-        _ = await discoverTargets()
+        guard workspace.isOptedIn(optionID) else {
+            throw ProductionWorkspaceRuntimeError.targetNotOptedIn(optionID)
+        }
+        _ = await discoverAndRememberTargets()
         guard let candidate = candidates[optionID] else {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(optionID)
         }
@@ -160,7 +174,10 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         reviewedPlan: ConnectionPlan
     ) async throws -> WorkspaceConnectionResult {
         let themeEngine = try requiredThemeEngine()
-        var discovery = await discoverTargets()
+        guard workspace.isOptedIn(optionID) else {
+            throw ProductionWorkspaceRuntimeError.targetNotOptedIn(optionID)
+        }
+        var discovery = await discoverAndRememberTargets()
         guard let candidate = candidates[optionID] else {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(optionID)
         }
@@ -175,12 +192,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             approveLinkedSource: true,
             reviewedPlan: reviewedPlan
         )
-        let connected = report.outcomes.contains {
-            $0.configurationState == .updated || $0.configurationState == .unchanged
-        }
-        if connected {
-            discovery = await discoverTargets()
-        }
+        discovery = await discoverAndRememberTargets()
         return WorkspaceConnectionResult(
             snapshot: makeSnapshot(discovery: discovery),
             report: report
@@ -195,11 +207,83 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
         }
         let report = try await themeEngine.disconnect(instance: instance, workspace: workspace)
-        let discovery = await discoverTargets()
+        let discovery = await discoverAndRememberTargets()
         return WorkspaceConnectionResult(
             snapshot: makeSnapshot(discovery: discovery),
             report: report
         )
+    }
+
+    func setTargetOptIn(
+        instanceID: TargetInstanceID,
+        isOptedIn: Bool
+    ) async throws -> WorkspaceTargetSnapshot {
+        if !isOptedIn && workspace.isConnected(instanceID) {
+            throw ProductionWorkspaceRuntimeError.cannotOptOutConnectedTarget(instanceID)
+        }
+        let discovery = await currentOrDiscoveredTargets()
+        let presentedItem = makeSnapshot(discovery: discovery).targets
+            .flatMap(\.instances)
+            .first { $0.id == instanceID }
+        let persistedInstance = store.targetInstances.first { $0.id == instanceID }.map {
+            ConnectedTargetInstance(
+                id: $0.id,
+                displayName: $0.displayName,
+                adapterID: $0.adapterID
+            )
+        }
+        let discoveredInstance = presentedItem.map {
+            ConnectedTargetInstance(
+                id: $0.id,
+                displayName: $0.displayName,
+                adapterID: $0.adapterID
+            )
+        }
+        guard let instance = candidates[instanceID]?.instance ?? persistedInstance ?? discoveredInstance else {
+            throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(instanceID)
+        }
+        store.setTargetOptIn(instance: instance, isOptedIn: isOptedIn)
+        return makeSnapshot(discovery: discovery)
+    }
+
+    func selectAllRecommended() async throws -> WorkspaceTargetSnapshot {
+        let discovery = await discoverAndRememberTargets()
+        let snapshot = makeSnapshot(discovery: discovery)
+        let recommendedIDs = snapshot.targets.flatMap { target in
+            target.instances.filter(\.isRecommended).map(\.id)
+        }
+        let updatedOptIns = workspace.targetOptIns.union(recommendedIDs)
+        let recommendedInstances = recommendedIDs.compactMap { candidates[$0]?.instance }
+        store.setTargetOptIns(updatedOptIns, discoveredInstances: recommendedInstances)
+        return makeSnapshot(discovery: discovery)
+    }
+
+    func selectRecommended(
+        applicationID: String
+    ) async throws -> WorkspaceTargetSnapshot {
+        let discovery = await discoverAndRememberTargets()
+        let snapshot = makeSnapshot(discovery: discovery)
+        guard let target = snapshot.targets.first(where: { $0.id == applicationID }) else {
+            return snapshot
+        }
+        let recommendedIDs = target.instances.filter(\.isRecommended).map(\.id)
+        let updatedOptIns = workspace.targetOptIns.union(recommendedIDs)
+        let recommendedInstances = recommendedIDs.compactMap { candidates[$0]?.instance }
+        store.setTargetOptIns(updatedOptIns, discoveredInstances: recommendedInstances)
+        return makeSnapshot(discovery: discovery)
+    }
+
+    private func currentOrDiscoveredTargets() async -> WorkspaceTargetDiscovery {
+        if let lastDiscovery {
+            return lastDiscovery
+        }
+        return await discoverAndRememberTargets()
+    }
+
+    private func discoverAndRememberTargets() async -> WorkspaceTargetDiscovery {
+        let discovery = await discoverTargets()
+        lastDiscovery = discovery
+        return discovery
     }
 
     func prepareApplyPlan() async throws -> ApplyPlan {
@@ -283,6 +367,17 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         )
         next[appearance.id] = Candidate(instance: appearance, vscodeInstallation: nil)
 
+        if case .success(let report) = discovery.wallpaper {
+            for display in report.displays {
+                let instance = ConnectedTargetInstance(
+                    id: display.targetInstanceID,
+                    displayName: "Wallpaper (Display \(display.displayID))",
+                    adapterID: "macos.wallpaper"
+                )
+                next[instance.id] = Candidate(instance: instance, vscodeInstallation: nil)
+            }
+        }
+
         if case .success(let report) = discovery.ghostty,
             report.installationStatus == .supported,
             report.configurationStatus != .ambiguous,
@@ -352,6 +447,11 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                     instances: [instance]
                 ))
         }
+        for adapter in additionalAdapters {
+            if !targets.contains(where: { $0.id == adapter.id }) {
+                targets.append(additionalAdapterTarget(workspace: workspace, adapter: adapter))
+            }
+        }
         return WorkspaceTargetSnapshot(
             workspace: workspace,
             targets: targets
@@ -362,36 +462,131 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         workspace: Workspace,
         wallpaper: Result<MacOSWallpaperDiscoveryReport, Error>
     ) -> WorkspacePresentationModel.ApplicationTarget {
-        let instances = workspace.connectedTargetInstances.filter { $0.adapterID.hasPrefix("macos.") }
-        let appearanceConnected = instances.contains { $0.adapterID == "macos.appearance" }
+        let connectedInstances = workspace.connectedTargetInstances.filter { $0.adapterID.hasPrefix("macos.") }
+        let appearanceConnected = connectedInstances.contains { $0.adapterID == "macos.appearance" }
+
+        let appearanceID = MacOSAppearanceAdapter.systemTargetInstanceID
+        let appearanceOptedIn = workspace.isOptedIn(appearanceID)
+        let appearanceEvaluation = RecommendedTargetPolicy.evaluate(adapterID: "macos.appearance", isAvailable: true)
+
+        let appearanceItem = WorkspacePresentationModel.TargetInstanceItem(
+            id: appearanceID,
+            displayName: "System Appearance",
+            detail: "Menu bar, windows, and controls theme mode",
+            adapterID: "macos.appearance",
+            managementState: appearanceConnected ? .connected : (appearanceOptedIn ? .setupNeeded : .notSelected),
+            isOptedIn: appearanceOptedIn,
+            isConnected: appearanceConnected,
+            isRecommended: appearanceEvaluation.isRecommended,
+            exclusionReason: appearanceEvaluation.exclusionReason,
+            permissionDisclosure: MacOSAppearanceAdapter.automationPermissionDescription
+        )
+
+        var items: [WorkspacePresentationModel.TargetInstanceItem] = [appearanceItem]
+        var connectionOptions: [WorkspacePresentationModel.ConnectionOption] = []
+
+        if appearanceOptedIn, !appearanceConnected, let candidate = candidates[appearanceID] {
+            connectionOptions.append(
+                WorkspacePresentationModel.ConnectionOption(
+                    id: candidate.instance.id,
+                    name: candidate.instance.displayName,
+                    detail: nil,
+                    permissionDisclosure: MacOSAppearanceAdapter.automationPermissionDescription
+                )
+            )
+        }
+
         let displaySummary: String
         switch wallpaper {
         case .success(let report):
-            displaySummary =
-                report.displays.isEmpty
-                ? "No wallpaper displays discovered."
-                : "Wallpaper stays unchanged on \(report.displays.count) display\(report.displays.count == 1 ? "" : "s")."
+            if report.displays.isEmpty {
+                displaySummary = "No wallpaper displays discovered."
+            } else {
+                displaySummary =
+                    "Wallpaper on \(report.displays.count) display\(report.displays.count == 1 ? "" : "s")."
+                for display in report.displays {
+                    let displayID = display.targetInstanceID
+                    let isConnected = workspace.isConnected(displayID)
+                    let isOptedIn = workspace.isOptedIn(displayID)
+                    let recommendation = RecommendedTargetPolicy.evaluate(
+                        adapterID: "macos.wallpaper",
+                        isAvailable: true
+                    )
+                    let item = WorkspacePresentationModel.TargetInstanceItem(
+                        id: displayID,
+                        displayName: "Wallpaper (Display \(display.displayID))",
+                        detail: display.currentImageURL?.lastPathComponent,
+                        adapterID: "macos.wallpaper",
+                        managementState: isConnected ? .connected : (isOptedIn ? .setupNeeded : .notSelected),
+                        isOptedIn: isOptedIn,
+                        isConnected: isConnected,
+                        isRecommended: recommendation.isRecommended,
+                        exclusionReason: recommendation.exclusionReason
+                    )
+                    items.append(item)
+                    if isOptedIn, !isConnected, let candidate = candidates[displayID] {
+                        connectionOptions.append(
+                            WorkspacePresentationModel.ConnectionOption(
+                                id: candidate.instance.id,
+                                name: candidate.instance.displayName,
+                                detail: display.currentImageURL?.path
+                            )
+                        )
+                    }
+                }
+            }
+            let discoveredIDs = Set(items.map(\.id))
+            items.append(
+                contentsOf: unavailablePersistedTargetItems(
+                    adapterID: "macos.wallpaper",
+                    detail: "The persisted display was not found in current discovery.",
+                    workspace: workspace
+                ).filter { !discoveredIDs.contains($0.id) }
+            )
         case .failure(let error):
             displaySummary = "Wallpaper discovery failed: \(error)"
-        }
-        let option = candidates[MacOSAppearanceAdapter.systemTargetInstanceID].map {
-            WorkspacePresentationModel.ConnectionOption(
-                id: $0.instance.id,
-                name: $0.instance.displayName,
-                detail: nil,
-                permissionDisclosure: MacOSAppearanceAdapter.automationPermissionDescription
+            let persistedWallpaperItems = unavailablePersistedTargetItems(
+                adapterID: "macos.wallpaper",
+                detail: String(describing: error),
+                workspace: workspace
             )
+            if persistedWallpaperItems.isEmpty {
+                items.append(
+                    WorkspacePresentationModel.TargetInstanceItem(
+                        id: TargetInstanceID(rawValue: "macos.wallpaper.unavailable"),
+                        displayName: "Wallpaper",
+                        detail: String(describing: error),
+                        adapterID: "macos.wallpaper",
+                        managementState: .unavailable,
+                        isOptedIn: false,
+                        isConnected: false,
+                        isRecommended: false,
+                        exclusionReason: .unavailable,
+                        exclusionDetail: String(describing: error)
+                    )
+                )
+            } else {
+                items.append(contentsOf: persistedWallpaperItems)
+            }
         }
+
+        let state = aggregateState(for: items)
+        let summary =
+            state == .needsAttention
+            ? "My Mac needs attention. \(displaySummary)"
+            : appearanceConnected
+                ? "System Appearance connected. \(displaySummary)"
+                : "Connect optional Light/Dark automation. \(displaySummary)"
+
         return WorkspacePresentationModel.ApplicationTarget(
             id: "macos",
             name: "macOS",
             systemImage: "macbook",
-            state: appearanceConnected ? .connected : .setupNeeded,
-            summary: appearanceConnected
-                ? "System Appearance connected. \(displaySummary)"
-                : "Connect optional Light/Dark automation. \(displaySummary)",
-            instanceDetails: instances.map(\.displayName),
-            connectionOptions: appearanceConnected ? [] : option.map { [$0] } ?? []
+            state: state,
+            summary: summary,
+            instanceDetails: connectedInstances.map(\.displayName),
+            connectionOptions: connectionOptions,
+            instances: items
         )
     }
 
@@ -399,41 +594,116 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         workspace: Workspace,
         discovery: Result<GhosttyDiscoveryReport, Error>
     ) -> WorkspacePresentationModel.ApplicationTarget {
-        let connected = workspace.connectedTargetInstances.filter { $0.adapterID == "ghostty" }
-        if !connected.isEmpty {
-            return readyTarget(id: "ghostty", name: "Ghostty", image: "terminal", instances: connected)
-        }
+        let ghosttyID = GhosttyConfigurationAdapter.defaultTargetInstanceID
+        let isConnected = workspace.isConnected(ghosttyID)
+        let isOptedIn = workspace.isOptedIn(ghosttyID)
+
+        let item: WorkspacePresentationModel.TargetInstanceItem
+        let options: [WorkspacePresentationModel.ConnectionOption]
+
         switch discovery {
         case .success(let report):
-            if let candidate = candidates[GhosttyConfigurationAdapter.defaultTargetInstanceID] {
-                return WorkspacePresentationModel.ApplicationTarget(
-                    id: "ghostty",
-                    name: "Ghostty",
-                    systemImage: "terminal",
-                    state: .setupNeeded,
-                    summary: "Review a managed config fragment and documented reload before connecting.",
-                    instanceDetails: report.configurationCandidates.map(\.path),
-                    connectionOptions: [
-                        .init(
-                            id: candidate.instance.id,
-                            name: candidate.instance.displayName,
-                            detail: report.resolvedConfigurationURL?.path
-                        )
-                    ]
-                )
+            let isAvailable =
+                report.installationStatus != .missing && report.installationStatus != .unsupported
+            let isAmbiguous = report.configurationStatus == .ambiguous
+            let isConflicting = report.configurationStatus == .unsupported
+            let recommendation = RecommendedTargetPolicy.evaluate(
+                adapterID: "ghostty",
+                isAvailable: isAvailable,
+                isAmbiguous: isAmbiguous,
+                isConflicting: isConflicting
+            )
+            let exclusionDetail: String?
+            if !isAvailable {
+                exclusionDetail = "Installation: \(report.installationStatus.rawValue)"
+            } else if isAmbiguous {
+                exclusionDetail = "Ambiguous configuration files detected"
+            } else if isConflicting {
+                exclusionDetail = "Configuration is unsupported"
+            } else {
+                exclusionDetail = nil
             }
-            return unavailableTarget(
+
+            let state = targetManagementState(
+                isConnected: isConnected,
+                isOptedIn: isOptedIn,
+                isAvailable: isAvailable,
+                hasKnownProblem: isAmbiguous || isConflicting
+            )
+
+            item = WorkspacePresentationModel.TargetInstanceItem(
+                id: ghosttyID,
+                displayName: "Ghostty",
+                detail: report.resolvedConfigurationURL?.path,
+                adapterID: "ghostty",
+                managementState: state,
+                isOptedIn: isOptedIn,
+                isConnected: isConnected,
+                isRecommended: recommendation.isRecommended,
+                exclusionReason: recommendation.exclusionReason,
+                exclusionDetail: exclusionDetail
+            )
+
+            if isOptedIn, !isConnected, isAvailable, !isAmbiguous, !isConflicting,
+                let candidate = candidates[ghosttyID]
+            {
+                options = [
+                    WorkspacePresentationModel.ConnectionOption(
+                        id: candidate.instance.id,
+                        name: candidate.instance.displayName,
+                        detail: report.resolvedConfigurationURL?.path
+                    )
+                ]
+            } else {
+                options = []
+            }
+
+            return WorkspacePresentationModel.ApplicationTarget(
                 id: "ghostty",
                 name: "Ghostty",
-                image: "terminal",
-                detail:
-                    "Installation: \(report.installationStatus.rawValue). Configuration: \(report.configurationStatus.rawValue).",
-                instances: report.installations.map { "\($0.executableURL.path), \($0.version)" }
-                    + report.configurationCandidates.map(\.path)
+                systemImage: "terminal",
+                state: state,
+                summary:
+                    state == .needsAttention
+                    ? (exclusionDetail ?? "Ghostty needs attention.")
+                    : isConnected
+                        ? "Connected"
+                        : (isAvailable
+                            ? "Review a managed config fragment and documented reload before connecting."
+                            : "Installation: \(report.installationStatus.rawValue). Configuration: \(report.configurationStatus.rawValue)."),
+                instanceDetails: report.configurationCandidates.map(\.path),
+                connectionOptions: options,
+                instances: [item]
             )
+
         case .failure(let error):
-            return unavailableTarget(
-                id: "ghostty", name: "Ghostty", image: "terminal", detail: String(describing: error))
+            item = WorkspacePresentationModel.TargetInstanceItem(
+                id: ghosttyID,
+                displayName: "Ghostty",
+                detail: String(describing: error),
+                adapterID: "ghostty",
+                managementState: targetManagementState(
+                    isConnected: isConnected,
+                    isOptedIn: isOptedIn,
+                    isAvailable: false,
+                    hasKnownProblem: true
+                ),
+                isOptedIn: isOptedIn,
+                isConnected: isConnected,
+                isRecommended: false,
+                exclusionReason: .unavailable,
+                exclusionDetail: String(describing: error)
+            )
+            return WorkspacePresentationModel.ApplicationTarget(
+                id: "ghostty",
+                name: "Ghostty",
+                systemImage: "terminal",
+                state: item.managementState,
+                summary: String(describing: error),
+                instanceDetails: [],
+                connectionOptions: [],
+                instances: [item]
+            )
         }
     }
 
@@ -441,67 +711,129 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         workspace: Workspace,
         discovery: Result<VSCodeDiscoveryReport, Error>
     ) -> WorkspacePresentationModel.ApplicationTarget {
-        let connected = workspace.connectedTargetInstances.filter { $0.adapterID == "vscode" }
-        if !connected.isEmpty {
-            return readyTarget(
-                id: "vscode",
-                name: "Visual Studio Code",
-                image: "chevron.left.forwardslash.chevron.right",
-                instances: connected,
-                summary: "Default profile connected. Keep VS Code open for current-window activation."
-            )
-        }
         guard vscodePlatform != nil, vscodeArtifact != nil else {
-            return unavailableTarget(
+            return unavailableApplicationTarget(
                 id: "vscode",
                 name: "Visual Studio Code",
                 image: "chevron.left.forwardslash.chevron.right",
-                detail: vscodeStartupFailure ?? "The pinned companion could not start."
+                adapterID: "vscode",
+                fallbackID: TargetInstanceID(rawValue: "vscode.unavailable"),
+                detail: vscodeStartupFailure ?? "The pinned companion could not start.",
+                workspace: workspace
             )
         }
+
         switch discovery {
         case .success(let report):
-            let options = report.installations.filter(\.isSupported).compactMap { installation in
+            if report.installations.isEmpty {
+                return unavailableApplicationTarget(
+                    id: "vscode",
+                    name: "Visual Studio Code",
+                    image: "chevron.left.forwardslash.chevron.right",
+                    adapterID: "vscode",
+                    fallbackID: TargetInstanceID(rawValue: "vscode.none"),
+                    detail: report.detail ?? "No supported Microsoft VS Code installation was found.",
+                    workspace: workspace
+                )
+            }
+
+            var items: [WorkspacePresentationModel.TargetInstanceItem] = []
+            var options: [WorkspacePresentationModel.ConnectionOption] = []
+
+            for installation in report.installations {
                 let expectation = vscodeExpectation(for: installation)
                 let id = VSCodeConnectionAdapter.targetInstanceID(for: expectation)
-                return candidates[id].map { _ in
-                    WorkspacePresentationModel.ConnectionOption(
-                        id: id,
-                        name: "\(installation.edition.displayName), Default profile",
-                        detail: "\(installation.version) at \(installation.bundleURL.path)"
+                let isConnected = workspace.isConnected(id)
+                let isOptedIn = workspace.isOptedIn(id)
+
+                let isSupported = installation.isSupported
+                let isAmbiguous = report.status == .ambiguous
+                let recommendation = RecommendedTargetPolicy.evaluate(
+                    adapterID: "vscode",
+                    isAvailable: isSupported,
+                    isAmbiguous: isAmbiguous
+                )
+
+                let state = targetManagementState(
+                    isConnected: isConnected,
+                    isOptedIn: isOptedIn,
+                    isAvailable: isSupported,
+                    hasKnownProblem: isAmbiguous
+                )
+
+                let exclusionDetail: String? =
+                    !isSupported
+                    ? "VS Code version \(installation.version) is unsupported"
+                    : (isAmbiguous ? "Ambiguous installation or configuration" : nil)
+
+                let item = WorkspacePresentationModel.TargetInstanceItem(
+                    id: id,
+                    displayName: "\(installation.edition.displayName), Default profile",
+                    detail: "\(installation.version) at \(installation.bundleURL.path)",
+                    adapterID: "vscode",
+                    managementState: state,
+                    isOptedIn: isOptedIn,
+                    isConnected: isConnected,
+                    isRecommended: recommendation.isRecommended,
+                    exclusionReason: recommendation.exclusionReason,
+                    exclusionDetail: exclusionDetail
+                )
+                items.append(item)
+
+                if isOptedIn, isSupported, !isAmbiguous, !isConnected,
+                    let candidate = candidates[id]
+                {
+                    options.append(
+                        WorkspacePresentationModel.ConnectionOption(
+                            id: candidate.instance.id,
+                            name: "\(installation.edition.displayName), Default profile",
+                            detail: "\(installation.version) at \(installation.bundleURL.path)"
+                        )
                     )
                 }
             }
-            if !options.isEmpty {
-                return WorkspacePresentationModel.ApplicationTarget(
-                    id: "vscode",
-                    name: "Visual Studio Code",
-                    systemImage: "chevron.left.forwardslash.chevron.right",
-                    state: .setupNeeded,
-                    summary: options.count == 1
-                        ? "Install or verify the pinned companion for the Default profile."
-                        : "Choose which VS Code edition should join My Mac.",
-                    instanceDetails: report.installations.map {
-                        "\($0.edition.displayName) \($0.version), \($0.bundleURL.path)"
-                    },
-                    connectionOptions: options
-                )
-            }
-            return unavailableTarget(
-                id: "vscode",
-                name: "Visual Studio Code",
-                image: "chevron.left.forwardslash.chevron.right",
-                detail: report.detail ?? "No supported Microsoft VS Code installation was found.",
-                instances: report.installations.map {
-                    "\($0.edition.displayName) \($0.version), \($0.bundleURL.path)"
-                }
+
+            let discoveredIDs = Set(items.map(\.id))
+            items.append(
+                contentsOf: unavailablePersistedTargetItems(
+                    adapterID: "vscode",
+                    detail: "The persisted Target Instance was not found in current discovery.",
+                    workspace: workspace
+                ).filter { !discoveredIDs.contains($0.id) }
             )
+
+            let state = aggregateState(for: items)
+            let summary =
+                state == .needsAttention
+                ? (items.compactMap(\.exclusionDetail).first ?? "Visual Studio Code needs attention.")
+                : state == .connected
+                    ? "Default profile connected. Keep VS Code open for current-window activation."
+                    : (options.count == 1
+                        ? "Install or verify the pinned companion for the Default profile."
+                        : "Choose which VS Code edition should join My Mac.")
+
+            return WorkspacePresentationModel.ApplicationTarget(
+                id: "vscode",
+                name: "Visual Studio Code",
+                systemImage: "chevron.left.forwardslash.chevron.right",
+                state: state,
+                summary: summary,
+                instanceDetails: report.installations.map {
+                    "\($0.edition.displayName) \($0.version), \($0.bundleURL.path)"
+                },
+                connectionOptions: options,
+                instances: items
+            )
+
         case .failure(let error):
-            return unavailableTarget(
+            return unavailableApplicationTarget(
                 id: "vscode",
                 name: "Visual Studio Code",
                 image: "chevron.left.forwardslash.chevron.right",
-                detail: String(describing: error)
+                adapterID: "vscode",
+                fallbackID: TargetInstanceID(rawValue: "vscode.failure"),
+                detail: String(describing: error),
+                workspace: workspace
             )
         }
     }
@@ -510,40 +842,158 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         workspace: Workspace,
         discovery: Result<StarshipDiscoveryReport, Error>
     ) -> WorkspacePresentationModel.ApplicationTarget {
-        let connected = workspace.connectedTargetInstances.filter { $0.adapterID == "starship" }
-        if !connected.isEmpty {
-            return readyTarget(id: "starship", name: "Starship", image: "sparkles", instances: connected)
-        }
+        let starshipID = StarshipConfigurationAdapter.defaultTargetInstanceID
+        let isConnected = workspace.isConnected(starshipID)
+        let isOptedIn = workspace.isOptedIn(starshipID)
+
         switch discovery {
         case .success(let report):
-            if let candidate = candidates[StarshipConfigurationAdapter.defaultTargetInstanceID] {
-                return WorkspacePresentationModel.ApplicationTarget(
-                    id: "starship",
-                    name: "Starship",
-                    systemImage: "sparkles",
-                    state: .setupNeeded,
-                    summary: "Manage only registered palette keys. Changes appear at the next prompt.",
-                    instanceDetails: report.configurationCandidates.map(\.path),
-                    connectionOptions: [
-                        .init(
-                            id: candidate.instance.id,
-                            name: candidate.instance.displayName,
-                            detail: report.resolvedConfigurationURL?.path
-                        )
-                    ]
+            let isAmbiguous = report.configurationStatus == .ambiguous || report.configurationStatus == .malformed
+            let isConflicting = report.configurationStatus == .unsupported
+            let recommendation = RecommendedTargetPolicy.evaluate(
+                adapterID: "starship",
+                isAvailable: true,
+                isAmbiguous: isAmbiguous,
+                isConflicting: isConflicting
+            )
+            let exclusionDetail: String? =
+                isAmbiguous
+                ? (report.detail ?? "Configuration is \(report.configurationStatus.rawValue).")
+                : (isConflicting ? (report.detail ?? "Unsupported configuration") : nil)
+
+            let state = targetManagementState(
+                isConnected: isConnected,
+                isOptedIn: isOptedIn,
+                isAvailable: true,
+                hasKnownProblem: isAmbiguous || isConflicting
+            )
+
+            let item = WorkspacePresentationModel.TargetInstanceItem(
+                id: starshipID,
+                displayName: "Starship",
+                detail: report.resolvedConfigurationURL?.path,
+                adapterID: "starship",
+                managementState: state,
+                isOptedIn: isOptedIn,
+                isConnected: isConnected,
+                isRecommended: recommendation.isRecommended,
+                exclusionReason: recommendation.exclusionReason,
+                exclusionDetail: exclusionDetail
+            )
+
+            var options: [WorkspacePresentationModel.ConnectionOption] = []
+            if isOptedIn, !isConnected, !isAmbiguous, !isConflicting,
+                let candidate = candidates[starshipID]
+            {
+                options.append(
+                    WorkspacePresentationModel.ConnectionOption(
+                        id: candidate.instance.id,
+                        name: candidate.instance.displayName,
+                        detail: report.resolvedConfigurationURL?.path
+                    )
                 )
             }
-            return unavailableTarget(
+
+            return WorkspacePresentationModel.ApplicationTarget(
                 id: "starship",
                 name: "Starship",
-                image: "sparkles",
-                detail: report.detail ?? "Configuration is \(report.configurationStatus.rawValue).",
-                instances: report.configurationCandidates.map(\.path)
+                systemImage: "sparkles",
+                state: state,
+                summary:
+                    state == .needsAttention
+                    ? (exclusionDetail ?? "Starship needs attention.")
+                    : isConnected
+                        ? "Connected"
+                        : "Manage only registered palette keys. Changes appear at the next prompt.",
+                instanceDetails: report.configurationCandidates.map(\.path),
+                connectionOptions: options,
+                instances: [item]
             )
+
         case .failure(let error):
-            return unavailableTarget(
-                id: "starship", name: "Starship", image: "sparkles", detail: String(describing: error))
+            let item = WorkspacePresentationModel.TargetInstanceItem(
+                id: starshipID,
+                displayName: "Starship",
+                detail: String(describing: error),
+                adapterID: "starship",
+                managementState: targetManagementState(
+                    isConnected: isConnected,
+                    isOptedIn: isOptedIn,
+                    isAvailable: false,
+                    hasKnownProblem: true
+                ),
+                isOptedIn: isOptedIn,
+                isConnected: isConnected,
+                isRecommended: false,
+                exclusionReason: .unavailable,
+                exclusionDetail: String(describing: error)
+            )
+            return WorkspacePresentationModel.ApplicationTarget(
+                id: "starship",
+                name: "Starship",
+                systemImage: "sparkles",
+                state: item.managementState,
+                summary: String(describing: error),
+                instanceDetails: [],
+                connectionOptions: [],
+                instances: [item]
+            )
         }
+    }
+
+    private func additionalAdapterTarget(
+        workspace: Workspace,
+        adapter: any ThemeAdapter
+    ) -> WorkspacePresentationModel.ApplicationTarget {
+        let instanceID = TargetInstanceID(rawValue: "\(adapter.id).default")
+        let isConnected = workspace.isConnected(instanceID)
+        let isOptedIn = workspace.isOptedIn(instanceID)
+        let isExperimental = experimentalAdapterIDs.contains(adapter.id)
+        let recommendation = RecommendedTargetPolicy.evaluate(
+            adapterID: adapter.id,
+            isAvailable: true,
+            isExperimental: isExperimental
+        )
+        let exclusionDetail =
+            isExperimental
+            ? "Experimental adapter"
+            : "Adapter '\(adapter.id)' is not in the stable adapter allowlist"
+
+        let state: TargetManagementState =
+            isConnected
+            ? .connected
+            : (isOptedIn ? .setupNeeded : .notSelected)
+
+        let item = WorkspacePresentationModel.TargetInstanceItem(
+            id: instanceID,
+            displayName: adapter.id.capitalized,
+            adapterID: adapter.id,
+            managementState: state,
+            isOptedIn: isOptedIn,
+            isConnected: isConnected,
+            isRecommended: recommendation.isRecommended,
+            exclusionReason: recommendation.exclusionReason,
+            exclusionDetail: exclusionDetail
+        )
+
+        return WorkspacePresentationModel.ApplicationTarget(
+            id: adapter.id,
+            name: adapter.id.capitalized,
+            systemImage: "wrench.and.screwdriver",
+            state: state,
+            summary: isConnected ? "Connected" : exclusionDetail,
+            instanceDetails: [instanceID.rawValue],
+            connectionOptions: isConnected || !isOptedIn
+                ? []
+                : [
+                    WorkspacePresentationModel.ConnectionOption(
+                        id: instanceID,
+                        name: adapter.id.capitalized,
+                        detail: nil
+                    )
+                ],
+            instances: [item]
+        )
     }
 
     private func readyTarget(
@@ -553,33 +1003,136 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         instances: [ConnectedTargetInstance],
         summary: String = "Connected"
     ) -> WorkspacePresentationModel.ApplicationTarget {
-        WorkspacePresentationModel.ApplicationTarget(
+        let items = instances.map { instance in
+            WorkspacePresentationModel.TargetInstanceItem(
+                id: instance.id,
+                displayName: instance.displayName,
+                adapterID: instance.adapterID,
+                managementState: .connected,
+                isOptedIn: true,
+                isConnected: true,
+                isRecommended: RecommendedTargetPolicy.isAllowlisted(adapterID: instance.adapterID)
+            )
+        }
+        return WorkspacePresentationModel.ApplicationTarget(
             id: id,
             name: name,
             systemImage: image,
             state: .connected,
             summary: summary,
             instanceDetails: instances.map(\.displayName),
-            connectionOptions: []
+            connectionOptions: [],
+            instances: items
         )
     }
 
-    private func unavailableTarget(
+    private func unavailableApplicationTarget(
         id: String,
         name: String,
         image: String,
+        adapterID: String,
+        fallbackID: TargetInstanceID,
         detail: String,
-        instances: [String] = []
+        workspace: Workspace
     ) -> WorkspacePresentationModel.ApplicationTarget {
-        WorkspacePresentationModel.ApplicationTarget(
+        let persistedInstances = unavailablePersistedTargetItems(
+            adapterID: adapterID,
+            detail: detail,
+            workspace: workspace
+        )
+        let instances: [WorkspacePresentationModel.TargetInstanceItem]
+        if persistedInstances.isEmpty {
+            instances = [
+                WorkspacePresentationModel.TargetInstanceItem(
+                    id: fallbackID,
+                    displayName: name,
+                    detail: detail,
+                    adapterID: adapterID,
+                    managementState: .unavailable,
+                    isOptedIn: false,
+                    isConnected: false,
+                    isRecommended: false,
+                    exclusionReason: .unavailable,
+                    exclusionDetail: detail
+                )
+            ]
+        } else {
+            instances = persistedInstances
+        }
+        return WorkspacePresentationModel.ApplicationTarget(
             id: id,
             name: name,
             systemImage: image,
-            state: .unavailable,
+            state: aggregateState(for: instances),
             summary: detail,
-            instanceDetails: instances,
-            connectionOptions: []
+            instanceDetails: instances.map(\.displayName),
+            connectionOptions: [],
+            instances: instances
         )
+    }
+
+    private func unavailablePersistedTargetItems(
+        adapterID: String,
+        detail: String,
+        workspace: Workspace
+    ) -> [WorkspacePresentationModel.TargetInstanceItem] {
+        store.targetInstances.filter { $0.adapterID == adapterID }.map { instance in
+            let isConnected = workspace.isConnected(instance.id)
+            let isOptedIn = workspace.isOptedIn(instance.id)
+            return WorkspacePresentationModel.TargetInstanceItem(
+                id: instance.id,
+                displayName: instance.displayName,
+                detail: detail,
+                adapterID: instance.adapterID,
+                managementState: targetManagementState(
+                    isConnected: isConnected,
+                    isOptedIn: isOptedIn,
+                    isAvailable: false,
+                    hasKnownProblem: true
+                ),
+                isOptedIn: isOptedIn,
+                isConnected: isConnected,
+                isRecommended: false,
+                exclusionReason: .unavailable,
+                exclusionDetail: detail
+            )
+        }
+    }
+
+    private func targetManagementState(
+        isConnected: Bool,
+        isOptedIn: Bool,
+        isAvailable: Bool,
+        hasKnownProblem: Bool = false
+    ) -> TargetManagementState {
+        if (isConnected || isOptedIn) && (!isAvailable || hasKnownProblem) {
+            return .needsAttention
+        }
+        if isConnected {
+            return .connected
+        }
+        if isOptedIn {
+            return .setupNeeded
+        }
+        return isAvailable ? .notSelected : .unavailable
+    }
+
+    private func aggregateState(
+        for instances: [WorkspacePresentationModel.TargetInstanceItem]
+    ) -> TargetManagementState {
+        if instances.contains(where: { $0.managementState == .needsAttention }) {
+            return .needsAttention
+        }
+        if instances.contains(where: { $0.managementState == .connected }) {
+            return .connected
+        }
+        if instances.contains(where: { $0.managementState == .setupNeeded }) {
+            return .setupNeeded
+        }
+        if instances.contains(where: { $0.managementState == .notSelected }) {
+            return .notSelected
+        }
+        return .unavailable
     }
 
     private func registerAdapterForPersistedVSCodeTarget(
@@ -662,7 +1215,9 @@ enum ProductionWorkspaceRuntimeError: Error, Equatable {
     case missingVSCodeCompanion
     case vscodeCompanionUnavailable
     case targetNoLongerAvailable(TargetInstanceID)
+    case targetNotOptedIn(TargetInstanceID)
     case engineUnavailable(String)
+    case cannotOptOutConnectedTarget(TargetInstanceID)
 }
 
 private extension String {

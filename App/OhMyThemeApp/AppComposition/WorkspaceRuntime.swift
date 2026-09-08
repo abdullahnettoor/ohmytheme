@@ -11,6 +11,7 @@ protocol WorkspaceRuntime: AnyObject {
 
     func selectFixedThemeVariant(_ variantID: String)
     func start() async throws -> WorkspaceTargetSnapshot
+    func refreshTargets() async throws -> WorkspaceTargetSnapshot
     func reviewConnection(optionID: TargetInstanceID) async throws -> ConnectionPlan
     func connect(
         optionID: TargetInstanceID,
@@ -23,6 +24,15 @@ protocol WorkspaceRuntime: AnyObject {
     func apply(planID: UUID) async throws -> DurableApplyReport
     func undoLast() async throws -> UndoReport
     func undoAvailability() async throws -> UndoAvailability
+
+    func setTargetOptIn(
+        instanceID: TargetInstanceID,
+        isOptedIn: Bool
+    ) async throws -> WorkspaceTargetSnapshot
+    func selectAllRecommended() async throws -> WorkspaceTargetSnapshot
+    func selectRecommended(
+        applicationID: String
+    ) async throws -> WorkspaceTargetSnapshot
 }
 
 struct WorkspaceTargetSnapshot: Equatable {

@@ -13,26 +13,96 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     struct ApplicationTarget: Equatable, Identifiable {
-        enum State: String, Equatable {
-            case connected = "Connected"
-            case setupNeeded = "Setup Needed"
-            case unavailable = "Unavailable"
-        }
+        typealias State = TargetManagementState
 
         let id: String
         let name: String
         let systemImage: String
-        let state: State
+        let state: TargetManagementState
         let summary: String
         let instanceDetails: [String]
         let connectionOptions: [ConnectionOption]
+        let instances: [TargetInstanceItem]
+
+        init(
+            id: String,
+            name: String,
+            systemImage: String,
+            state: TargetManagementState,
+            summary: String,
+            instanceDetails: [String],
+            connectionOptions: [ConnectionOption],
+            instances: [TargetInstanceItem] = []
+        ) {
+            self.id = id
+            self.name = name
+            self.systemImage = systemImage
+            self.state = state
+            self.summary = summary
+            self.instanceDetails = instanceDetails
+            self.connectionOptions = connectionOptions
+            self.instances = instances
+        }
 
         var showsInstanceDetails: Bool {
-            state == .unavailable || connectionOptions.count > 1
+            state == .unavailable || connectionOptions.count > 1 || instances.count > 1
         }
 
         var showsConnectionOptionDetails: Bool {
             state == .unavailable || connectionOptions.count > 1
+        }
+
+        var hasRecommendedInstances: Bool {
+            instances.contains(where: \.isRecommended)
+        }
+
+        var allRecommendedOptedIn: Bool {
+            let rec = instances.filter(\.isRecommended)
+            return !rec.isEmpty && rec.allSatisfy(\.isOptedIn)
+        }
+
+        var canSelectRecommended: Bool {
+            instances.contains { $0.isRecommended && !$0.isOptedIn }
+        }
+    }
+
+    struct TargetInstanceItem: Equatable, Identifiable {
+        let id: TargetInstanceID
+        let displayName: String
+        let detail: String?
+        let adapterID: String
+        let managementState: TargetManagementState
+        let isOptedIn: Bool
+        let isConnected: Bool
+        let isRecommended: Bool
+        let exclusionReason: RecommendationExclusionReason?
+        let exclusionDetail: String?
+        let permissionDisclosure: String?
+
+        init(
+            id: TargetInstanceID,
+            displayName: String,
+            detail: String? = nil,
+            adapterID: String,
+            managementState: TargetManagementState,
+            isOptedIn: Bool,
+            isConnected: Bool,
+            isRecommended: Bool,
+            exclusionReason: RecommendationExclusionReason? = nil,
+            exclusionDetail: String? = nil,
+            permissionDisclosure: String? = nil
+        ) {
+            self.id = id
+            self.displayName = displayName
+            self.detail = detail
+            self.adapterID = adapterID
+            self.managementState = managementState
+            self.isOptedIn = isOptedIn
+            self.isConnected = isConnected
+            self.isRecommended = isRecommended
+            self.exclusionReason = exclusionReason
+            self.exclusionDetail = exclusionDetail
+            self.permissionDisclosure = permissionDisclosure
         }
     }
 
@@ -151,6 +221,14 @@ final class WorkspacePresentationModel: ObservableObject {
             && !workspace.connectedTargetInstances.isEmpty
     }
 
+    var hasRecommendedTargets: Bool {
+        applicationTargets.contains(where: \.hasRecommendedInstances)
+    }
+
+    var canSelectAllRecommended: Bool {
+        applicationTargets.contains(where: \.canSelectRecommended)
+    }
+
     var selectedThemeVariantID: String? { desiredThemePresentation.variantID }
 
     var selectedThemePreview: ThemePreviewData? { desiredThemePresentation.preview }
@@ -228,6 +306,26 @@ final class WorkspacePresentationModel: ObservableObject {
         self.connectionReview = nil
         replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
         await refreshUndoAvailability()
+    }
+
+    func refreshTargets() async throws {
+        let snapshot = try await runtime.refreshTargets()
+        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+    }
+
+    func setTargetOptIn(_ instanceID: TargetInstanceID, isOptedIn: Bool) async throws {
+        let snapshot = try await runtime.setTargetOptIn(instanceID: instanceID, isOptedIn: isOptedIn)
+        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+    }
+
+    func selectAllRecommended() async throws {
+        let snapshot = try await runtime.selectAllRecommended()
+        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+    }
+
+    func selectRecommended(for applicationID: String) async throws {
+        let snapshot = try await runtime.selectRecommended(applicationID: applicationID)
+        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
     }
 
     func selectThemeVariant(_ variantID: String?) {
@@ -435,6 +533,17 @@ final class WorkspacePresentationModel: ObservableObject {
         let groups = Dictionary(grouping: workspace.connectedTargetInstances) { applicationID(for: $0.adapterID) }
         return groups.keys.sorted { targetRank($0) < targetRank($1) }.map { applicationID in
             let instances = groups[applicationID] ?? []
+            let targetItems = instances.map { instance in
+                TargetInstanceItem(
+                    id: instance.id,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    managementState: .connected,
+                    isOptedIn: true,
+                    isConnected: true,
+                    isRecommended: RecommendedTargetPolicy.isAllowlisted(adapterID: instance.adapterID)
+                )
+            }
             return ApplicationTarget(
                 id: applicationID,
                 name: applicationName(applicationID),
@@ -442,7 +551,8 @@ final class WorkspacePresentationModel: ObservableObject {
                 state: .connected,
                 summary: instances.count == 1 ? "Connected" : "\(instances.count) Target Instances connected",
                 instanceDetails: instances.map(\.displayName),
-                connectionOptions: []
+                connectionOptions: [],
+                instances: targetItems
             )
         }
     }

@@ -145,21 +145,27 @@ struct DurableOperationsTests {
             adapters: [adapter],
             persistence: fixture.store
         )
-        let workspace = Fixtures.workspace(recordingInstances: [])
         let instance = ConnectedTargetInstance(
             id: TargetInstanceID(rawValue: "recording.baseline"),
             displayName: "Recording",
             adapterID: "recording"
         )
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            targetOptIns: [instance.id]
+        )
+        try fixture.store.saveWorkspace(workspace)
 
         _ = try await engine.connect(instance: instance, workspace: workspace)
 
-        // Baseline must exist even though the connect call was interrupted before writing.
+        // Baseline and user intent must survive even though connect was interrupted before writing.
         let baseline = try fixture.store.journalLoadConnectionBaseline(
             targetInstanceID: instance.id
         )
         #expect(baseline != nil)
         #expect(baseline?.adapterID == "recording")
+        #expect(try fixture.store.loadWorkspace().workspace.isOptedIn(instance.id))
     }
 
     // MARK: AC #2 — One mutating operation at a time; deterministic order

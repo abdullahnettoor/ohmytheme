@@ -23,12 +23,20 @@ public struct PersistedTargetInstance: Codable, Equatable, Sendable, Identifiabl
     public let displayName: String
     public let adapterID: String
     public let isConnected: Bool
+    public let isOptedIn: Bool
 
-    public init(id: TargetInstanceID, displayName: String, adapterID: String, isConnected: Bool) {
+    public init(
+        id: TargetInstanceID,
+        displayName: String,
+        adapterID: String,
+        isConnected: Bool,
+        isOptedIn: Bool = false
+    ) {
         self.id = id
         self.displayName = displayName
         self.adapterID = adapterID
         self.isConnected = isConnected
+        self.isOptedIn = isConnected || isOptedIn
     }
 }
 
@@ -148,6 +156,24 @@ public final class PersistenceStore: @unchecked Sendable {
         migrator.registerMigration("add-durable-operation-journal") { database in
             try Self.createDurableOperationTables(in: database)
         }
+        migrator.registerMigration("add-target-opt-ins") { database in
+            guard try database.tableExists("workspaces") else { return }
+            if try !database.tableExists("target_opt_ins") {
+                try database.create(table: "target_opt_ins") { table in
+                    table.column("workspace_id", .text).notNull()
+                        .references("workspaces", onDelete: .cascade)
+                    table.column("target_instance_id", .text).notNull()
+                    table.primaryKey(["workspace_id", "target_instance_id"])
+                }
+            }
+            if try database.tableExists("target_instances") {
+                try database.execute(
+                    sql: """
+                            INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id)
+                            SELECT workspace_id, id FROM target_instances WHERE is_connected = 1
+                        """)
+            }
+        }
         try migrator.migrate(database)
     }
 
@@ -237,14 +263,36 @@ public final class PersistenceStore: @unchecked Sendable {
             let connected = targets.filter(\.isConnected).map {
                 ConnectedTargetInstance(id: $0.id, displayName: $0.displayName, adapterID: $0.adapterID)
             }
+            let optInIDs: Set<TargetInstanceID>
+            if try database.tableExists("target_opt_ins") {
+                optInIDs = try Set(
+                    String.fetchAll(
+                        database,
+                        sql: "SELECT target_instance_id FROM target_opt_ins WHERE workspace_id = ?",
+                        arguments: [workspaceID.rawValue]
+                    ).map { TargetInstanceID(rawValue: $0) }
+                )
+            } else {
+                optInIDs = []
+            }
+            let allOptIns = optInIDs.union(connected.map(\.id))
             return PersistedWorkspace(
                 workspace: Workspace(
                     id: workspaceID,
                     displayName: workspaceRow["display_name"],
                     connectedTargetInstances: connected,
+                    targetOptIns: allOptIns,
                     themeAssignment: assignment
                 ),
-                targetInstances: targets
+                targetInstances: targets.map {
+                    PersistedTargetInstance(
+                        id: $0.id,
+                        displayName: $0.displayName,
+                        adapterID: $0.adapterID,
+                        isConnected: $0.isConnected,
+                        isOptedIn: allOptIns.contains($0.id)
+                    )
+                }
             )
         }
     }
@@ -299,15 +347,51 @@ public final class PersistenceStore: @unchecked Sendable {
                             id: instance.id,
                             displayName: instance.displayName,
                             adapterID: instance.adapterID,
-                            isConnected: true
+                            isConnected: true,
+                            isOptedIn: true
                         ),
                         workspaceID: workspace.id,
                         in: database
                     )
                 }
             }
+            if try database.tableExists("target_opt_ins") {
+                try database.execute(
+                    sql: "DELETE FROM target_opt_ins WHERE workspace_id = ?",
+                    arguments: [workspace.id.rawValue]
+                )
+                let allOptIns = workspace.targetOptIns.union(workspace.connectedTargetInstances.map(\.id))
+                for optIn in allOptIns {
+                    try database.execute(
+                        sql: "INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id) VALUES (?, ?)",
+                        arguments: [workspace.id.rawValue, optIn.rawValue]
+                    )
+                }
+            }
         }
         didCommit(.workspaceSaved)
+    }
+
+    public func setTargetOptIn(
+        workspaceID: WorkspaceID,
+        targetInstanceID: TargetInstanceID,
+        isOptedIn: Bool
+    ) throws {
+        try database.write { database in
+            guard try database.tableExists("target_opt_ins") else { return }
+            if isOptedIn {
+                try database.execute(
+                    sql: "INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id) VALUES (?, ?)",
+                    arguments: [workspaceID.rawValue, targetInstanceID.rawValue]
+                )
+            } else {
+                try database.execute(
+                    sql: "DELETE FROM target_opt_ins WHERE workspace_id = ? AND target_instance_id = ?",
+                    arguments: [workspaceID.rawValue, targetInstanceID.rawValue]
+                )
+            }
+        }
+        didCommit(.targetMembershipSaved)
     }
 
     public func setTargetInstance(
@@ -322,11 +406,18 @@ public final class PersistenceStore: @unchecked Sendable {
                     id: instance.id,
                     displayName: instance.displayName,
                     adapterID: instance.adapterID,
-                    isConnected: connected
+                    isConnected: connected,
+                    isOptedIn: connected
                 ),
                 workspaceID: workspace.id,
                 in: database
             )
+            if connected, try database.tableExists("target_opt_ins") {
+                try database.execute(
+                    sql: "INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id) VALUES (?, ?)",
+                    arguments: [workspace.id.rawValue, instance.id.rawValue]
+                )
+            }
         }
         didCommit(.targetMembershipSaved)
     }
@@ -373,6 +464,11 @@ public final class PersistenceStore: @unchecked Sendable {
             )
             try Self.save(record, in: database)
         }
+        didCommit(.connectionBaselineSaved)
+    }
+
+    public func saveConnectionPreparation(record: JournaledRecord) throws {
+        try journalSaveRecord(record)
         didCommit(.connectionPreparationSaved)
     }
 
@@ -395,11 +491,25 @@ public final class PersistenceStore: @unchecked Sendable {
                     id: instance.id,
                     displayName: instance.displayName,
                     adapterID: instance.adapterID,
-                    isConnected: connected
+                    isConnected: connected,
+                    isOptedIn: connected
                 ),
                 workspaceID: workspace.id,
                 in: database
             )
+            if try database.tableExists("target_opt_ins") {
+                if connected {
+                    try database.execute(
+                        sql: "INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id) VALUES (?, ?)",
+                        arguments: [workspace.id.rawValue, instance.id.rawValue]
+                    )
+                } else {
+                    try database.execute(
+                        sql: "DELETE FROM target_opt_ins WHERE workspace_id = ? AND target_instance_id = ?",
+                        arguments: [workspace.id.rawValue, instance.id.rawValue]
+                    )
+                }
+            }
             if removeBaseline {
                 try database.execute(
                     sql: "DELETE FROM connection_baselines WHERE target_instance_id = ?",
@@ -425,6 +535,22 @@ public final class PersistenceStore: @unchecked Sendable {
                 sql: "UPDATE target_instances SET is_connected = ? WHERE id = ?",
                 arguments: [connected, targetInstanceID.rawValue]
             )
+            if try database.tableExists("target_opt_ins") {
+                if connected {
+                    try database.execute(
+                        sql: """
+                                INSERT OR IGNORE INTO target_opt_ins (workspace_id, target_instance_id)
+                                SELECT workspace_id, id FROM target_instances WHERE id = ?
+                            """,
+                        arguments: [targetInstanceID.rawValue]
+                    )
+                } else {
+                    try database.execute(
+                        sql: "DELETE FROM target_opt_ins WHERE target_instance_id = ?",
+                        arguments: [targetInstanceID.rawValue]
+                    )
+                }
+            }
         }
         didCommit(.operationAndMembershipTransitioned)
     }
@@ -571,8 +697,7 @@ public final class PersistenceStore: @unchecked Sendable {
     private static func save(_ record: JournaledRecord, in database: Database) throws {
         try database.execute(
             sql: """
-                INSERT OR REPLACE INTO operation_records (
-                    operation_id, target_instance_id, ordinal,
+                INSERT OR REPLACE INTO operation_records (\n                    operation_id, target_instance_id, ordinal,
                     adapter_id, adapter_version, capability_id, phase,
                     intended_change_digest, stale_state_token,
                     plan_digest, receipt_json, detail
