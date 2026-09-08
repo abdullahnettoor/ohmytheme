@@ -7,7 +7,7 @@ import ThemeModel
 
 @Suite("Theme engine")
 struct ThemeEngineTests {
-    @Test("Preparation creates a preview without applying the recording target")
+    @Test("Preparation creates an Apply Plan without applying the recording target")
     func preparationIsReadOnly() async throws {
         let adapter = RecordingThemeAdapter()
         let engine = ThemeEngine(
@@ -27,29 +27,31 @@ struct ThemeEngineTests {
             ]
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        #expect(preview.variantID == "test-pack/dark")
-        #expect(preview.sourceType == .generated)
-        #expect(preview.sourceRevision == "reviewed-revision")
-        #expect(preview.activationReach == .currentInstances)
-        #expect(preview.setupNeeds.isEmpty)
-        #expect(preview.conflicts.isEmpty)
-        #expect(preview.unavailableCapabilities.isEmpty)
-        #expect(preview.userActions.isEmpty)
-        #expect(preview.targetPlans.count == 1)
-        #expect(preview.targetPlans[0].payload.adapterID == "recording")
-        #expect(preview.targetPlans[0].payload.adapterVersion == "1")
-        #expect(preview.targetPlans[0].payload.payloadVersion == "1")
+        #expect(plan.variantID == "test-pack/dark")
+        #expect(plan.sourceType == .generated)
+        #expect(plan.sourceRevision == "reviewed-revision")
+        #expect(plan.activationReach == .currentInstances)
+        #expect(plan.setupNeeds.isEmpty)
+        #expect(plan.conflicts.isEmpty)
+        #expect(plan.unavailableCapabilities.isEmpty)
+        #expect(plan.userActions.isEmpty)
+        #expect(plan.targetPlans.count == 1)
+        #expect(plan.targetPlans[0].payload.adapterID == "recording")
+        #expect(plan.targetPlans[0].payload.adapterVersion == "1")
+        #expect(plan.targetPlans[0].payload.payloadVersion == "1")
         #expect(await adapter.appliedArtifacts().isEmpty)
 
-        let serializedPreview = try JSONEncoder().encode(preview)
-        let restoredPreview = try JSONDecoder().decode(ThemePreview.self, from: serializedPreview)
-        #expect(restoredPreview == preview)
+        let serializedPlan = try JSONEncoder().encode(plan)
+        let restoredPlan = try JSONDecoder().decode(ApplyPlan.self, from: serializedPlan)
+        #expect(restoredPlan == plan)
+        let restoredLegacyPreview = try JSONDecoder().decode(ThemePreview.self, from: serializedPlan)
+        #expect(restoredLegacyPreview == plan)
     }
 
-    @Test("Applying a preview sends the prepared artifact and groups the report by target")
-    func applyingPreviewUsesPreparedArtifact() async throws {
+    @Test("Applying a plan sends the prepared artifact and groups the report by target")
+    func applyingPlanUsesPreparedArtifact() async throws {
         let adapter = RecordingThemeAdapter()
         let engine = ThemeEngine(
             packs: [testPack],
@@ -67,11 +69,11 @@ struct ThemeEngineTests {
             connectedTargetInstances: [target]
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.apply(previewID: preview.id)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.apply(planID: plan.id)
         let artifacts = await adapter.appliedArtifacts()
 
-        #expect(artifacts == [preview.targetPlans[0].artifact])
+        #expect(artifacts == [plan.targetPlans[0].artifact])
         #expect(report.outcomes.count == 1)
         #expect(report.outcomes[0].targetInstanceID == target.id)
         #expect(report.outcomes[0].configurationState == .updated)
@@ -109,10 +111,10 @@ struct ThemeEngineTests {
             ]
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        #expect(preview.sourceType == .upstream)
-        #expect(preview.targetPlans[0].artifact == upstreamArtifact)
+        #expect(plan.sourceType == .upstream)
+        #expect(plan.targetPlans[0].artifact == upstreamArtifact)
     }
 
     @Test("Unavailable targets remain reportable during apply")
@@ -130,10 +132,10 @@ struct ThemeEngineTests {
             ]
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.apply(previewID: preview.id)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.apply(planID: plan.id)
 
-        #expect(preview.unavailableCapabilities == ["theme"])
+        #expect(plan.unavailableCapabilities == ["theme"])
         #expect(report.outcomes.count == 1)
         #expect(report.outcomes[0].configurationState == .unavailable)
         #expect(report.outcomes[0].capabilityID == "theme")
@@ -148,11 +150,11 @@ struct ThemeEngineTests {
         )
         let workspace = Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [])
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        #expect(preview.sourceType == .unavailable)
-        #expect(preview.activationReach == .unavailable)
-        #expect(preview.targetPlans.isEmpty)
+        #expect(plan.sourceType == .unavailable)
+        #expect(plan.activationReach == .unavailable)
+        #expect(plan.targetPlans.isEmpty)
     }
 
     @Test("Require upstream uses a valid target-specific pinned artifact")
@@ -185,10 +187,10 @@ struct ThemeEngineTests {
             ]
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        #expect(preview.sourceType == .upstream)
-        #expect(preview.targetPlans[0].artifact == upstreamArtifact)
+        #expect(plan.sourceType == .upstream)
+        #expect(plan.targetPlans[0].artifact == upstreamArtifact)
     }
 
     @Test("Preparation persists the exact adapter payload envelope when storage is configured")
@@ -218,18 +220,44 @@ struct ThemeEngineTests {
             ]
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
         let envelope = try persistence.loadPayloadEnvelope(
-            id: "\(preview.id.uuidString).recording.persisted"
+            id: "\(plan.id.uuidString).recording.persisted"
         )
 
         #expect(envelope.adapterID == "recording")
-        #expect(envelope.payload == preview.targetPlans[0].payload.payload)
+        #expect(envelope.payload == plan.targetPlans[0].payload.payload)
         #expect(
             try persistence.loadRestorationContent(forEnvelopeID: envelope.id)
                 == Data("recording-target-before-theme".utf8)
         )
     }
+    @Test("Legacy ThemePreview typealias and deprecated engine interfaces remain fully backward compatible")
+    func legacyPreviewCompatibility() async throws {
+        let adapter = RecordingThemeAdapter()
+        let engine = ThemeEngine(packs: [testPack], adapters: [adapter])
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.legacy"),
+                    displayName: "Recording Target",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+        let legacyPreview: ThemePreview = try await engine.prepare(workspace: workspace)
+        #expect(await engine.previewsInFlight[legacyPreview.id] != nil)
+        #expect(ThemeEngineError.previewNotFound(legacyPreview.id) == ThemeEngineError.planNotFound(legacyPreview.id))
+        #expect(ThemeEngineError.previewWorkspaceChanged(legacyPreview.id) == ThemeEngineError.planWorkspaceChanged(legacyPreview.id))
+
+        let report = try await engine.apply(previewID: legacyPreview.id)
+        #expect(report.outcomes.count == 1)
+        #expect(report.outcomes[0].configurationState == .updated)
+    }
+
 }
 
 private let testPack = ThemePack(

@@ -336,7 +336,7 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter {
         }
         throw WriteBoundaryConflict(
             targetInstanceID: plan.targetInstanceID,
-            detail: "System appearance changed since the preview was prepared."
+            detail: "System appearance changed since the plan was prepared."
         )
     }
 

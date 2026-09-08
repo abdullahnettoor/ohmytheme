@@ -50,8 +50,8 @@ struct UndoLastApplyTests {
         )
 
         #expect(try await engine.undoAvailability(workspace: workspace) == .unavailable)
-        let preview = try await engine.prepare(workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(
             try await engine.undoAvailability(workspace: workspace)
@@ -84,8 +84,8 @@ struct UndoLastApplyTests {
             themeAssignment: .fixed(variantID: "test-pack/dark")
         )
 
-        let preview = try await engine.prepare(workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(report.outcomes.first?.configurationState == .permissionRequired)
         #expect(report.outcomes.first?.rollbackState == .notNeeded)
@@ -106,8 +106,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.undo"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         // World is now the applied artifact.
         let worldAfterApply = await adapter.currentWorldBytes()
         #expect(worldAfterApply != Data("before-theme".utf8))
@@ -133,11 +133,11 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.no-change"])
-        let firstPreview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let firstReport = try await engine.applyDurable(previewID: firstPreview.id, workspace: workspace)
+        let firstPlan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let firstReport = try await engine.applyDurable(planID: firstPlan.id, workspace: workspace)
 
-        let secondPreview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let secondReport = try await engine.applyDurable(previewID: secondPreview.id, workspace: workspace)
+        let secondPlan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let secondReport = try await engine.applyDurable(planID: secondPlan.id, workspace: workspace)
 
         #expect(secondReport.outcomes[0].configurationState == .unchanged)
         let lat = try fixture.store.journalFindLastAppliedTransaction(workspaceID: workspace.id)
@@ -158,8 +158,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.a", "recording.b", "recording.c"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         let undo = try await engine.undoLast(workspace: workspace)
         // Only the two changed targets are eligible for undo. The failed one is not.
@@ -181,8 +181,8 @@ struct UndoLastApplyTests {
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.first"])
         // First apply: successful → becomes LAT.
-        let firstPreview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let firstReport = try await engine.applyDurable(previewID: firstPreview.id, workspace: workspace)
+        let firstPlan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let firstReport = try await engine.applyDurable(planID: firstPlan.id, workspace: workspace)
 
         // Second apply: everyone fails → LAT must remain the first.
         let allFailing = FaultyRecordingAdapter(
@@ -194,8 +194,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let secondWorkspace = Fixtures.workspace(recordingInstances: ["recording.second"])
-        let secondPreview = try await engine2.prepare(themeVariantID: "test-pack/dark", workspace: secondWorkspace)
-        _ = try await engine2.applyDurable(previewID: secondPreview.id, workspace: secondWorkspace)
+        let secondPlan = try await engine2.prepare(themeVariantID: "test-pack/dark", workspace: secondWorkspace)
+        _ = try await engine2.applyDurable(planID: secondPlan.id, workspace: secondWorkspace)
 
         // Query the LAT — it must still be the first apply.
         let lat = try fixture.store.journalFindLastAppliedTransaction(workspaceID: workspace.id)
@@ -214,8 +214,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.old"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let latReport = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let latReport = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // Simulate a new apply operation that has only reached `prepared` state.
         let inflight = try fixture.store.journalStartOperation(
@@ -241,8 +241,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.journal"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let undo = try await engine.undoLast(workspace: workspace)
 
         let operation = try fixture.store.journalLoadOperation(id: undo.operationID)
@@ -265,8 +265,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.external"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // External edit — the world no longer matches the intended after-change.
         await adapter.mutateWorldExternally(Data("someone-else-took-over".utf8))
@@ -295,8 +295,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.retry"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let applyReport = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let applyReport = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         await adapter.mutateWorldExternally(Data("external".utf8))
         _ = try await engine.undoLast(workspace: workspace)
@@ -324,8 +324,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.interrupt"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // Interrupt the rollback partway.
         await adapter.setInterruption(.beforeRollback, enabled: true)
@@ -357,8 +357,8 @@ struct UndoLastApplyTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.missing-receipt"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let appliedRecord = try #require(
             try fixture.store.journalLoadRecords(operationID: apply.operationID).first
         )

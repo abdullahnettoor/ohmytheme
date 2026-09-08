@@ -327,9 +327,9 @@ struct MacOSAppearanceAdapterTests {
             persistence: durable.store
         )
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        #expect(preview.userActions.contains { $0.detail.contains("Automation access") })
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        #expect(plan.userActions.contains { $0.detail.contains("Automation access") })
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let outcomes = Dictionary(uniqueKeysWithValues: report.outcomes.map { ($0.targetInstanceID, $0) })
 
         #expect(outcomes[appearance.instance.id]?.configurationState == .permissionRequired)
@@ -344,7 +344,7 @@ struct MacOSAppearanceAdapterTests {
             for: .executionFailed(code: -1, message: "boom")
         )
 
-        #expect(unavailable.preview.setupNeeds.isEmpty)
+        #expect(unavailable.plan.setupNeeds.isEmpty)
         #expect(unavailable.outcome.configurationState == .unavailable)
         #expect(unavailable.outcome.detail?.contains("unavailable") == true)
         #expect(failed.outcome.configurationState == .failed)
@@ -353,7 +353,7 @@ struct MacOSAppearanceAdapterTests {
 
     private func appearanceOutcome(
         for failure: AppleScriptFailure
-    ) async throws -> (preview: ThemePreview, outcome: TargetCapabilityOutcome) {
+    ) async throws -> (plan: ApplyPlan, outcome: TargetCapabilityOutcome) {
         let fixture = AppearanceFixture(initialDarkMode: false)
         fixture.platform.readFailure = failure
         let durable = try DurableAppearanceFixture()
@@ -363,12 +363,12 @@ struct MacOSAppearanceAdapterTests {
             adapters: [fixture.adapter],
             persistence: durable.store
         )
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: "test-pack/dark",
             workspace: workspace
         )
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
-        return (preview, report.outcomes[0])
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
+        return (plan, report.outcomes[0])
     }
 
     @Test("Undo restores the pre-apply appearance only while the intended state is owned")

@@ -497,7 +497,7 @@ public actor VSCodeConnectionAdapter: RecoverableConnectionAdapter, RecoverableA
         guard current.configuredSetting == payload.request.expectedSetting else {
             throw WriteBoundaryConflict(
                 targetInstanceID: plan.targetInstanceID,
-                detail: "VS Code's configured theme changed after the preview was prepared."
+                detail: "VS Code's configured theme changed after the plan was prepared."
             )
         }
     }

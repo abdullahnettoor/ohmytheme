@@ -283,7 +283,7 @@ public struct TargetPreparationFailure: Codable, Equatable, Sendable {
     }
 }
 
-public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
+public struct ApplyPlan: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let workspaceID: WorkspaceID
     public let targetInstanceIDs: [TargetInstanceID]
@@ -338,6 +338,9 @@ public struct ThemePreview: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+@available(*, deprecated, renamed: "ApplyPlan")
+public typealias ThemePreview = ApplyPlan
+
 public protocol ThemeAdapter: Sendable {
     var id: String { get }
     var version: String { get }
@@ -354,10 +357,20 @@ public protocol ThemeAdapter: Sendable {
 public enum ThemeEngineError: Error, Equatable, Sendable {
     case variantNotFound(String)
     case fixedThemeAssignmentRequired
-    case previewNotFound(UUID)
-    case previewWorkspaceChanged(UUID)
+    case planNotFound(UUID)
+    case planWorkspaceChanged(UUID)
     case engineUnavailable
     case applyInProgress
+
+    @available(*, deprecated, renamed: "planNotFound")
+    public static func previewNotFound(_ id: UUID) -> ThemeEngineError {
+        .planNotFound(id)
+    }
+
+    @available(*, deprecated, renamed: "planWorkspaceChanged")
+    public static func previewWorkspaceChanged(_ id: UUID) -> ThemeEngineError {
+        .planWorkspaceChanged(id)
+    }
 }
 
 public actor ThemeEngine {
@@ -367,7 +380,14 @@ public actor ThemeEngine {
     private let sourcePolicy: ThemeSourcePolicy
     private let upstreamArtifacts: [String: PinnedUpstreamArtifact]
     internal let persistenceForOperations: PersistenceStore?
-    internal var previewsInFlight: [UUID: ThemePreview] = [:]
+    internal var plansInFlight: [UUID: ApplyPlan] = [:]
+
+    @available(*, deprecated, renamed: "plansInFlight")
+    internal var previewsInFlight: [UUID: ApplyPlan] {
+        get { plansInFlight }
+        set { plansInFlight = newValue }
+    }
+
     private var isApplying = false
     internal var currentOperationID: UUID?
     internal var pendingCancellations: Set<UUID> = []
@@ -404,7 +424,7 @@ public actor ThemeEngine {
         }
     }
 
-    public func prepare(workspace: Workspace) async throws -> ThemePreview {
+    public func prepare(workspace: Workspace) async throws -> ApplyPlan {
         guard case .fixed(let themeVariantID) = workspace.themeAssignment else {
             throw ThemeEngineError.fixedThemeAssignmentRequired
         }
@@ -415,7 +435,7 @@ public actor ThemeEngine {
         )
     }
 
-    func prepare(themeVariantID: String, workspace: Workspace) async throws -> ThemePreview {
+    func prepare(themeVariantID: String, workspace: Workspace) async throws -> ApplyPlan {
         try await prepare(
             themeVariantID: themeVariantID,
             workspace: workspace,
@@ -427,7 +447,7 @@ public actor ThemeEngine {
         themeVariantID: String,
         workspace: Workspace,
         requiredThemeAssignment: ThemeAssignment?
-    ) async throws -> ThemePreview {
+    ) async throws -> ApplyPlan {
         guard let packAndVariant = findVariant(themeVariantID) else {
             throw ThemeEngineError.variantNotFound(themeVariantID)
         }
@@ -438,7 +458,7 @@ public actor ThemeEngine {
             resolvedSource == nil,
             workspace.connectedTargetInstances.isEmpty
         {
-            let preview = ThemePreview(
+            let plan = ApplyPlan(
                 id: UUID(),
                 workspaceID: workspace.id,
                 targetInstanceIDs: orderedInstances.map(\.id),
@@ -455,13 +475,13 @@ public actor ThemeEngine {
                 userActions: [],
                 targetPlans: []
             )
-            previewsInFlight[preview.id] = preview
-            return preview
+            plansInFlight[plan.id] = plan
+            return plan
         }
         let source =
             resolvedSource
             ?? ResolvedSource(type: .unavailable, revision: pack.source.revision, artifact: nil)
-        let previewID = UUID()
+        let planID = UUID()
 
         var targetPlans: [AdapterPlan] = []
         var setupNeeds: [UserAction] = []
@@ -515,7 +535,7 @@ public actor ThemeEngine {
                     plan = try await adapter.prepareApply(instance: instance, theme: preparedTheme)
                 }
                 if let persistence = persistenceForOperations {
-                    try persist(plan: plan, previewID: previewID, persistence: persistence)
+                    try persist(plan: plan, planID: planID, persistence: persistence)
                 }
                 targetPlans.append(plan)
                 setupNeeds.append(contentsOf: plan.setupNeeds)
@@ -538,28 +558,28 @@ public actor ThemeEngine {
             setupNeeds.append(
                 UserAction(
                     title: "Connect an app",
-                    detail: "This preview has no Target Instances to change."
+                    detail: "This plan has no Target Instances to change."
                 )
             )
             userActions.append(contentsOf: setupNeeds)
         }
 
         let sourceTypes = Set(targetPlans.map(\.sourceType))
-        let previewSourceType: ThemeSourceKind
+        let planSourceType: ThemeSourceKind
         if sourceTypes.count == 1, let sourceType = sourceTypes.first {
-            previewSourceType = sourceType
+            planSourceType = sourceType
         } else if sourceTypes.isEmpty {
-            previewSourceType = source.type
+            planSourceType = source.type
         } else {
-            previewSourceType = .mixed
+            planSourceType = .mixed
         }
-        let preview = ThemePreview(
-            id: previewID,
+        let plan = ApplyPlan(
+            id: planID,
             workspaceID: workspace.id,
             targetInstanceIDs: orderedInstances.map(\.id),
             requiredThemeAssignment: requiredThemeAssignment,
             variantID: variant.qualifiedID,
-            sourceType: previewSourceType,
+            sourceType: planSourceType,
             sourceRevision: pack.source.revision,
             attribution: pack.source.attribution,
             activationReach: targetPlans.isEmpty
@@ -575,57 +595,57 @@ public actor ThemeEngine {
             userActions: userActions,
             targetPlans: targetPlans
         )
-        previewsInFlight[preview.id] = preview
-        return preview
+        plansInFlight[plan.id] = plan
+        return plan
     }
 
-    public func apply(previewID: UUID) async throws -> ApplyReport {
+    public func apply(planID: UUID) async throws -> ApplyReport {
         guard !isApplying else {
             throw ThemeEngineError.applyInProgress
         }
-        guard let preview = previewsInFlight.removeValue(forKey: previewID) else {
-            throw ThemeEngineError.previewNotFound(previewID)
+        guard let plan = plansInFlight.removeValue(forKey: planID) else {
+            throw ThemeEngineError.planNotFound(planID)
         }
         isApplying = true
         defer { isApplying = false }
 
-        var outcomes = preview.targetPlans.map { plan in
+        var outcomes = plan.targetPlans.map { targetPlan in
             TargetCapabilityOutcome(
-                targetInstanceID: plan.targetInstanceID,
-                adapterID: plan.adapterID,
-                capabilityID: plan.capabilityID,
-                sourceType: plan.sourceType,
-                sourceRevision: plan.sourceRevision,
+                targetInstanceID: targetPlan.targetInstanceID,
+                adapterID: targetPlan.adapterID,
+                capabilityID: targetPlan.capabilityID,
+                sourceType: targetPlan.sourceType,
+                sourceRevision: targetPlan.sourceRevision,
                 configurationState: .failed,
                 runningInstanceReach: .unavailable,
                 detail: "The Target Instance did not apply."
             )
         }
-        for (index, plan) in preview.targetPlans.enumerated() {
-            guard let adapter = adaptersByID[plan.adapterID] else {
+        for (index, targetPlan) in plan.targetPlans.enumerated() {
+            guard let adapter = adaptersByID[targetPlan.adapterID] else {
                 outcomes[index] = TargetCapabilityOutcome(
-                    targetInstanceID: plan.targetInstanceID,
-                    adapterID: plan.adapterID,
-                    capabilityID: plan.capabilityID,
-                    sourceType: plan.sourceType,
-                    sourceRevision: plan.sourceRevision,
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: targetPlan.capabilityID,
+                    sourceType: targetPlan.sourceType,
+                    sourceRevision: targetPlan.sourceRevision,
                     configurationState: .unavailable,
                     runningInstanceReach: .unavailable,
                     detail: "The adapter is unavailable."
                 )
                 continue
             }
-            guard plan.adapterID == plan.payload.adapterID,
-                plan.adapterVersion == plan.payload.adapterVersion,
-                plan.adapterVersion == adapter.version,
-                plan.payload.payloadVersion == adapter.payloadVersion
+            guard targetPlan.adapterID == targetPlan.payload.adapterID,
+                targetPlan.adapterVersion == targetPlan.payload.adapterVersion,
+                targetPlan.adapterVersion == adapter.version,
+                targetPlan.payload.payloadVersion == adapter.payloadVersion
             else {
                 outcomes[index] = TargetCapabilityOutcome(
-                    targetInstanceID: plan.targetInstanceID,
-                    adapterID: plan.adapterID,
-                    capabilityID: plan.capabilityID,
-                    sourceType: plan.sourceType,
-                    sourceRevision: plan.sourceRevision,
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: targetPlan.capabilityID,
+                    sourceType: targetPlan.sourceType,
+                    sourceRevision: targetPlan.sourceRevision,
                     configurationState: .failed,
                     runningInstanceReach: .unavailable,
                     detail: "The adapter payload envelope is incompatible."
@@ -633,13 +653,13 @@ public actor ThemeEngine {
                 continue
             }
             do {
-                let receipt = try await adapter.apply(plan)
+                let receipt = try await adapter.apply(targetPlan)
                 outcomes[index] = TargetCapabilityOutcome(
-                    targetInstanceID: plan.targetInstanceID,
-                    adapterID: plan.adapterID,
-                    capabilityID: plan.capabilityID,
-                    sourceType: plan.sourceType,
-                    sourceRevision: plan.sourceRevision,
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: targetPlan.capabilityID,
+                    sourceType: targetPlan.sourceType,
+                    sourceRevision: targetPlan.sourceRevision,
                     configurationState: receipt.configurationState,
                     runningInstanceReach: receipt.runningInstanceReach,
                     detail: receipt.detail
@@ -647,11 +667,11 @@ public actor ThemeEngine {
             } catch {
                 let failure = Self.capabilityOutcome(for: error, fallbackState: .failed)
                 outcomes[index] = TargetCapabilityOutcome(
-                    targetInstanceID: plan.targetInstanceID,
-                    adapterID: plan.adapterID,
-                    capabilityID: plan.capabilityID,
-                    sourceType: plan.sourceType,
-                    sourceRevision: plan.sourceRevision,
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: targetPlan.capabilityID,
+                    sourceType: targetPlan.sourceType,
+                    sourceRevision: targetPlan.sourceRevision,
                     configurationState: failure.configurationState,
                     runningInstanceReach: failure.activationReach,
                     detail: failure.detail
@@ -659,32 +679,37 @@ public actor ThemeEngine {
             }
         }
         outcomes.append(
-            contentsOf: preview.unavailableTargetInstanceIDs.map {
+            contentsOf: plan.unavailableTargetInstanceIDs.map {
                 TargetCapabilityOutcome(
                     targetInstanceID: $0,
                     adapterID: "unavailable",
                     capabilityID: "theme",
-                    sourceType: preview.sourceType,
-                    sourceRevision: preview.sourceRevision,
+                    sourceType: plan.sourceType,
+                    sourceRevision: plan.sourceRevision,
                     configurationState: .unavailable,
                     runningInstanceReach: .unavailable,
                     detail: "No compatible adapter prepared this Target Instance."
                 )
             })
         outcomes.append(
-            contentsOf: preview.preparationFailures.map {
+            contentsOf: plan.preparationFailures.map {
                 TargetCapabilityOutcome(
                     targetInstanceID: $0.targetInstanceID,
                     adapterID: $0.adapterID,
                     capabilityID: "theme",
-                    sourceType: preview.sourceType,
-                    sourceRevision: preview.sourceRevision,
+                    sourceType: plan.sourceType,
+                    sourceRevision: plan.sourceRevision,
                     configurationState: .failed,
                     runningInstanceReach: .unavailable,
                     detail: $0.detail
                 )
             })
-        return ApplyReport(variantID: preview.variantID, outcomes: outcomes)
+        return ApplyReport(variantID: plan.variantID, outcomes: outcomes)
+    }
+
+    @available(*, deprecated, renamed: "apply(planID:)")
+    public func apply(previewID: UUID) async throws -> ApplyReport {
+        try await apply(planID: previewID)
     }
 
     private func findVariant(_ qualifiedID: String) -> (ThemePack, ThemeVariant)? {
@@ -693,9 +718,9 @@ public actor ThemeEngine {
             .first { $0.1.qualifiedID == qualifiedID }
     }
 
-    private func persist(plan: AdapterPlan, previewID: UUID, persistence: PersistenceStore) throws {
+    private func persist(plan: AdapterPlan, planID: UUID, persistence: PersistenceStore) throws {
         let envelope = PersistedPayloadEnvelope(
-            id: "\(previewID.uuidString).\(plan.targetInstanceID.rawValue)",
+            id: "\(planID.uuidString).\(plan.targetInstanceID.rawValue)",
             targetInstanceID: plan.targetInstanceID,
             adapterID: plan.adapterID,
             adapterVersion: plan.adapterVersion,

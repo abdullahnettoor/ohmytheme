@@ -2,6 +2,8 @@
 
 Research date: 2026-08-31
 
+> The platform findings remain useful, but the menu-bar-primary product recommendation is superseded by [Dedicated macOS app and batch configuration direction](./dedicated-macos-app-and-batch-configuration.md) and [ADR 0011](../adr/0011-window-first-macos-app.md).
+
 ## Scope and source standard
 
 This note assesses a native macOS menu-bar app that applies one semantic theme across macOS, Ghostty, and Visual Studio Code. It uses Apple, Ghostty, and Microsoft documentation and first-party schemas. Techniques are classified as:

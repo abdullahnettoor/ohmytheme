@@ -2,7 +2,7 @@
 
 ## Product contract
 
-Oh My Theme is a macOS menu-bar utility that applies one theme assignment to a connected developer workspace.
+Oh My Theme is a macOS app that applies one desired theme assignment to a connected developer workspace. Its main window is the canonical interface; the optional menu bar item is a minimal status and reopen control.
 
 > **One theme for your entire Mac.**
 > Switch macOS and your connected developer apps together.
@@ -18,6 +18,9 @@ The first release should prove this outcome:
 ### Included in the beta
 
 - One local Workspace presented as "My Mac."
+- One reusable main window with Overview, Themes, and Apps sections.
+- Resumable onboarding with explicit Target Opt-ins and Select All Recommended.
+- One aggregate setup review and one durable Setup Transaction for selected Target Instances.
 - Target Instances in the internal model, with application-level UI unless several instances need attention.
 - Fixed theme assignments in the initial UI.
 - A stored Light/Dark pair assignment for later UI work.
@@ -26,7 +29,7 @@ The first release should prove this outcome:
 - Optional static, pack-provided wallpaper per Theme Variant.
 - Per-target setup, apply, activation reach, conflict, and recovery reporting.
 - Connection Baseline and Undo Last Theme Change.
-- Opt-in Launch at Login.
+- Opt-in Launch at Login while the menu bar item is visible.
 - A Target Catalog with an external GitHub Discussion request path.
 - Experimental adapters that use documented mechanisms only.
 
@@ -40,7 +43,11 @@ The first release should prove this outcome:
 - Private preference writes, app-database edits, process killing as an undocumented reload, and GUI input simulation.
 - Runtime adapter plugins or remote executable adapter updates.
 - Cloud sync and multiple-machine state.
-- Multiple user-visible Workspaces.
+- Multiple user-visible Workspaces and per-target theme overrides.
+- Live external preview while browsing themes.
+- Persistent user-facing Activity history.
+- Automatic Light/Dark pair switching.
+- Theme commands in the menu bar.
 - Background telemetry.
 - Nix as the apply engine.
 - Mac App Store distribution.
@@ -71,9 +78,13 @@ A missing app, denied optional permission, or unavailable target does not cancel
 
 Keep the main interface simple:
 
-- Ready
+- Not selected
 - Setup needed
+- Connected
+- Needs attention
 - Unavailable
+
+Recommended and Experimental are eligibility labels rather than lifecycle states. Configuring and Disconnecting are transient operation states.
 
 The target detail view may explain whether an adapter is Experimental, Planned, In research, or blocked by the target application. Only work accepted into a release milestone may use "Coming soon."
 
@@ -132,7 +143,7 @@ The beta defaults to the first policy and may keep the selector out of the main 
 
 A Theme Variant may contain one licensed static wallpaper asset and placement metadata. Light and Dark variants may differ.
 
-Wallpaper is an independently enabled macOS capability. Users can choose "Keep my current wallpaper" without disabling the rest of the macOS adapter. Apply only to selected connected displays and capture the prior image and placement per display.
+The Apps interface groups macOS capabilities while keeping System Appearance and each wallpaper display independently selectable. Select All Recommended includes wallpaper displays only when the desired Theme Variant provides a wallpaper and the display is currently available. Users can choose "Keep my current wallpaper" without disabling appearance management. Apply only to selected connected displays and capture the prior image and placement per display.
 
 The beta does not download wallpaper URLs during apply, generate palettes from images, or promise dynamic wallpaper and every-Space behavior.
 
@@ -150,7 +161,7 @@ A Target is an application or macOS capability. A Target Instance is a concrete 
 - macOS Appearance, one machine-wide instance
 - macOS Wallpaper, one instance per connected display
 
-The MVP automatically chooses the default instance when unambiguous. Advanced instance selection stays hidden until discovery finds ambiguity or the adapter requires a choice.
+The UI groups instances by application and exposes an application-level control that selects only currently recommended instances. Users can expand a group to select instances individually and see why other instances are excluded. Discovery never creates a Target Opt-in without an explicit user selection.
 
 A Theme Assignment is either:
 
@@ -171,7 +182,7 @@ The first UI exposes fixed assignment. The model keeps paired assignment so late
 
 ```mermaid
 flowchart TD
-    UI[Menu bar UI] --> Engine[Theme engine]
+    UI[Main window and optional menu bar UI] --> Engine[Theme engine]
     Themes[Theme catalog and resolver] --> Engine
     Workspace[Workspace store] --> Engine
     Engine --> Journal[Transaction journal]
@@ -189,13 +200,15 @@ flowchart TD
 The UI talks to one deep module:
 
 ```text
-prepare(themeVariant, workspace) -> ApplyPreview
-apply(previewID) -> ApplyReport
+prepareSetup(targetInstances, workspace) -> SetupPlan
+connect(setupPlanID, workspace) -> SetupReport
+prepare(themeVariant, workspace) -> ApplyPlan
+apply(planID) -> ApplyReport
 undoLast(workspace) -> ApplyReport
 restoreAndDisconnect(targetInstances) -> ApplyReport
 ```
 
-The engine owns orchestration, serialization, immutable previews, durable journal transitions, recovery on launch, and report aggregation. The UI does not discover apps, edit files, send Apple Events, launch target commands, or coordinate rollback.
+The engine owns orchestration, serialization, immutable plans, durable journal transitions, recovery on launch, and report aggregation. The UI does not discover apps, edit files, send Apple Events, launch target commands, or coordinate rollback.
 
 ### Adapter seam
 
@@ -226,9 +239,9 @@ Do not create a generic adapter-manifest language for the MVP. Share deep intern
 
 There is no atomic operation shared by macOS and third-party applications. The engine uses a durable recoverable sequence:
 
-1. Resolve the Theme Variant for every selected Target Instance.
+1. Resolve the Theme Variant for every selected Target Instance when the user presses Apply.
 2. Prepare all adapters without writing.
-3. Present exact setup needs, source choices, conflicts, and expected activation reach.
+3. Continue automatically when no review condition exists. Stop before mutation for a conflict, new or changed ownership, a new permission requirement, or an ambiguous target, then offer an explicit Apply to Ready Targets action.
 4. Persist the transaction and all Adapter Plans as `prepared` before the first target changes.
 5. Mark one adapter `applying` before invoking it.
 6. Revalidate that plan at its write boundary.
@@ -302,27 +315,30 @@ Automatic restore and rollback change only state Oh My Theme can prove it owns. 
 
 Store complete bytes only when exact restoration requires them. Prefer prior values, inserted-line identity, hashes, and metadata. Protect baseline files with user-only permissions. Never put baseline contents in logs or diagnostic exports.
 
-"Reset Oh My Theme" reviews all connected targets, restores what remains safe, removes Managed Artifacts, releases retained permissions, disables Launch at Login, and quits. Dragging the app to the Trash cannot run cleanup, so uninstall guidance must direct users to Reset first.
+"Reset Oh My Theme" reviews all connected targets, restores what remains safe, and offers explicit Management Relinquishment where restoration is unsafe. It clears Target Opt-ins and the desired Theme Assignment, removes recovery data only after each target reaches a safe terminal state, releases retained permissions, disables Launch at Login, restores presentation defaults, and quits. Dragging the app to the Trash cannot run cleanup, so uninstall guidance must direct users to Reset first.
 
 ## Adapter scope
 
-### Vertical demo
+### Redesigned first release
 
-1. macOS
-2. Ghostty
-3. VS Code
-4. Starship
+The dedicated window and batch setup release ships when these stable targets satisfy the support contract; it does not wait for the broader beta adapter list:
+
+1. macOS Appearance
+2. macOS Wallpaper
+3. Ghostty
+4. VS Code
+5. Starship
 
 This covers system visuals, managed config, Apple Events, a companion extension, structured settings, and next-prompt activation.
 
-### First free beta
+### Later adapter additions
 
-Add:
+Add independently when each adapter satisfies the same activation, ownership, and recovery contract:
 
-5. kitty
-6. iTerm2
-7. Neovim
-8. tmux
+6. kitty
+7. iTerm2
+8. Neovim
+9. tmux
 
 This is enough breadth to test command adapters, per-session Target Instances, reload-required outcomes, and sourced configuration without building the whole Target Catalog.
 

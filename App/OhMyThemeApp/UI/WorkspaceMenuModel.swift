@@ -82,7 +82,13 @@ final class WorkspaceMenuModel: ObservableObject {
 
     @Published private(set) var workspace: Workspace
     @Published private(set) var applicationTargets: [ApplicationTarget]
-    @Published private(set) var preview: ThemePreview?
+    @Published private(set) var applyPlan: ApplyPlan?
+
+    @available(*, deprecated, renamed: "applyPlan")
+    public var preview: ApplyPlan? {
+        applyPlan
+    }
+
     @Published private(set) var report: PresentedReport?
     @Published private(set) var canUndoLastThemeChange = false
     @Published private(set) var connectionReview: ConnectionPlan?
@@ -269,56 +275,68 @@ final class WorkspaceMenuModel: ObservableObject {
             connectedTargetInstances: workspace.connectedTargetInstances,
             themeAssignment: .fixed(variantID: variantID)
         )
-        preview = nil
+        applyPlan = nil
         report = nil
         operationError = nil
         themeVariantSelection(variantID)
     }
 
     @discardableResult
-    func prepare(themeVariantID: String) async throws -> ThemePreview {
+    func prepare(themeVariantID: String) async throws -> ApplyPlan {
         guard let themeEngine else {
             throw ThemeEngineError.engineUnavailable
         }
         selectThemeVariant(themeVariantID)
         let prepared = try await themeEngine.prepare(workspace: workspace)
-        preview = prepared
+        applyPlan = prepared
         report = nil
         operationError = nil
         return prepared
     }
 
     @discardableResult
-    func prepareSelectedTheme() async throws -> ThemePreview {
+    func prepareSelectedTheme() async throws -> ApplyPlan {
         guard let themeEngine else {
             throw ThemeEngineError.engineUnavailable
         }
         let prepared = try await themeEngine.prepare(workspace: workspace)
-        preview = prepared
+        applyPlan = prepared
         report = nil
         operationError = nil
         return prepared
     }
 
     @discardableResult
-    func apply(previewID: UUID) async throws -> DurableApplyReport {
+    func apply(planID: UUID) async throws -> DurableApplyReport {
         guard let themeEngine else {
             throw ThemeEngineError.engineUnavailable
         }
-        let applied = try await themeEngine.applyDurable(previewID: previewID, workspace: workspace)
-        preview = nil
+        let applied = try await themeEngine.applyDurable(planID: planID, workspace: workspace)
+        applyPlan = nil
         report = present(outcomes: applied.outcomes, kind: .apply)
         await refreshUndoAvailability()
         operationError = nil
         return applied
     }
 
+    @available(*, deprecated, renamed: "apply(planID:)")
+    @discardableResult
+    func apply(previewID: UUID) async throws -> DurableApplyReport {
+        try await apply(planID: previewID)
+    }
+
+    @discardableResult
+    func applyPreparedPlan() async throws -> DurableApplyReport {
+        guard let applyPlan else {
+            throw ThemeEngineError.planNotFound(UUID())
+        }
+        return try await apply(planID: applyPlan.id)
+    }
+
+    @available(*, deprecated, renamed: "applyPreparedPlan")
     @discardableResult
     func applyPreparedPreview() async throws -> DurableApplyReport {
-        guard let preview else {
-            throw ThemeEngineError.previewNotFound(UUID())
-        }
-        return try await apply(previewID: preview.id)
+        try await applyPreparedPlan()
     }
 
     func restoreAndDisconnect(_ targetInstanceID: TargetInstanceID) async throws {
@@ -421,7 +439,7 @@ final class WorkspaceMenuModel: ObservableObject {
     func replaceWorkspace(_ workspace: Workspace, targets: [ApplicationTarget]) {
         self.workspace = workspace
         applicationTargets = targets
-        preview = nil
+        applyPlan = nil
     }
 
     private func present(outcome: TargetCapabilityOutcome, kind: ReportKind) -> PresentedOutcome {
@@ -535,7 +553,7 @@ final class WorkspaceMenuModel: ObservableObject {
     private static func describe(_ error: any Error) -> String {
         switch error {
         case ThemeEngineError.fixedThemeAssignmentRequired:
-            "Choose a Theme Variant before preparing a preview."
+            "Choose a Theme Variant before preparing an Apply Plan."
         case DurableOperationError.noLastApplyTransaction:
             "There is no theme change left to undo."
         case DurableOperationError.persistenceRequired:

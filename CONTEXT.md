@@ -36,6 +36,10 @@ _Avoid_: Theme registry, marketplace
 The researched list of applications and macOS capabilities Oh My Theme may support. A catalog entry is not an adapter and does not imply that Oh My Theme can apply a theme to it.
 _Avoid_: Supported apps, adapter registry
 
+**Recommended target policy**:
+The eligibility rules for offering discovered target instances through Select All Recommended. A stable-adapter allowlist sets the upper bound, while runtime discovery excludes ambiguous, conflicting, experimental, and unavailable instances.
+_Avoid_: Hardcoded app list, default apps
+
 **Target**:
 A kind of macOS setting or application that Oh My Theme knows how to prepare or apply.
 _Avoid_: Integration, destination
@@ -43,6 +47,14 @@ _Avoid_: Integration, destination
 **Target instance**:
 A specific configuration context for a target, such as a VS Code profile, Obsidian vault, Terminal profile, or Neovim configuration.
 _Avoid_: Target, application
+
+**Target opt-in**:
+The persisted user intent for Oh My Theme to manage a discovered target instance. It survives failed setup, while clearing it after connection requires reviewed restoration and disconnection.
+_Avoid_: Selected app, enabled app
+
+**Target management state**:
+The user-facing lifecycle state of a target instance: not selected, setup needed, connected, needs attention, or unavailable. Recommended and experimental are separate eligibility labels, while configuring and disconnecting are transient operation states.
+_Avoid_: Ready, support status
 
 **Connected target instance**:
 A target instance whose one-time setup and ownership scope the user has reviewed and accepted, allowing later theme changes without repeated setup confirmation.
@@ -80,9 +92,25 @@ _Avoid_: User config
 The durably captured state of a target instance immediately before Oh My Theme first connects it. It is the reference for disconnecting the target and restoring the state that existed before Oh My Theme managed it.
 _Avoid_: Backup, apply receipt
 
+**Management relinquishment**:
+An explicit choice to stop managing a target instance without restoring its Connection Baseline when external changes make restoration unsafe. It leaves the target's current configuration untouched.
+_Avoid_: Force disconnect, forget target
+
+**Connection replacement**:
+A reviewed flow that resolves an unavailable connected target instance and separately connects a newly discovered instance that may replace it. It never transfers identity, Target Opt-in, or Connection Baseline automatically.
+_Avoid_: Automatic migration, relink
+
 **Last apply transaction**:
 The most recent completed apply transaction that changed at least one target instance. Its per-instance receipts are the reference for Undo Last Theme Change.
 _Avoid_: Connection baseline, apply attempt
+
+**Setup plan**:
+An immutable aggregate of the selected target instance IDs and each instance's Connection Plan or preparation failure, reviewed before setup begins.
+_Avoid_: Setup preview, connection list
+
+**Setup transaction**:
+One attempt to connect a selected set of target instances from an approved Setup Plan, with a separate outcome and recovery record for each instance. It is not atomic across targets.
+_Avoid_: Connection batch, bulk setup
 
 **Apply transaction**:
 One attempt to apply a theme variant to a selected set of target instances, with a separate outcome and rollback receipt for each instance.
@@ -101,5 +129,17 @@ The user's selected set of target instances that should follow the same theme as
 _Avoid_: Profile, environment
 
 **Theme assignment**:
-The theme choice followed by a Workspace, either one fixed theme variant or a Light/Dark pair selected by system appearance.
-_Avoid_: Active theme, schedule
+The desired theme choice followed by a Workspace, either one fixed theme variant or a Light/Dark pair selected by system appearance. It may be pending or only partially applied across the Workspace.
+_Avoid_: Active theme, current theme, schedule
+
+**Workspace theme status**:
+A timestamped summary that compares a Workspace's desired Theme Assignment with the latest verified state of each connected target instance, including applied, pending, and attention counts.
+_Avoid_: Current theme, global theme state
+
+**Theme preview**:
+A visual representation of a theme inside Oh My Theme that does not mutate any target instance.
+_Avoid_: Apply plan, live apply
+
+**Apply plan**:
+An immutable prepared description of how a Theme Assignment would change the connected target instances in a Workspace, including preconditions, conflicts, permissions, and expected effects.
+_Avoid_: Theme preview, dry run

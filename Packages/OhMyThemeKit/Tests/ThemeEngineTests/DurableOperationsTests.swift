@@ -37,8 +37,8 @@ struct DurableOperationsTests {
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.durable"])
 
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // World must be unchanged (interruption happened before the write).
         #expect(await adapter.currentWorldBytes() == originalWorld)
@@ -186,11 +186,11 @@ struct DurableOperationsTests {
             themeAssignment: .fixed(variantID: "test-pack/dark")
         )
 
-        let preview = try await engine.prepare(workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(
-            preview.targetPlans.map(\.targetInstanceID.rawValue) == [
+            plan.targetPlans.map(\.targetInstanceID.rawValue) == [
                 "recording.a", "recording.b", "recording.c",
             ])
         #expect(
@@ -232,11 +232,11 @@ struct DurableOperationsTests {
             ],
             themeAssignment: .fixed(variantID: "test-pack/dark")
         )
-        let preview = try await engine.prepare(workspace: preparedWorkspace)
+        let plan = try await engine.prepare(workspace: preparedWorkspace)
         let originalWorld = await adapter.currentWorldBytes()
 
-        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(preview.id)) {
-            _ = try await engine.applyDurable(previewID: preview.id, workspace: changedWorkspace)
+        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(plan.id)) {
+            _ = try await engine.applyDurable(planID: plan.id, workspace: changedWorkspace)
         }
         #expect(await adapter.currentWorldBytes() == originalWorld)
     }
@@ -264,11 +264,11 @@ struct DurableOperationsTests {
             connectedTargetInstances: assignedWorkspace.connectedTargetInstances,
             themeAssignment: nil
         )
-        let preview = try await engine.prepare(workspace: assignedWorkspace)
+        let plan = try await engine.prepare(workspace: assignedWorkspace)
 
-        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(preview.id)) {
+        await #expect(throws: ThemeEngineError.previewWorkspaceChanged(plan.id)) {
             _ = try await engine.applyDurable(
-                previewID: preview.id,
+                planID: plan.id,
                 workspace: unassignedWorkspace
             )
         }
@@ -284,16 +284,16 @@ struct DurableOperationsTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.one"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
         // Kick off the durable apply and, while it is running, attempt a second one — the actor
         // serializes them, so the second must complete only after the first (and the second must
         // report `previewNotFound` because the preview was consumed by the first apply).
-        async let first = engine.applyDurable(previewID: preview.id, workspace: workspace)
+        async let first = engine.applyDurable(planID: plan.id, workspace: workspace)
         _ = try await first
 
         var secondFailed = false
         do {
-            _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+            _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         } catch is ThemeEngineError {
             secondFailed = true
         }
@@ -311,8 +311,8 @@ struct DurableOperationsTests {
         )
         let instanceIDs = (0..<3).map { "recording.\($0)" }
         let workspace = Fixtures.workspace(recordingInstances: instanceIDs)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let records = try fixture.store.journalLoadRecords(operationID: report.operationID)
         let ordinals = records.map(\.ordinal)
         #expect(ordinals == [0, 1, 2])
@@ -374,10 +374,10 @@ struct DurableOperationsTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.stale"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
         // External edit invalidates the plan between prepare and apply.
         await adapter.mutateWorldExternally(Data("someone-else-edited".utf8))
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // No mutation applied by us: world should remain what the external edit set it to.
         #expect(await adapter.currentWorldBytes() != originalWorld)
@@ -406,8 +406,8 @@ struct DurableOperationsTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.recover"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         _ = report
 
         // Simulate a crash: forcibly reset operation state to `applying` and re-run.
@@ -446,8 +446,8 @@ struct DurableOperationsTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.intended"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // Simulate a crash before the operation transitioned to `applied`.
         try fixture.store.journalTransitionState(operationID: report.operationID, to: .applying)
@@ -478,8 +478,8 @@ struct DurableOperationsTests {
             persistence: fixture.store
         )
         let workspace = Fixtures.workspace(recordingInstances: ["recording.conflict"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         // External edit now changes the world to a third state.
         await adapter.mutateWorldExternally(Data("something-unrelated".utf8))
@@ -534,8 +534,8 @@ struct DurableOperationsTests {
         )
         // Any new mutation triggers reconciliation first.
         let workspace = Fixtures.workspace(recordingInstances: ["recording.after-reconcile"])
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         let reloaded = try fixture.store.journalLoadOperation(id: op.id)
         #expect(reloaded?.state == .reconciled)
@@ -555,8 +555,8 @@ struct DurableOperationsTests {
         let workspace = Fixtures.workspace(
             recordingInstances: ["recording.ok-a", "recording.fail", "recording.ok-b"]
         )
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(report.outcomes.count == 3)
         let byInstance = Dictionary(uniqueKeysWithValues: report.outcomes.map { ($0.targetInstanceID.rawValue, $0) })
@@ -666,8 +666,8 @@ struct DurableOperationsTests {
             await adapter.setInterruption(point, enabled: true)
             _ = try await engine.restore(instance: instance, workspace: workspace)
         case .beforePrepareApply, .beforeApplyWrite, .afterApplyWrite, .beforeRevalidation:
-            let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspaceForApply)
-            _ = try await engine.applyDurable(previewID: preview.id, workspace: workspaceForApply)
+            let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspaceForApply)
+            _ = try await engine.applyDurable(planID: plan.id, workspace: workspaceForApply)
         }
 
         // The engine catches these injected adapter errors and reaches a terminal state.

@@ -118,6 +118,55 @@ struct PersistenceStoreTests {
         #expect(try fixture.store.journalInterruptedOperations().isEmpty)
     }
 
+
+    @Test("Persisted operations and recovery data created before the rename remain readable without losing the Last Apply Transaction or recovery state")
+    func persistedOperationsAndRecoveryDataRemainReadable() throws {
+        let fixture = try Fixture()
+        let operationID = UUID()
+        let targetID = TargetInstanceID(rawValue: "recording.pre-rename")
+        let planDigest = "sha256:legacy-plan-digest"
+        let recoveryData = Data("pre-rename-recovery-state".utf8)
+        let recoveryRef = try fixture.store.saveContent(recoveryData, kind: "restoration", ownerID: "operation-\(operationID.uuidString)")
+
+        let operation = try fixture.store.journalStartOperation(
+            kind: .apply,
+            workspaceID: .myMac,
+            variantID: "aurora/dark"
+        )
+        let record = JournaledRecord(
+            operationID: operation.id,
+            targetInstanceID: targetID,
+            ordinal: 0,
+            adapterID: "recording",
+            adapterVersion: "1",
+            capabilityID: "theme",
+            phase: .applied,
+            intendedChangeDigest: "sha256:intended",
+            staleStateToken: "token-1",
+            planDigest: planDigest,
+            receiptJSON: "{\"configurationState\":\"updated\",\"runningInstanceReach\":\"currentInstances\"}",
+            detail: nil
+        )
+        try fixture.store.journalSaveRecord(record)
+        try fixture.store.journalTransitionState(operationID: operation.id, to: .applied)
+
+        let lat = try fixture.store.journalFindLastAppliedTransaction(workspaceID: .myMac)
+        #expect(lat != nil)
+        #expect(lat?.id == operation.id)
+        #expect(lat?.variantID == "aurora/dark")
+        let loadedRecords = try fixture.store.journalLoadRecords(operationID: operation.id)
+        #expect(loadedRecords.count == 1)
+        #expect(loadedRecords[0].planDigest == planDigest)
+        #expect(try fixture.store.loadContent(recoveryRef) == recoveryData)
+
+        let reopened = try PersistenceStore(databaseURL: fixture.databaseURL, contentStoreURL: fixture.contentURL)
+        let reopenedLAT = try reopened.journalFindLastAppliedTransaction(workspaceID: .myMac)
+        #expect(reopenedLAT?.id == operation.id)
+        let reopenedRecords = try reopened.journalLoadRecords(operationID: operation.id)
+        #expect(reopenedRecords[0].planDigest == planDigest)
+        #expect(try reopened.loadContent(recoveryRef) == recoveryData)
+    }
+
     @Test("Content store uses user-only permissions and rejects tampering")
     func contentStoreProtectsAndVerifiesBytes() throws {
         let fixture = try Fixture()

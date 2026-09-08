@@ -29,8 +29,8 @@ struct WorkspaceMenuView: View {
                     themeSection
                     startupSection
 
-                    if let preview = model.preview {
-                        previewSection(preview)
+                    if let plan = model.applyPlan {
+                        applyPlanSection(plan)
                     }
                     if let report = model.report {
                         reportSection(report)
@@ -274,7 +274,7 @@ struct WorkspaceMenuView: View {
 
     private var themeSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionHeading("Theme Variant", detail: "Preview every connected Target before anything changes.")
+            sectionHeading("Theme Variant", detail: "Prepare an Apply Plan before anything changes.")
 
             Picker(
                 "Theme Variant",
@@ -314,7 +314,7 @@ struct WorkspaceMenuView: View {
                     _ = try await model.prepareSelectedTheme()
                 }
             } label: {
-                Label("Preview workspace change", systemImage: "eye")
+                Label("Prepare Apply Plan", systemImage: "doc.text.magnifyingglass")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -322,18 +322,18 @@ struct WorkspaceMenuView: View {
         }
     }
 
-    private func previewSection(_ preview: ThemePreview) -> some View {
+    private func applyPlanSection(_ plan: ApplyPlan) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             sectionHeading(
-                "Workspace preview", detail: "Prepared for \(preview.targetInstanceIDs.count) Target Instances.")
+                "Apply Plan", detail: "Prepared for \(plan.targetInstanceIDs.count) Target Instances.")
 
             VStack(alignment: .leading, spacing: 7) {
-                previewFact("Source", value: preview.sourceType.rawValue.capitalized)
-                previewFact("Expected reach", value: reachLabel(preview.activationReach))
-                previewFact("Revision", value: preview.sourceRevision)
+                previewFact("Source", value: plan.sourceType.rawValue.capitalized)
+                previewFact("Expected reach", value: reachLabel(plan.activationReach))
+                previewFact("Revision", value: plan.sourceRevision)
 
-                ForEach(preview.targetPlans, id: \.targetInstanceID) { plan in
-                    ForEach(plan.expectedSideEffects, id: \.self) { sideEffect in
+                ForEach(plan.targetPlans, id: \.targetInstanceID) { targetPlan in
+                    ForEach(targetPlan.expectedSideEffects, id: \.self) { sideEffect in
                         messageRow(
                             title: "Expected change",
                             detail: sideEffect,
@@ -341,7 +341,7 @@ struct WorkspaceMenuView: View {
                             color: .secondary
                         )
                     }
-                    ForEach(plan.requiredPermissions, id: \.self) { permission in
+                    ForEach(targetPlan.requiredPermissions, id: \.self) { permission in
                         messageRow(
                             title: "Permission needed",
                             detail: permission,
@@ -350,7 +350,7 @@ struct WorkspaceMenuView: View {
                         )
                     }
                 }
-                ForEach(preview.setupNeeds, id: \.title) { action in
+                ForEach(plan.setupNeeds, id: \.title) { action in
                     messageRow(
                         title: action.title,
                         detail: action.detail,
@@ -358,7 +358,7 @@ struct WorkspaceMenuView: View {
                         color: .orange
                     )
                 }
-                ForEach(preview.preparationFailures, id: \.targetInstanceID) { failure in
+                ForEach(plan.preparationFailures, id: \.targetInstanceID) { failure in
                     messageRow(
                         title: "Could not prepare a Target",
                         detail: failure.detail,
@@ -366,7 +366,7 @@ struct WorkspaceMenuView: View {
                         color: .red
                     )
                 }
-                ForEach(preview.unavailableTargetInstanceIDs, id: \.self) { _ in
+                ForEach(plan.unavailableTargetInstanceIDs, id: \.self) { _ in
                     messageRow(
                         title: "Target unavailable",
                         detail: "No compatible adapter prepared this Target Instance.",
@@ -374,7 +374,7 @@ struct WorkspaceMenuView: View {
                         color: .secondary
                     )
                 }
-                ForEach(preview.conflicts, id: \.self) { conflict in
+                ForEach(plan.conflicts, id: \.self) { conflict in
                     messageRow(
                         title: "Conflict",
                         detail: conflict,
@@ -386,7 +386,7 @@ struct WorkspaceMenuView: View {
 
             Button {
                 model.perform {
-                    _ = try await model.applyPreparedPreview()
+                    _ = try await model.applyPreparedPlan()
                 }
             } label: {
                 Label("Apply to ready Targets", systemImage: "paintbrush.fill")
@@ -395,9 +395,9 @@ struct WorkspaceMenuView: View {
             .buttonStyle(.borderedProminent)
             .disabled(
                 model.isBusy
-                    || preview.targetPlans.isEmpty
+                    || plan.targetPlans.isEmpty
             )
-            .accessibilityIdentifier("apply-theme-preview")
+            .accessibilityIdentifier("apply-plan")
         }
         .padding(14)
         .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))

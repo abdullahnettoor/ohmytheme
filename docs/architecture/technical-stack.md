@@ -8,8 +8,9 @@ This document records the implementation stack for the Oh My Theme macOS beta. I
 
 - Swift 6 language mode.
 - SwiftUI application lifecycle and interface.
-- `MenuBarExtra` with window style as the primary scene.
-- Focused AppKit bridges where SwiftUI does not expose the required macOS behavior.
+- One reusable SwiftUI main window as the primary scene, with a native Settings scene.
+- An optional, minimal `MenuBarExtra` for Workspace health, reopening the main window, and quitting.
+- Focused AppKit bridges for dynamic regular and accessory activation policy and other behavior SwiftUI does not expose.
 - Minimum deployment target: macOS 14 Sonoma.
 - Direct distribution outside the Mac App Store.
 - App Sandbox disabled.
@@ -21,15 +22,17 @@ The SwiftUI layer is presentation code. It does not own theme application, targe
 
 The beta runs as one macOS application process. The VS Code companion extension and target applications remain external processes.
 
-`ThemeEngine` is a Swift `actor` and the only interface used by presentation code for mutating theme state. It permits one Apply, Undo, Restore, Disconnect, or recovery operation at a time.
+`ThemeEngine` is a Swift `actor` and the only interface used by presentation code for mutating theme state. It permits one Setup, Apply, Undo, Restore, Disconnect, or recovery operation at a time.
 
 - UI state and view updates run on `MainActor`.
+- The app derives onboarding resumption from persisted disposition and domain state rather than a stored wizard page number.
 - Read-only discovery and preparation may run concurrently when their dependencies are independent.
-- Target mutations run sequentially in deterministic order for the beta.
+- Target mutations run sequentially in one stable engine-owned order that the review and progress interfaces also display.
+- Conflicting controls remain disabled while a mutation operation runs, and the app does not queue hidden follow-up operations.
 - Users may cancel discovery and preparation.
-- Once the first external mutation starts, the operation runs to a terminal or recovery-required state rather than offering unsafe cancellation.
+- After external mutation starts, Cancel Remaining finishes the current target boundary and records untouched targets as skipped. It never interrupts an adapter mutation or automatically rolls back completed targets.
 - Every durable plan is written before its corresponding external mutation.
-- Interrupted work is reconciled when the app next launches.
+- Interrupted work is reconciled before the app accepts another mutation. The main window shows unresolved recovery prominently on Overview.
 
 Adapter plans remain independent so bounded concurrent application can be introduced later without changing the adapter interface.
 
@@ -37,11 +40,11 @@ Adapter plans remain independent so bounded concurrent application can be introd
 
 Use SQLite through GRDB for durable application state:
 
-- Workspace and theme assignment
-- Target Instances and connection state
+- Workspace, desired theme assignment, and timestamped theme status
+- Target Instances, Target Opt-ins, and connection state
 - Connection Baseline metadata
-- Apply Transactions and per-target operation states
-- Serialized Connection Plans, Adapter Plans, and receipts
+- Setup and Apply Transactions with per-target operation states
+- Serialized Setup Plans, Connection Plans, Apply Plans, Adapter Plans, and receipts
 - Schema, adapter, compiler, and payload versions
 
 GRDB migrations are the only mechanism for database schema changes. Tests must cover migration from every retained beta schema to the current schema.

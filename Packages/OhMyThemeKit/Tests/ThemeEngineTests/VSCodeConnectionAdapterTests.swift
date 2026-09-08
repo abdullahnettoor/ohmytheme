@@ -453,12 +453,12 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
 
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: "test-pack/dark",
             workspace: Self.workspace(instance: fixture.instance)
         )
         let report = try await engine.applyDurable(
-            previewID: preview.id,
+            planID: plan.id,
             workspace: Self.workspace(instance: fixture.instance)
         )
 
@@ -514,9 +514,9 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(report.outcomes[0].configurationState == .updated)
         #expect(report.outcomes[0].detail?.contains("Recovered after apply error") == true)
@@ -535,9 +535,9 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(report.outcomes[0].configurationState == .updated)
         #expect(report.outcomes[0].detail?.contains("Recovered after apply error") == true)
@@ -557,9 +557,9 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
 
-        let report = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let report = try await engine.applyDurable(planID: plan.id, workspace: workspace)
 
         #expect(report.outcomes[0].configurationState == .failed)
         #expect(try store.journalLoadOperation(id: report.operationID)?.state == .applying)
@@ -618,8 +618,8 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let applyRequestID = await fixture.platform.lastRequestID
         await fixture.platform.replaceRegistration(
             VSCodeConnectionAdapterTests.registration(serverSessionID: "server-2")
@@ -656,8 +656,8 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         await fixture.platform.failNextApply(.timeout, afterMutation: true)
         await fixture.platform.failInspectionAfterNextApply()
 
@@ -690,8 +690,8 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let originalApplyRecord = try store.journalLoadRecords(operationID: apply.operationID)[0]
         let undo = try await engine.undoLast(workspace: workspace)
         let completedUndoRecord = try store.journalLoadRecords(operationID: undo.operationID)[0]
@@ -740,8 +740,8 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let undo = try await engine.undoLast(workspace: workspace)
         var sourceRecord = try store.journalLoadRecords(operationID: apply.operationID)[0]
         sourceRecord.phase = .applied
@@ -766,8 +766,8 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         await fixture.platform.replaceRegistration(nil)
 
         let unavailable = try await engine.undoLast(workspace: workspace)
@@ -793,8 +793,8 @@ struct VSCodeThemeAdapterTests {
         )
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let workspace = Self.workspace(instance: fixture.instance)
-        let preview = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(themeVariantID: "test-pack/dark", workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         await fixture.platform.replaceConfiguredTheme("External Theme")
 
         let undo = try await engine.undoLast(workspace: workspace)

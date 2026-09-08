@@ -943,14 +943,14 @@ struct StarshipAdapterTests {
             adapters: [fixture.adapter()],
             persistence: store
         )
-        let preview = try await relaunchedEngine.prepare(
+        let plan = try await relaunchedEngine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID,
             workspace: workspace
         )
-        #expect(preview.preparationFailures.isEmpty)
-        #expect(preview.targetPlans.count == 1)
+        #expect(plan.preparationFailures.isEmpty)
+        #expect(plan.targetPlans.count == 1)
 
-        let report = try await relaunchedEngine.applyDurable(previewID: preview.id, workspace: workspace)
+        let report = try await relaunchedEngine.applyDurable(planID: plan.id, workspace: workspace)
         #expect(report.outcomes[0].configurationState == .updated)
         #expect(try String(contentsOf: fixture.sourceURL, encoding: .utf8).contains("oh_my_theme"))
     }
@@ -965,11 +965,11 @@ struct StarshipAdapterTests {
         let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
         let before = try String(contentsOf: fixture.configURL, encoding: .utf8)
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID,
             workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
         let report = try await engine.applyDurable(
-            previewID: preview.id,
+            planID: plan.id,
             workspace: Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [fixture.instance]))
         #expect(report.outcomes[0].configurationState == .updated)
         #expect(report.outcomes[0].runningInstanceReach == .nextPrompt)
@@ -998,11 +998,11 @@ struct StarshipAdapterTests {
         let adapter = fixture.adapter()
         let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
         _ = try await engine.connect(instance: fixture.instance, workspace: workspace)
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID,
             workspace: workspace
         )
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let appliedRecord = try #require(
             try store.journalLoadRecords(operationID: apply.operationID).first
         )

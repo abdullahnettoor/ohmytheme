@@ -88,8 +88,8 @@ struct WorkspaceLifecycleQualificationTests {
     }
 
     private func apply(engine: ThemeEngine, workspace: Workspace) async throws -> DurableApplyReport {
-        let preview = try await engine.prepare(workspace: workspace)
-        return try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let plan = try await engine.prepare(workspace: workspace)
+        return try await engine.applyDurable(planID: plan.id, workspace: workspace)
     }
 
     private func qualificationPack() -> ThemePack {

@@ -276,7 +276,7 @@ struct GhosttyAdapterTests {
         let adapter = fixture.adapter()
         let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: store)
         _ = try await engine.connect(instance: fixture.instance, workspace: .myMac)
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID,
             workspace: Workspace(
                 id: .myMac,
@@ -285,7 +285,7 @@ struct GhosttyAdapterTests {
             ))
 
         _ = try await engine.applyDurable(
-            previewID: preview.id,
+            planID: plan.id,
             workspace: Workspace(
                 id: .myMac,
                 displayName: "My Mac",
@@ -317,9 +317,9 @@ struct GhosttyAdapterTests {
             displayName: "My Mac",
             connectedTargetInstances: [fixture.instance]
         )
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let appliedRecord = try #require(try store.journalLoadRecords(operationID: apply.operationID).first)
         try store.journalTransitionState(operationID: apply.operationID, to: .applying)
         try store.journalSaveRecord(
@@ -363,9 +363,9 @@ struct GhosttyAdapterTests {
             displayName: "My Mac",
             connectedTargetInstances: [fixture.instance]
         )
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: workspace)
-        let apply = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        let apply = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let appliedRecord = try #require(try store.journalLoadRecords(operationID: apply.operationID).first)
         let appliedBytes = try Data(contentsOf: fixture.managedURL)
         let replacement = fixture.directory.appendingPathComponent("same-content.ghostty")
@@ -417,9 +417,9 @@ struct GhosttyAdapterTests {
             displayName: "My Mac",
             connectedTargetInstances: [fixture.instance]
         )
-        let preview = try await engine.prepare(
+        let plan = try await engine.prepare(
             themeVariantID: Fixtures.pack.variants[0].qualifiedID, workspace: workspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: workspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: workspace)
         let external = Data("# changed externally\n".utf8)
         try external.write(to: fixture.managedURL)
 

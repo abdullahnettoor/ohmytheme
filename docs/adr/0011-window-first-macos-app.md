@@ -1,0 +1,7 @@
+---
+status: accepted
+---
+
+# Make the main window the primary product interface
+
+Oh My Theme will use a main window as the canonical place for onboarding, target management, theme selection, reports, and recovery. The Dock icon appears while a window is open; closing the last window returns the running app to accessory mode and removes its Dock icon. The menu bar extra is visible by default but may be hidden, and reopening the existing process through Spotlight, Finder, or another launcher must restore the main window and Dock icon reliably. Launch at Login is available while the menu bar item is visible; hiding the item disables login launch until the product has automatic background work. The app reuses one main window rather than creating independent configuration windows. Its Settings window contains only app-level preferences: Launch at Login, menu bar visibility, and notification permission status. The initial menu bar interface contains only Workspace health, Open Oh My Theme, and Quit; richer theme actions remain deferred. User-started work continues safely after the window closes. Oh My Theme requests notification permission just before work can continue with both Dock and menu bar icons hidden, stays silent on success, and notifies only when attention is required. If permission is denied, it does not reprompt automatically; it preserves Needs Attention state for the menu bar health indicator and the next main-window opening.

@@ -92,8 +92,8 @@ struct DurabilityCrashHarness {
         _ = try await engine.connect(instance: instance, workspace: disconnectedWorkspace)
 
         guard scenario != .apply else { return }
-        let preview = try await engine.prepare(workspace: connectedWorkspace)
-        _ = try await engine.applyDurable(previewID: preview.id, workspace: connectedWorkspace)
+        let plan = try await engine.prepare(workspace: connectedWorkspace)
+        _ = try await engine.applyDurable(planID: plan.id, workspace: connectedWorkspace)
     }
 
     private static func perform(_ scenario: Scenario, engine: ThemeEngine) async throws {
@@ -101,8 +101,8 @@ struct DurabilityCrashHarness {
         case .connect:
             _ = try await engine.connect(instance: instance, workspace: disconnectedWorkspace)
         case .apply:
-            let preview = try await engine.prepare(workspace: connectedWorkspace)
-            _ = try await engine.applyDurable(previewID: preview.id, workspace: connectedWorkspace)
+            let plan = try await engine.prepare(workspace: connectedWorkspace)
+            _ = try await engine.applyDurable(planID: plan.id, workspace: connectedWorkspace)
         case .undo:
             _ = try await engine.undoLast(workspace: connectedWorkspace)
         case .restore:

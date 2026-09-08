@@ -342,63 +342,63 @@ extension ThemeEngine {
 
     // MARK: Apply (durable)
 
-    public func applyDurable(previewID: UUID, workspace: Workspace) async throws -> DurableApplyReport {
+    public func applyDurable(planID: UUID, workspace: Workspace) async throws -> DurableApplyReport {
         guard let persistence = self.persistenceStore else {
             throw DurableOperationError.persistenceRequired
         }
         try await ensureNoOperationInProgress()
         try await reconcileInterruptedOperations()
 
-        guard let pendingPreview = self.previewsInFlight[previewID] else {
-            throw ThemeEngineError.previewNotFound(previewID)
+        guard let pendingPlan = self.plansInFlight[planID] else {
+            throw ThemeEngineError.planNotFound(planID)
         }
         let orderedTargetIDs = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances).map(\.id)
         let assignmentMatches: Bool
-        if let requiredThemeAssignment = pendingPreview.requiredThemeAssignment {
+        if let requiredThemeAssignment = pendingPlan.requiredThemeAssignment {
             assignmentMatches = workspace.themeAssignment == requiredThemeAssignment
         } else {
             assignmentMatches =
                 workspace.themeAssignment == nil
-                || workspace.themeAssignment == .fixed(variantID: pendingPreview.variantID)
+                || workspace.themeAssignment == .fixed(variantID: pendingPlan.variantID)
         }
-        guard pendingPreview.workspaceID == workspace.id,
-            pendingPreview.targetInstanceIDs == orderedTargetIDs,
+        guard pendingPlan.workspaceID == workspace.id,
+            pendingPlan.targetInstanceIDs == orderedTargetIDs,
             assignmentMatches
         else {
-            throw ThemeEngineError.previewWorkspaceChanged(previewID)
+            throw ThemeEngineError.planWorkspaceChanged(planID)
         }
-        guard let preview = self.consumePreview(previewID) else {
-            throw ThemeEngineError.previewNotFound(previewID)
+        guard let plan = self.consumePlan(planID) else {
+            throw ThemeEngineError.planNotFound(planID)
         }
 
         let operation = try persistence.journalStartOperation(
             kind: .apply,
             workspaceID: workspace.id,
-            variantID: preview.variantID
+            variantID: plan.variantID
         )
         try await beginOperationTracking(operation)
         defer { try? closeOperationTracking(operation.id) }
 
         // Durably persist all Adapter Plans before any external mutation.
         var planReferences: [TargetInstanceID: ContentReference] = [:]
-        for (ordinal, plan) in preview.targetPlans.enumerated() {
-            let planPayload = try JSONEncoder().encode(plan)
+        for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
+            let planPayload = try JSONEncoder().encode(targetPlan)
             let reference = try persistence.journalStorePlanPayload(
                 planPayload,
-                ownerID: "apply.\(operation.id.uuidString).\(plan.targetInstanceID.rawValue)"
+                ownerID: "apply.\(operation.id.uuidString).\(targetPlan.targetInstanceID.rawValue)"
             )
-            planReferences[plan.targetInstanceID] = reference
+            planReferences[targetPlan.targetInstanceID] = reference
             try persistence.journalSaveRecord(
                 JournaledRecord(
                     operationID: operation.id,
-                    targetInstanceID: plan.targetInstanceID,
+                    targetInstanceID: targetPlan.targetInstanceID,
                     ordinal: ordinal,
-                    adapterID: plan.adapterID,
-                    adapterVersion: plan.adapterVersion,
-                    capabilityID: plan.capabilityID,
+                    adapterID: targetPlan.adapterID,
+                    adapterVersion: targetPlan.adapterVersion,
+                    capabilityID: targetPlan.capabilityID,
                     phase: .prepared,
-                    intendedChangeDigest: plan.intendedChangeDigest,
-                    staleStateToken: plan.staleStateToken,
+                    intendedChangeDigest: targetPlan.intendedChangeDigest,
+                    staleStateToken: targetPlan.staleStateToken,
                     planDigest: reference.digest,
                     receiptJSON: nil,
                     detail: nil
@@ -408,15 +408,15 @@ extension ThemeEngine {
 
         try await checkAndConsumeCancellation(operation.id)
 
-        // Iterate in the deterministic order of preview.targetPlans.
+        // Iterate in the deterministic order of plan.targetPlans.
         var outcomes: [TargetCapabilityOutcome] = []
         var anyMutated = false
-        for (ordinal, plan) in preview.targetPlans.enumerated() {
+        for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
             let outcome = try await self.runApplyStep(
-                plan: plan,
+                plan: targetPlan,
                 ordinal: ordinal,
                 operationID: operation.id,
-                planReference: planReferences[plan.targetInstanceID],
+                planReference: planReferences[targetPlan.targetInstanceID],
                 markMutation: !anyMutated,
                 persistence: persistence
             )
@@ -426,28 +426,28 @@ extension ThemeEngine {
             }
         }
 
-        for id in preview.unavailableTargetInstanceIDs {
+        for id in plan.unavailableTargetInstanceIDs {
             outcomes.append(
                 TargetCapabilityOutcome(
                     targetInstanceID: id,
                     adapterID: "unavailable",
                     capabilityID: "theme",
-                    sourceType: preview.sourceType,
-                    sourceRevision: preview.sourceRevision,
+                    sourceType: plan.sourceType,
+                    sourceRevision: plan.sourceRevision,
                     configurationState: .unavailable,
                     runningInstanceReach: .unavailable,
                     detail: "No compatible adapter prepared this Target Instance."
                 )
             )
         }
-        for failure in preview.preparationFailures {
+        for failure in plan.preparationFailures {
             outcomes.append(
                 TargetCapabilityOutcome(
                     targetInstanceID: failure.targetInstanceID,
                     adapterID: failure.adapterID,
                     capabilityID: "theme",
-                    sourceType: preview.sourceType,
-                    sourceRevision: preview.sourceRevision,
+                    sourceType: plan.sourceType,
+                    sourceRevision: plan.sourceRevision,
                     configurationState: .failed,
                     runningInstanceReach: .unavailable,
                     detail: failure.detail
@@ -460,7 +460,7 @@ extension ThemeEngine {
             try persistence.journalTransitionState(operationID: operation.id, to: .applied)
         }
         let outcomeOrder = Dictionary(
-            uniqueKeysWithValues: preview.targetInstanceIDs.enumerated().map { ($0.element, $0.offset) }
+            uniqueKeysWithValues: plan.targetInstanceIDs.enumerated().map { ($0.element, $0.offset) }
         )
         outcomes.sort { left, right in
             let leftIndex = outcomeOrder[left.targetInstanceID] ?? Int.max
@@ -470,9 +470,14 @@ extension ThemeEngine {
         }
         return DurableApplyReport(
             operationID: operation.id,
-            variantID: preview.variantID,
+            variantID: plan.variantID,
             outcomes: outcomes
         )
+    }
+
+    @available(*, deprecated, renamed: "applyDurable(planID:workspace:)")
+    public func applyDurable(previewID: UUID, workspace: Workspace) async throws -> DurableApplyReport {
+        try await applyDurable(planID: previewID, workspace: workspace)
     }
 
     private func runApplyStep(
@@ -1855,8 +1860,13 @@ extension ThemeEngine {
         self.adaptersByID[id]
     }
 
-    fileprivate func consumePreview(_ id: UUID) -> ThemePreview? {
-        self.previewsInFlight.removeValue(forKey: id)
+    fileprivate func consumePlan(_ id: UUID) -> ApplyPlan? {
+        self.plansInFlight.removeValue(forKey: id)
+    }
+
+    @available(*, deprecated, renamed: "consumePlan")
+    fileprivate func consumePreview(_ id: UUID) -> ApplyPlan? {
+        consumePlan(id)
     }
 
     fileprivate func ensureNoOperationInProgress() async throws {

@@ -84,7 +84,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
         XCTAssertTrue(model.bundledThemeVariants.allSatisfy { !$0.sourceRevision.isEmpty && !$0.attribution.isEmpty })
     }
 
-    func testMenuRequestsPreviewThroughThemeEngine() async throws {
+    func testMenuRequestsApplyPlanThroughThemeEngine() async throws {
         let workspace = Workspace(
             id: .myMac,
             displayName: "My Mac",
@@ -105,13 +105,15 @@ final class WorkspaceMenuModelTests: XCTestCase {
             quitAction: {}
         )
 
-        let preview = try await model.prepare(themeVariantID: pack.variants[0].qualifiedID)
+        let plan = try await model.prepare(themeVariantID: pack.variants[0].qualifiedID)
 
-        XCTAssertEqual(preview.targetPlans.count, 1)
-        XCTAssertEqual(preview.variantID, pack.variants[0].qualifiedID)
+        XCTAssertEqual(plan.targetPlans.count, 1)
+        XCTAssertEqual(plan.variantID, pack.variants[0].qualifiedID)
+        XCTAssertEqual(model.applyPlan?.id, plan.id)
+        XCTAssertEqual(model.preview?.id, plan.id)
     }
 
-    func testChangingThemeSelectionInvalidatesAnExistingPreview() async throws {
+    func testChangingThemeSelectionInvalidatesAnExistingApplyPlan() async throws {
         let workspace = Workspace(
             id: .myMac,
             displayName: "My Mac",
@@ -134,10 +136,12 @@ final class WorkspaceMenuModelTests: XCTestCase {
         )
 
         _ = try await model.prepareSelectedTheme()
+        XCTAssertNotNil(model.applyPlan)
         XCTAssertNotNil(model.preview)
 
         model.selectThemeVariant("oh-my-theme/aurora")
 
+        XCTAssertNil(model.applyPlan)
         XCTAssertNil(model.preview)
         XCTAssertNil(model.report)
     }
@@ -174,7 +178,7 @@ final class WorkspaceMenuModelTests: XCTestCase {
         )
 
         _ = try await model.prepareSelectedTheme()
-        _ = try await model.applyPreparedPreview()
+        _ = try await model.applyPreparedPlan()
 
         XCTAssertTrue(model.canUndoLastThemeChange)
         XCTAssertEqual(model.report?.title, "Theme applied")
