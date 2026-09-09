@@ -194,6 +194,11 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var canUndoLastThemeChange = false
     @Published private(set) var connectionReview: ConnectionPlan?
     @Published private(set) var approvalRequiredFor: TargetInstanceID?
+    @Published private(set) var disconnectReview: DisconnectReview?
+    @Published private(set) var disconnectReviewTarget: TargetInstanceID?
+    @Published private(set) var isReviewingDisconnect = false
+    @Published private(set) var relinquishReport: RelinquishReport?
+    @Published private(set) var isRelinquishingManagement = false
     @Published private(set) var operationError: String?
     @Published private(set) var isBusy = false
     @Published private(set) var isReady = true
@@ -846,9 +851,62 @@ final class WorkspacePresentationModel: ObservableObject {
     func restoreAndDisconnect(_ targetInstanceID: TargetInstanceID) async throws {
         let result = try await runtime.restoreAndDisconnect(targetInstanceID: targetInstanceID)
         report = present(outcomes: result.report.outcomes, kind: .disconnect)
+        disconnectReview = nil
+        disconnectReviewTarget = nil
+        relinquishReport = nil
         replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
         await refreshUndoAvailability()
         operationError = nil
+    }
+
+    /// Reviews restoring a connected target's Connection Baseline before mutation.
+    /// Clearing a connected Target Opt-in must go through this review.
+    func reviewDisconnect(_ targetInstanceID: TargetInstanceID) async throws {
+        guard !isReviewingDisconnect else { return }
+        isReviewingDisconnect = true
+        defer { isReviewingDisconnect = false }
+        disconnectReview = try await runtime.reviewDisconnect(targetInstanceID: targetInstanceID)
+        disconnectReviewTarget = targetInstanceID
+        relinquishReport = nil
+        report = nil
+        operationError = nil
+    }
+
+    func dismissDisconnectReview() {
+        guard !isRelinquishingManagement else { return }
+        disconnectReview = nil
+        disconnectReviewTarget = nil
+    }
+
+    /// Relinquishes management without restoring the Connection Baseline.
+    /// Leaves external configuration untouched; call only after the user confirms
+    /// the reported residual managed artifacts or paths.
+    @discardableResult
+    func relinquishManagement(_ targetInstanceID: TargetInstanceID) async throws -> RelinquishReport {
+        guard !isRelinquishingManagement else {
+            throw ThemeEngineError.engineUnavailable
+        }
+        isRelinquishingManagement = true
+        defer { isRelinquishingManagement = false }
+        let result = try await runtime.relinquishManagement(targetInstanceID: targetInstanceID)
+        relinquishReport = result.report
+        disconnectReview = nil
+        disconnectReviewTarget = nil
+        report = nil
+        replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+        await refreshUndoAvailability()
+        operationError = nil
+        return result.report
+    }
+
+    /// Clears a Target Opt-in through the safe path: unconnected opt-ins clear
+    /// with no external mutation; connected opt-ins present a disconnect review first.
+    func requestClearOptIn(_ instanceID: TargetInstanceID) async throws {
+        if workspace.isConnected(instanceID) {
+            try await reviewDisconnect(instanceID)
+        } else {
+            try await setTargetOptIn(instanceID, isOptedIn: false)
+        }
     }
 
     @discardableResult

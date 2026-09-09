@@ -234,6 +234,98 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         XCTAssertEqual(restoredWorld, initialWorld)
     }
 
+    func testClearingUnconnectedOptInRequiresNoExternalMutation() async throws {
+        let initialWorld = Data("baseline-unconnected".utf8)
+        let adapter = RecordingWritableAdapter(id: "recording", initialWorld: initialWorld)
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+        XCTAssertTrue(runtime.workspace.isOptedIn(candidateID))
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: false)
+
+        XCTAssertFalse(runtime.workspace.isOptedIn(candidateID))
+        XCTAssertFalse(runtime.workspace.isConnected(candidateID))
+        let finalWorld = await adapter.currentWorldBytes()
+        XCTAssertEqual(finalWorld, initialWorld)
+    }
+
+    func testReviewDisconnectPresentsRestorationBeforeMutation() async throws {
+        let initialWorld = Data("baseline-review".utf8)
+        let adapter = RecordingWritableAdapter(id: "recording", initialWorld: initialWorld)
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+        let reviewPlan = try await runtime.reviewConnection(optionID: candidateID)
+        _ = try await runtime.connect(optionID: candidateID, reviewedPlan: reviewPlan)
+        let worldAfterConnect = await adapter.currentWorldBytes()
+
+        let review = try await runtime.reviewDisconnect(targetInstanceID: candidateID)
+
+        XCTAssertTrue(review.isSafeToRestore)
+        XCTAssertNil(review.conflictDetail)
+        XCTAssertFalse(review.restorationSummary.isEmpty)
+        XCTAssertFalse(review.expectedEffects.isEmpty)
+        XCTAssertFalse(review.residualPathsIfRelinquished.isEmpty)
+        XCTAssertNotNil(review.baselineDigest)
+        XCTAssertTrue(runtime.workspace.isConnected(candidateID))
+        let worldAfterReview = await adapter.currentWorldBytes()
+        XCTAssertEqual(worldAfterReview, worldAfterConnect)
+    }
+
+    func testDisconnectConflictKeepsTargetConnected() async throws {
+        let initialWorld = Data("baseline-conflict".utf8)
+        let adapter = RecordingWritableAdapter(id: "recording", initialWorld: initialWorld)
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+        let reviewPlan = try await runtime.reviewConnection(optionID: candidateID)
+        _ = try await runtime.connect(optionID: candidateID, reviewedPlan: reviewPlan)
+
+        let externalEdit = Data("external-edit".utf8)
+        await adapter.mutateWorldExternally(externalEdit)
+
+        let review = try await runtime.reviewDisconnect(targetInstanceID: candidateID)
+        XCTAssertFalse(review.isSafeToRestore)
+        XCTAssertNotNil(review.conflictDetail)
+        XCTAssertFalse(review.residualPathsIfRelinquished.isEmpty)
+
+        let result = try await runtime.restoreAndDisconnect(targetInstanceID: candidateID)
+        XCTAssertEqual(result.report.outcomes.first?.configurationState, .conflicted)
+        XCTAssertEqual(result.report.outcomes.first?.rollbackState, .blocked)
+        XCTAssertTrue(runtime.workspace.isConnected(candidateID))
+        let worldAfterConflict = await adapter.currentWorldBytes()
+        XCTAssertEqual(worldAfterConflict, externalEdit)
+    }
+
+    func testRelinquishLeavesExternalUntouchedAndClearsManagement() async throws {
+        let initialWorld = Data("baseline-relinquish".utf8)
+        let adapter = RecordingWritableAdapter(id: "recording", initialWorld: initialWorld)
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+        let reviewPlan = try await runtime.reviewConnection(optionID: candidateID)
+        _ = try await runtime.connect(optionID: candidateID, reviewedPlan: reviewPlan)
+
+        let externalEdit = Data("external-edit-relinquish".utf8)
+        await adapter.mutateWorldExternally(externalEdit)
+
+        let result = try await runtime.relinquishManagement(targetInstanceID: candidateID)
+
+        XCTAssertFalse(result.report.residualPaths.isEmpty)
+        XCTAssertFalse(result.report.detail.isEmpty)
+        let worldAfterRelinquish = await adapter.currentWorldBytes()
+        XCTAssertEqual(worldAfterRelinquish, externalEdit)
+        XCTAssertFalse(runtime.workspace.isConnected(candidateID))
+        XCTAssertFalse(runtime.workspace.isOptedIn(candidateID))
+        XCTAssertFalse(store.workspace.isConnected(candidateID))
+        XCTAssertNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: candidateID))
+    }
+
     func testRuntimeStartupRecoveryClassifiesInterruptedAdapterMutation() async throws {
         let adapter = RecordingWritableAdapter(id: "recording")
         let runtime = makeRuntime(additionalAdapters: [adapter])

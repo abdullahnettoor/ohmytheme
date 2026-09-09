@@ -15,6 +15,65 @@ public struct ConnectionReport: Codable, Equatable, Sendable {
     }
 }
 
+/// A reviewed preview of restoring a Connected Target Instance's Connection Baseline
+/// and disconnecting it. Produced before any mutation so the user can confirm the
+/// exact restoration and expected residual effects.
+public struct DisconnectReview: Codable, Equatable, Sendable {
+    public let targetInstanceID: TargetInstanceID
+    public let adapterID: String
+    public let isSafeToRestore: Bool
+    public let restorationSummary: String
+    public let expectedEffects: [String]
+    public let residualPathsIfRelinquished: [String]
+    public let conflictDetail: String?
+    public let baselineDigest: String?
+
+    public init(
+        targetInstanceID: TargetInstanceID,
+        adapterID: String,
+        isSafeToRestore: Bool,
+        restorationSummary: String,
+        expectedEffects: [String] = [],
+        residualPathsIfRelinquished: [String] = [],
+        conflictDetail: String? = nil,
+        baselineDigest: String? = nil
+    ) {
+        self.targetInstanceID = targetInstanceID
+        self.adapterID = adapterID
+        self.isSafeToRestore = isSafeToRestore
+        self.restorationSummary = restorationSummary
+        self.expectedEffects = expectedEffects
+        self.residualPathsIfRelinquished = residualPathsIfRelinquished
+        self.conflictDetail = conflictDetail
+        self.baselineDigest = baselineDigest
+    }
+}
+
+/// The result of relinquishing management of a Connected Target Instance without
+/// restoring its Connection Baseline. External configuration is left untouched;
+/// residual managed artifacts or paths are reported for manual cleanup.
+public struct RelinquishReport: Codable, Equatable, Sendable {
+    public let operationID: UUID
+    public let targetInstanceID: TargetInstanceID
+    public let adapterID: String
+    public let residualPaths: [String]
+    public let detail: String
+
+    public init(
+        operationID: UUID,
+        targetInstanceID: TargetInstanceID,
+        adapterID: String,
+        residualPaths: [String],
+        detail: String
+    ) {
+        self.operationID = operationID
+        self.targetInstanceID = targetInstanceID
+        self.adapterID = adapterID
+        self.residualPaths = residualPaths
+        self.detail = detail
+    }
+}
+
 public struct DurableApplyReport: Codable, Equatable, Sendable {
     public let operationID: UUID
     public let variantID: String
@@ -2581,6 +2640,147 @@ extension ThemeEngine {
                 ]
             )
         }
+    }
+
+    // MARK: Disconnect review and Management Relinquishment
+
+    /// Reviews restoring a Connected Target Instance's Connection Baseline without mutating.
+    ///
+    /// Clearing a connected Target Opt-in must present this review before mutation.
+    /// When external edits make restoration unsafe, the review reports the conflict
+    /// and the target stays connected until the user chooses Restore and Disconnect
+    /// again or Management Relinquishment.
+    public func previewDisconnect(
+        instance: ConnectedTargetInstance,
+        workspace: Workspace
+    ) async throws -> DisconnectReview {
+        guard let persistence = self.persistenceStore else {
+            throw DurableOperationError.persistenceRequired
+        }
+        guard
+            let baseline = try persistence.journalLoadConnectionBaseline(
+                targetInstanceID: instance.id
+            )
+        else {
+            throw DurableOperationError.baselineMissing(instance.id)
+        }
+        guard let adapter = self.connectionAdapter(for: instance.adapterID) else {
+            throw DurableOperationError.adapterNotWritable(instance.adapterID)
+        }
+        let baselineData = try persistence.loadContent(baseline.baselineReference)
+        let residualPaths = adapter.residualManagedPaths(for: instance)
+        do {
+            _ = try await adapter.prepareDisconnect(
+                instance: instance,
+                baseline: baseline,
+                baselineData: baselineData
+            )
+            return DisconnectReview(
+                targetInstanceID: instance.id,
+                adapterID: adapter.id,
+                isSafeToRestore: true,
+                restorationSummary:
+                    "Restore the captured Connection Baseline for \(instance.displayName) and stop managing it.",
+                expectedEffects: [
+                    "Restore original configuration captured before Oh My Theme managed this target.",
+                    "Remove managed setup that still matches Oh My Theme's expected state.",
+                    "Stop managing \(instance.displayName); it leaves My Mac.",
+                ],
+                residualPathsIfRelinquished: residualPaths,
+                conflictDetail: nil,
+                baselineDigest: baseline.baselineReference.digest
+            )
+        } catch {
+            return DisconnectReview(
+                targetInstanceID: instance.id,
+                adapterID: adapter.id,
+                isSafeToRestore: false,
+                restorationSummary:
+                    "Restoration is blocked: \(instance.displayName) changed outside Oh My Theme.",
+                expectedEffects: [],
+                residualPathsIfRelinquished: residualPaths,
+                conflictDetail: String(describing: error),
+                baselineDigest: baseline.baselineReference.digest
+            )
+        }
+    }
+
+    /// Relinquishes management of a Connected Target Instance without restoration.
+    ///
+    /// Leaves external configuration untouched, reports residual managed artifacts
+    /// or paths for manual cleanup, and clears management state (connection,
+    /// baseline, and opt-in). Call only after explicit user confirmation, typically
+    /// when a DisconnectReview reports restoration is unsafe.
+    public func relinquishManagement(
+        instance: ConnectedTargetInstance,
+        workspace: Workspace
+    ) async throws -> RelinquishReport {
+        guard let persistence = self.persistenceStore else {
+            throw DurableOperationError.persistenceRequired
+        }
+        try await ensureNoOperationInProgress()
+        try await reconcileInterruptedOperations()
+
+        let adapter = self.connectionAdapter(for: instance.adapterID)
+        let residualPaths =
+            adapter?.residualManagedPaths(for: instance)
+            ?? ["Managed configuration for \(instance.displayName) remains in place and may need manual cleanup."]
+        let detail =
+            "Management relinquished for \(instance.displayName) without restoring the Connection Baseline. "
+            + "External configuration was left untouched."
+        let operation = try persistence.journalStartOperation(
+            kind: .disconnect,
+            workspaceID: workspace.id,
+            variantID: nil
+        )
+        try await beginOperationTracking(operation)
+        defer { try? closeOperationTracking(operation.id) }
+        let baselineDigest =
+            try persistence.journalLoadConnectionBaseline(targetInstanceID: instance.id)?.baselineReference.digest
+            ?? "no-baseline"
+        try persistence.journalSaveRecord(
+            JournaledRecord(
+                operationID: operation.id,
+                targetInstanceID: instance.id,
+                ordinal: 0,
+                adapterID: instance.adapterID,
+                adapterVersion: adapter?.version ?? "unknown",
+                capabilityID: "disconnect",
+                phase: .applied,
+                intendedChangeDigest: "relinquish.\(baselineDigest)",
+                staleStateToken: nil,
+                planDigest: nil,
+                receiptJSON: nil,
+                detail: detail
+            )
+        )
+        try persistence.finalizeConnectionOperation(
+            record: JournaledRecord(
+                operationID: operation.id,
+                targetInstanceID: instance.id,
+                ordinal: 0,
+                adapterID: instance.adapterID,
+                adapterVersion: adapter?.version ?? "unknown",
+                capabilityID: "disconnect",
+                phase: .applied,
+                intendedChangeDigest: "relinquish.\(baselineDigest)",
+                staleStateToken: nil,
+                planDigest: nil,
+                receiptJSON: nil,
+                detail: detail
+            ),
+            instance: instance,
+            connected: false,
+            workspace: workspace,
+            removeBaseline: true
+        )
+        return RelinquishReport(
+            operationID: operation.id,
+            targetInstanceID: instance.id,
+            adapterID: instance.adapterID,
+            residualPaths: residualPaths,
+            detail: detail
+        )
     }
 
     // MARK: Cancellation

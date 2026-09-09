@@ -16,6 +16,7 @@ struct WorkspaceControlsView: View {
 
     @ObservedObject var model: WorkspacePresentationModel
     @State private var pendingConnectionAction: PendingRestoreAndDisconnectAction?
+    @State private var confirmsRelinquishment = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,14 +77,130 @@ struct WorkspaceControlsView: View {
             titleVisibility: .visible,
             presenting: pendingConnectionAction
         ) { action in
-            Button("Restore and Disconnect", role: .destructive) {
-                perform(action)
+            Button("Review Restoration…") {
+                review(action)
             }
             Button("Cancel", role: .cancel) {}
         } message: { action in
             Text(action.message)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.disconnectReview != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        model.dismissDisconnectReview()
+                        confirmsRelinquishment = false
+                    }
+                }
+            )
+        ) {
+            if let review = model.disconnectReview {
+                disconnectReviewSheet(review)
+            }
+        }
 
+    }
+
+    private func disconnectReviewSheet(_ review: DisconnectReview) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(review.isSafeToRestore ? "Restore and disconnect?" : "Restoration blocked")
+                .font(.headline)
+                .accessibilityIdentifier("disconnect-review-title")
+            Text(review.restorationSummary)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("disconnect-review-summary")
+            if !review.expectedEffects.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Expected changes")
+                        .font(.caption.weight(.semibold))
+                    ForEach(review.expectedEffects, id: \.self) { effect in
+                        Label(effect, systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            if let conflict = review.conflictDetail {
+                Label("External change detected: \(conflict)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("disconnect-review-conflict")
+                Text(
+                    "The target stays connected until you choose a safe resolution. "
+                        + "Relinquishing leaves current configuration untouched."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if !review.residualPathsIfRelinquished.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("If you relinquish management, these remain in place:")
+                        .font(.caption.weight(.semibold))
+                    ForEach(review.residualPathsIfRelinquished, id: \.self) { path in
+                        Text(path)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityIdentifier("disconnect-review-residuals")
+            }
+            if let relinquished = model.relinquishReport,
+                relinquished.targetInstanceID == review.targetInstanceID
+            {
+                Label(relinquished.detail, systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("relinquish-report-detail")
+            }
+            HStack(spacing: 10) {
+                Button("Cancel", role: .cancel) {
+                    model.dismissDisconnectReview()
+                    confirmsRelinquishment = false
+                }
+                Spacer()
+                if review.isSafeToRestore {
+                    Button("Restore and Disconnect", role: .destructive) {
+                        model.perform {
+                            try await model.restoreAndDisconnect(review.targetInstanceID)
+                        }
+                        confirmsRelinquishment = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy)
+                    .accessibilityIdentifier("confirm-restore-and-disconnect")
+                } else {
+                    if confirmsRelinquishment {
+                        Button("Relinquish and Keep Files", role: .destructive) {
+                            model.perform {
+                                try await model.relinquishManagement(review.targetInstanceID)
+                            }
+                            confirmsRelinquishment = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isBusy)
+                        .accessibilityIdentifier("confirm-relinquish-management")
+                    } else {
+                        Button("Review Relinquishment…", role: .destructive) {
+                            confirmsRelinquishment = true
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("review-relinquishment-button")
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+        .padding(20)
+        .frame(minWidth: 380)
     }
 
     private var resumeSetupBanner: some View {
@@ -393,6 +510,14 @@ struct WorkspaceControlsView: View {
         pendingConnectionAction = nil
         model.perform {
             try await model.restoreAndDisconnect(action.targetInstanceID)
+        }
+    }
+
+    private func review(_ action: PendingRestoreAndDisconnectAction) {
+        pendingConnectionAction = nil
+        confirmsRelinquishment = false
+        model.perform {
+            try await model.reviewDisconnect(action.targetInstanceID)
         }
     }
 

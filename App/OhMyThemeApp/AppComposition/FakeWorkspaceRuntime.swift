@@ -35,6 +35,11 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var restoreAndDisconnectResult: WorkspaceConnectionResult?
     var restoreAndDisconnectError: (any Error)?
 
+    var reviewDisconnectResult: DisconnectReview?
+    var reviewDisconnectError: (any Error)?
+    var relinquishResult: WorkspaceRelinquishResult?
+    var relinquishError: (any Error)?
+
     var setupPlanToReturn: SetupPlan?
     var setupPlanError: (any Error)?
 
@@ -64,6 +69,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     private(set) var reviewCalls = 0
     private(set) var connectCalls = 0
     private(set) var disconnectCalls = 0
+    private(set) var reviewDisconnectCalls: [TargetInstanceID] = []
+    private(set) var relinquishCalls: [TargetInstanceID] = []
     private(set) var prepareSetupPlanCalls = 0
     private(set) var prepareSetupPlanRetrySources: [UUID?] = []
     private(set) var validateSetupPlanCalls = 0
@@ -270,6 +277,71 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
                 capabilityID: "disconnect",
                 detail: "Restored and disconnected."
             )
+        )
+    }
+
+    func reviewDisconnect(targetInstanceID: TargetInstanceID) async throws -> DisconnectReview {
+        reviewDisconnectCalls.append(targetInstanceID)
+        if let reviewDisconnectError {
+            throw reviewDisconnectError
+        }
+        if let reviewDisconnectResult {
+            return reviewDisconnectResult
+        }
+        guard let instance = workspace.connectedTargetInstances.first(where: { $0.id == targetInstanceID }) else {
+            throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
+        }
+        return DisconnectReview(
+            targetInstanceID: targetInstanceID,
+            adapterID: instance.adapterID,
+            isSafeToRestore: true,
+            restorationSummary:
+                "Restore the captured Connection Baseline for \(instance.displayName) and stop managing it.",
+            expectedEffects: [
+                "Restore original configuration.", "Remove managed setup.", "Stop managing target.",
+            ],
+            residualPathsIfRelinquished: ["Managed configuration for \(instance.displayName) remains in place."],
+            conflictDetail: nil,
+            baselineDigest: "fake-baseline"
+        )
+    }
+
+    func relinquishManagement(
+        targetInstanceID: TargetInstanceID
+    ) async throws -> WorkspaceRelinquishResult {
+        relinquishCalls.append(targetInstanceID)
+        if let relinquishError {
+            throw relinquishError
+        }
+        if let relinquishResult {
+            return relinquishResult
+        }
+        guard let instance = workspace.connectedTargetInstances.first(where: { $0.id == targetInstanceID }) else {
+            throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
+        }
+        var newOptIns = workspace.targetOptIns
+        newOptIns.remove(targetInstanceID)
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: workspace.connectedTargetInstances.filter { $0.id != targetInstanceID },
+            targetOptIns: newOptIns,
+            themeAssignment: workspace.themeAssignment
+        )
+        _ = try? await verifyThemeStatus()
+        let report = RelinquishReport(
+            operationID: UUID(),
+            targetInstanceID: targetInstanceID,
+            adapterID: instance.adapterID,
+            residualPaths: ["Managed configuration for \(instance.displayName) remains in place."],
+            detail: "Management relinquished for \(instance.displayName) without restoration."
+        )
+        return WorkspaceRelinquishResult(
+            snapshot: WorkspaceTargetSnapshot(
+                workspace: workspace,
+                targets: defaultTargets(for: workspace)
+            ),
+            report: report
         )
     }
 

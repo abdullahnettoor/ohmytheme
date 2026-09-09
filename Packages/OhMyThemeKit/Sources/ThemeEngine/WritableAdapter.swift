@@ -349,6 +349,13 @@ public extension ConnectionAdapter {
         try await prepareConnection(instance: instance, approveLinkedSource: false)
     }
 
+    /// Human-readable descriptions of managed artifacts or paths that remain
+    /// if management is relinquished without restoring the Connection Baseline.
+    /// Adapters override this to name concrete files, settings, or extensions.
+    func residualManagedPaths(for instance: ConnectedTargetInstance) -> [String] {
+        ["Managed configuration for \(instance.displayName) remains in place and may need manual cleanup."]
+    }
+
     func prepareDisconnect(
         instance: ConnectedTargetInstance,
         baseline: StoredConnectionBaseline

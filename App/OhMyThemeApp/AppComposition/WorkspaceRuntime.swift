@@ -30,6 +30,10 @@ protocol WorkspaceRuntime: AnyObject, ObservableObject {
     func restoreAndDisconnect(
         targetInstanceID: TargetInstanceID
     ) async throws -> WorkspaceConnectionResult
+    func reviewDisconnect(targetInstanceID: TargetInstanceID) async throws -> DisconnectReview
+    func relinquishManagement(
+        targetInstanceID: TargetInstanceID
+    ) async throws -> WorkspaceRelinquishResult
     func prepareSetupPlan(retrySourceOperationID: UUID?) async throws -> SetupPlan
     func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation
     func cancelRemainingSetup(operationID: UUID) async throws
@@ -65,6 +69,11 @@ struct WorkspaceTargetSnapshot: Equatable {
 struct WorkspaceConnectionResult: Equatable {
     let snapshot: WorkspaceTargetSnapshot
     let report: ConnectionReport
+}
+
+struct WorkspaceRelinquishResult: Equatable {
+    let snapshot: WorkspaceTargetSnapshot
+    let report: RelinquishReport
 }
 
 struct WorkspaceSetupResult: Equatable {

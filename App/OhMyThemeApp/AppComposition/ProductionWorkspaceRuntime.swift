@@ -280,6 +280,30 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         )
     }
 
+    func reviewDisconnect(targetInstanceID: TargetInstanceID) async throws -> DisconnectReview {
+        let themeEngine = try requiredThemeEngine()
+        guard let instance = workspace.connectedTargetInstances.first(where: { $0.id == targetInstanceID }) else {
+            throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
+        }
+        return try await themeEngine.previewDisconnect(instance: instance, workspace: workspace)
+    }
+
+    func relinquishManagement(
+        targetInstanceID: TargetInstanceID
+    ) async throws -> WorkspaceRelinquishResult {
+        let themeEngine = try requiredThemeEngine()
+        guard let instance = workspace.connectedTargetInstances.first(where: { $0.id == targetInstanceID }) else {
+            throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(targetInstanceID)
+        }
+        let report = try await themeEngine.relinquishManagement(instance: instance, workspace: workspace)
+        let discovery = await discoverAndRememberTargets()
+        _ = try? await verifyThemeStatus()
+        return WorkspaceRelinquishResult(
+            snapshot: makeSnapshot(discovery: discovery),
+            report: report
+        )
+    }
+
     func setTargetOptIn(
         instanceID: TargetInstanceID,
         isOptedIn: Bool

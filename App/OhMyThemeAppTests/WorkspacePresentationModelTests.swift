@@ -529,6 +529,91 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertTrue(model.workspace.connectedTargetInstances.isEmpty)
     }
 
+    func testRequestClearOptInRoutesConnectedTargetToDisconnectReview() async throws {
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.disconnect"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [instance]
+            )
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        try await model.requestClearOptIn(instance.id)
+
+        XCTAssertEqual(runtime.reviewDisconnectCalls, [instance.id])
+        XCTAssertNotNil(model.disconnectReview)
+        XCTAssertEqual(model.disconnectReview?.targetInstanceID, instance.id)
+        XCTAssertTrue(model.disconnectReview?.isSafeToRestore ?? false)
+        XCTAssertFalse(model.disconnectReview?.expectedEffects.isEmpty ?? true)
+        XCTAssertEqual(runtime.setTargetOptInCalls.count, 0)
+        XCTAssertTrue(model.workspace.isConnected(instance.id))
+    }
+
+    func testRequestClearOptInClearsUnconnectedTargetWithoutReview() async throws {
+        let targetID = TargetInstanceID(rawValue: "recording.unconnected")
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [],
+                targetOptIns: [targetID]
+            )
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        try await model.requestClearOptIn(targetID)
+
+        XCTAssertEqual(runtime.setTargetOptInCalls.count, 1)
+        XCTAssertEqual(runtime.reviewDisconnectCalls.count, 0)
+        XCTAssertNil(model.disconnectReview)
+        XCTAssertFalse(model.workspace.isOptedIn(targetID))
+    }
+
+    func testRelinquishManagementClearsTargetAndReportsResiduals() async throws {
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.disconnect"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [instance]
+            )
+        )
+        runtime.reviewDisconnectResult = DisconnectReview(
+            targetInstanceID: instance.id,
+            adapterID: instance.adapterID,
+            isSafeToRestore: false,
+            restorationSummary: "Restoration is blocked.",
+            expectedEffects: [],
+            residualPathsIfRelinquished: ["managed-state:recording.disconnect"],
+            conflictDetail: "External edit detected",
+            baselineDigest: "digest"
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        try await model.reviewDisconnect(instance.id)
+        XCTAssertFalse(model.disconnectReview?.isSafeToRestore ?? true)
+        XCTAssertNotNil(model.disconnectReview?.conflictDetail)
+
+        let report = try await model.relinquishManagement(instance.id)
+
+        XCTAssertEqual(runtime.relinquishCalls, [instance.id])
+        XCTAssertFalse(report.residualPaths.isEmpty)
+        XCTAssertTrue(model.workspace.connectedTargetInstances.isEmpty)
+        XCTAssertFalse(model.workspace.isOptedIn(instance.id))
+        XCTAssertNil(model.disconnectReview)
+        XCTAssertNotNil(model.relinquishReport)
+    }
+
     func testStartingPresentationDoesNotChangeThemeAssignment() async {
         let runtime = FakeWorkspaceRuntime(
             workspace: Workspace(

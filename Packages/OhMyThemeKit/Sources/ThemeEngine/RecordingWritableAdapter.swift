@@ -33,6 +33,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
     public let payloadVersion = "1"
 
     private var worldState: WorldState
+    private var externallyMutatedSinceConnection = false
     private let reportsUnchangedForSameBytes: Bool
     private var interruptions: Set<InterruptionPoint> = []
     private var connectedInstances: Set<TargetInstanceID> = []
@@ -99,6 +100,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
     /// Simulate an external edit that bumps the world revision, invalidating any in-flight plan.
     public func mutateWorldExternally(_ newBytes: Data) {
         worldState = WorldState(bytes: newBytes, revision: UUID().uuidString)
+        externallyMutatedSinceConnection = true
     }
 
     public func isConnected(_ id: TargetInstanceID) -> Bool {
@@ -163,6 +165,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         }
         // Perform the mutation.
         worldState = WorldState(bytes: plan.payload.payload, revision: plan.intendedChangeDigest)
+        externallyMutatedSinceConnection = false
         try trigger(.afterApplyWrite)
         return AdapterReceipt(
             configurationState: .updated,
@@ -238,6 +241,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
             bytes: worldState.bytes + Data(".connected".utf8),
             revision: "connect-\(plan.targetInstanceID.rawValue)"
         )
+        externallyMutatedSinceConnection = false
         connectedInstances.insert(plan.targetInstanceID)
         try trigger(.afterConnect)
         return ConnectionReceipt(
@@ -319,7 +323,16 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         baseline: StoredConnectionBaseline,
         baselineData: Data
     ) async throws -> DisconnectPlan {
-        DisconnectPlan(
+        guard connectedInstances.contains(instance.id) else {
+            throw RecordingWritableAdapterError.notConnected
+        }
+        guard !externallyMutatedSinceConnection else {
+            throw WriteBoundaryConflict(
+                targetInstanceID: instance.id,
+                detail: "world revision changed since connection; external edit detected"
+            )
+        }
+        return DisconnectPlan(
             targetInstanceID: instance.id,
             adapterID: id,
             adapterVersion: version,
@@ -341,6 +354,10 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         connectedInstances.contains(plan.targetInstanceID) ? .beforeChange : .intendedAfterChange
     }
 
+    public func residualManagedPaths(for instance: ConnectedTargetInstance) -> [String] {
+        ["recording-managed-state:\(instance.id.rawValue)"]
+    }
+
     public func disconnect(_ plan: DisconnectPlan, baseline: Data) async throws -> AdapterReceipt {
         try trigger(.beforeDisconnect)
         // Guarded: don't overwrite non-owned state.
@@ -348,6 +365,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
             throw RecordingWritableAdapterError.notConnected
         }
         worldState = WorldState(bytes: baseline, revision: "disconnected")
+        externallyMutatedSinceConnection = false
         connectedInstances.remove(plan.targetInstanceID)
         try trigger(.afterDisconnect)
         return AdapterReceipt(
