@@ -172,6 +172,21 @@ extension PersistenceStore {
         }
     }
 
+    /// Clears durable operation evidence only after every managed target has reached
+    /// a safe terminal state during Reset.
+    public func clearRecoveryData(workspaceID: WorkspaceID) throws {
+        try withWrite { database in
+            try database.execute(sql: "DELETE FROM connection_baselines")
+            try database.execute(sql: "DELETE FROM payload_envelopes")
+            try database.execute(
+                sql: "DELETE FROM operations WHERE workspace_id = ?",
+                arguments: [workspaceID.rawValue]
+            )
+            try database.execute(sql: "DELETE FROM content_references")
+        }
+        try contentStore.removeAll()
+    }
+
     public func journalStartOperation(
         id: UUID? = nil,
         kind: OperationKind,

@@ -111,6 +111,10 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter, DeferredConnection
         )
     }
 
+    public func residualManagedPaths(for instance: ConnectedTargetInstance) -> [String] {
+        ["System Settings > Appearance"]
+    }
+
     // MARK: - Connection
 
     public func prepareConnection(

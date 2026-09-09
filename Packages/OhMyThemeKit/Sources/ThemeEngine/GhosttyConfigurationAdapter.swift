@@ -419,6 +419,15 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
         )
     }
 
+    public func residualManagedPaths(for instance: ConnectedTargetInstance) -> [String] {
+        let configurationURL = configuredConfigurationURL
+            ?? locator.resolved(using: fileManager)
+            ?? locator.defaultURL
+        let managedArtifactURL = configuredManagedArtifactURL
+            ?? configurationURL.deletingLastPathComponent().appendingPathComponent("oh-my-theme.conf")
+        return [configurationURL.path, managedArtifactURL.path]
+    }
+
     public func prepareConnection(
         instance: ConnectedTargetInstance,
         approveLinkedSource: Bool = false

@@ -409,12 +409,12 @@ struct AppsView: View {
 
             if instance.isConnected {
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text("Connected")
+                    Text(instance.managementState == .unavailable ? "Unavailable" : "Connected")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
-                    Button("Disconnect…") {
+                    Button(instance.managementState == .unavailable ? "Review recovery…" : "Disconnect…") {
                         model.perform {
-                            try await model.reviewDisconnect(instance.id)
+                            try await model.requestClearOptIn(instance.id)
                         }
                     }
                     .controlSize(.small)

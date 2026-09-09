@@ -338,6 +338,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         try persistence.clearOnboardingDisposition(workspaceID: workspaceID)
         try persistence.clearLatestOperationReports(workspaceID: workspaceID)
         try persistence.saveTargetVerificationOutcomes([], workspaceID: workspaceID)
+        try persistence.clearRecoveryData(workspaceID: workspaceID)
         latestSetupReport = nil
         latestApplyReport = nil
         workspaceThemeStatus = nil
@@ -1457,7 +1458,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                     displayName: connected.displayName,
                     detail: detail,
                     adapterID: connected.adapterID,
-                    managementState: .needsAttention,
+                    managementState: .unavailable,
                     isOptedIn: true,
                     isConnected: true,
                     isRecommended: false,

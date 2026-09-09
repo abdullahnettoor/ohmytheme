@@ -39,6 +39,7 @@ public struct StarshipDiscoveryReport: Codable, Equatable, Sendable {
         self.ownership = ownership
         self.detail = detail
     }
+
 }
 
 public struct StarshipConfigurationLocator: Sendable {
@@ -164,6 +165,10 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
         self.managedFiles = managedFiles
         self.locator = StarshipConfigurationLocator(homeDirectory: homeDirectory, xdgConfigHome: xdgConfigHome)
         self.configuredConfigurationURL = configurationURL?.standardizedFileURL
+    }
+
+    public func residualManagedPaths(for instance: ConnectedTargetInstance) -> [String] {
+        [(configuredConfigurationURL ?? locator.defaultURL).path]
     }
 
     // MARK: Discovery

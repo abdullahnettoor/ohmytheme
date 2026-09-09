@@ -92,6 +92,12 @@ public final class ContentAddressedStore: @unchecked Sendable {
         return contentURL(for: reference.digest)
     }
 
+    public func removeAll() throws {
+        try fileManager.removeItem(at: rootURL)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        try setUserOnlyPermissions(at: rootURL, permissions: 0o700)
+    }
+
     public static func digest(of data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
