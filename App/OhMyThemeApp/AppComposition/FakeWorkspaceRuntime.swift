@@ -300,7 +300,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         guard case .fixed(let variantID) = workspace.themeAssignment else {
             throw ThemeEngineError.fixedThemeAssignmentRequired
         }
-        let targetPlans: [AdapterPlan] = workspace.connectedTargetInstances.map { instance in
+        let orderedInstances = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances)
+        let targetPlans: [AdapterPlan] = orderedInstances.map { instance in
             AdapterPlan(
                 targetInstanceID: instance.id,
                 adapterID: instance.adapterID,
@@ -353,7 +354,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         if let applyResult {
             return applyResult
         }
-        let outcomes = workspace.connectedTargetInstances.map { instance in
+        let orderedInstances = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances)
+        let outcomes = orderedInstances.map { instance in
             TargetCapabilityOutcome(
                 targetInstanceID: instance.id,
                 adapterID: instance.adapterID,

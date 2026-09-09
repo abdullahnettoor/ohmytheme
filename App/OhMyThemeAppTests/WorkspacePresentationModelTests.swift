@@ -342,7 +342,7 @@ final class WorkspacePresentationModelTests: XCTestCase {
         )
 
         XCTAssertEqual(report.sectionTitle, "Latest Apply Report")
-        XCTAssertEqual(report.title, "Theme already applied")
+        XCTAssertEqual(report.title, "My Mac is up to date")
     }
 
     func testPartialApplyUsesAnHonestReportTitle() {
@@ -1020,4 +1020,220 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertFalse(model.isBusy)
         XCTAssertEqual(model.operationError, "Setup was cancelled.")
     }
+
+    // MARK: - Issue #36 One-Action Apply Tests
+
+    func testApplyDesiredThemeExecutesCleanPlanInSingleActionWithoutRoutineConfirmation() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.instance"),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let report = try await model.applyDesiredTheme()
+
+        XCTAssertNotNil(report)
+        XCTAssertEqual(runtime.prepareCalls, 1)
+        XCTAssertEqual(runtime.applyCalls.count, 1)
+        XCTAssertNil(model.applyPlan, "Clean plan should not pause for confirmation")
+        XCTAssertEqual(model.report?.title, "Theme applied")
+        XCTAssertTrue(model.canUndoLastThemeChange)
+        XCTAssertFalse(model.isBusy)
+        XCTAssertFalse(model.isApplyingTheme)
+    }
+
+    func testApplyDesiredThemePreparesFreshPlanAgainstCurrentStateRatherThanBrowsing() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.instance"),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // Browsing does not prepare plans
+        model.selectThemeVariant("oh-my-theme/solarized-dark")
+        XCTAssertEqual(runtime.prepareCalls, 0)
+        XCTAssertNil(model.applyPlan)
+
+        // Applying prepares fresh against current state
+        _ = try await model.applyDesiredTheme()
+        XCTAssertEqual(runtime.prepareCalls, 1)
+        XCTAssertEqual(runtime.applyCalls.count, 1)
+    }
+
+    func testApplyDesiredThemeTargetsEveryConnectedTargetInstanceInEngineOwnedOrder() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let instances = [
+            ConnectedTargetInstance(
+                id: TargetInstanceID(rawValue: "starship.prompt"),
+                displayName: "Starship",
+                adapterID: "starship"
+            ),
+            ConnectedTargetInstance(
+                id: TargetInstanceID(rawValue: "macos.system-appearance"),
+                displayName: "macOS",
+                adapterID: "macos.appearance"
+            ),
+            ConnectedTargetInstance(
+                id: TargetInstanceID(rawValue: "ghostty.app"),
+                displayName: "Ghostty",
+                adapterID: "ghostty"
+            )
+        ]
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: instances,
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        _ = try await model.applyDesiredTheme()
+
+        let expectedOrder = WorkspaceTargetOrder.ordered(instances).map(\.id)
+        XCTAssertEqual(model.report?.groups.map(\.id), expectedOrder)
+    }
+
+    func testApplyDesiredThemeDropsAdditionalConcurrentRequests() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "recording.instance"),
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // Simulate busy state
+        model.perform {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        XCTAssertTrue(model.isBusy)
+
+        // Attempting to apply while busy should be immediately dropped
+        let result = try await model.applyDesiredTheme()
+        XCTAssertNil(result)
+        XCTAssertEqual(runtime.prepareCalls, 0)
+        XCTAssertEqual(runtime.applyCalls.count, 0)
+    }
+
+    func testApplyDesiredThemeReportsMyMacIsUpToDateAndPreservesUndoWhenUnchanged() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let targetID = TargetInstanceID(rawValue: "recording.instance")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: targetID,
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let previousLATOperationID = UUID()
+        let runtime = FakeWorkspaceRuntime(
+            workspace: workspace,
+            themePacks: packs,
+            undoAvailabilityResult: .available(sourceOperationID: previousLATOperationID, changedTargetCount: 1)
+        )
+        // Configure applyResult to return unchanged outcome
+        runtime.applyResult = DurableApplyReport(
+            operationID: UUID(),
+            variantID: "oh-my-theme/aurora",
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: targetID,
+                    adapterID: "recording",
+                    capabilityID: "theme",
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    configurationState: .unchanged,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Nothing changed"
+                )
+            ]
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        _ = try await model.applyDesiredTheme()
+
+        XCTAssertEqual(model.report?.title, "My Mac is up to date")
+        XCTAssertTrue(model.canUndoLastThemeChange, "Prior LAT is preserved for undo")
+        XCTAssertNil(model.applyPlan)
+    }
+
+    func testApplyDesiredThemeStopsForReviewWhenPlanHasReviewConditions() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let targetID = TargetInstanceID(rawValue: "recording.instance")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: targetID,
+                    displayName: "Recording",
+                    adapterID: "recording"
+                )
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        // Inject a plan with conflicts
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [targetID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .currentInstances,
+            setupNeeds: [],
+            conflicts: ["External edit conflict detected."],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: []
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let result = try await model.applyDesiredTheme()
+
+        XCTAssertNil(result, "Should not auto-apply when review conditions exist")
+        XCTAssertEqual(runtime.applyCalls.count, 0, "Mutation must not occur")
+        XCTAssertNotNil(model.applyPlan, "Plan is retained for user review")
+        XCTAssertNil(model.report)
+    }
 }
+

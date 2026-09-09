@@ -177,6 +177,7 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var setupProgress: SetupProgress?
     @Published private(set) var isExecutingSetup = false
     @Published private(set) var isCancellingRemainingSetup = false
+    @Published private(set) var isApplyingTheme = false
     @Published private(set) var latestSetupReport: SetupReport?
 
     @Published private(set) var report: PresentedReport?
@@ -498,11 +499,56 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     @discardableResult
-    func applyPreparedPlan() async throws -> DurableApplyReport {
+    func applyDesiredTheme() async throws -> DurableApplyReport? {
+        guard !isBusy, !isApplyingTheme, !isExecutingSetup else { return nil }
+        isBusy = true
+        isApplyingTheme = true
+        operationError = nil
+        defer {
+            isBusy = false
+            isApplyingTheme = false
+        }
+        do {
+            let prepared = try await runtime.prepareApplyPlan()
+            if prepared.isClean {
+                applyPlan = nil
+                let applied = try await runtime.apply(planID: prepared.id)
+                report = present(outcomes: applied.outcomes, kind: .apply)
+                await refreshUndoAvailability()
+                return applied
+            } else {
+                applyPlan = prepared
+                return nil
+            }
+        } catch {
+            operationError = Self.describe(error)
+            throw error
+        }
+    }
+
+    @discardableResult
+    func applyPreparedPlan() async throws -> DurableApplyReport? {
+        guard !isBusy, !isApplyingTheme, !isExecutingSetup else { return nil }
         guard let applyPlan else {
             throw ThemeEngineError.planNotFound(UUID())
         }
-        return try await apply(planID: applyPlan.id)
+        isBusy = true
+        isApplyingTheme = true
+        operationError = nil
+        defer {
+            isBusy = false
+            isApplyingTheme = false
+        }
+        do {
+            let applied = try await runtime.apply(planID: applyPlan.id)
+            self.applyPlan = nil
+            report = present(outcomes: applied.outcomes, kind: .apply)
+            await refreshUndoAvailability()
+            return applied
+        } catch {
+            operationError = Self.describe(error)
+            throw error
+        }
     }
 
     func restoreAndDisconnect(_ targetInstanceID: TargetInstanceID) async throws {
@@ -577,7 +623,7 @@ final class WorkspacePresentationModel: ObservableObject {
         switch (kind, hasSuccess, hasProblem) {
         case (.apply, true, false) where hasUpdate: title = "Theme applied"
         case (.apply, true, true) where hasUpdate: title = "Theme applied with remaining work"
-        case (.apply, true, false): title = "Theme already applied"
+        case (.apply, true, false): title = "My Mac is up to date"
         case (.apply, true, true): title = "Theme unchanged with remaining work"
         case (.apply, false, _): title = "Theme not applied"
         case (.undo, true, false): title = "Theme change undone"

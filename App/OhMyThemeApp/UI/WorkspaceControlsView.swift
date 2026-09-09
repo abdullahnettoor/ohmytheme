@@ -348,15 +348,16 @@ struct WorkspaceControlsView: View {
             .accessibilityIdentifier("overview-desired-theme-section")
 
             Button {
-                model.perform {
-                    _ = try await model.prepareSelectedTheme()
+                Task {
+                    _ = try? await model.applyDesiredTheme()
                 }
             } label: {
-                Label("Prepare Apply Plan", systemImage: "doc.text.magnifyingglass")
+                Label(model.isApplyingTheme ? "Applying Theme..." : "Apply Theme", systemImage: "paintbrush.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .disabled(!model.canApplyThemes || model.selectedThemeVariantID == nil || model.isBusy)
+            .accessibilityIdentifier("apply-theme-button")
         }
     }
 
@@ -423,8 +424,8 @@ struct WorkspaceControlsView: View {
             }
 
             Button {
-                model.perform {
-                    _ = try await model.applyPreparedPlan()
+                Task {
+                    _ = try? await model.applyPreparedPlan()
                 }
             } label: {
                 Label("Apply to ready Targets", systemImage: "paintbrush.fill")

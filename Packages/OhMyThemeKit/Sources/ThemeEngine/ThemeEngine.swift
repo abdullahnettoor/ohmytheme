@@ -362,6 +362,25 @@ public struct ApplyPlan: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+extension ApplyPlan {
+    public var hasReviewConditions: Bool {
+        !conflicts.isEmpty
+            || !preparationFailures.isEmpty
+            || !setupNeeds.isEmpty
+            || !unavailableCapabilities.isEmpty
+            || !unavailableTargetInstanceIDs.isEmpty
+            || targetPlans.contains {
+                !$0.requiredPermissions.isEmpty
+                    || !$0.conflicts.isEmpty
+                    || !$0.setupNeeds.isEmpty
+            }
+    }
+
+    public var isClean: Bool {
+        !hasReviewConditions && !targetPlans.isEmpty
+    }
+}
+
 public protocol ThemeAdapter: Sendable {
     var id: String { get }
     var version: String { get }
