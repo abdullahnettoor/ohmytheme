@@ -362,22 +362,199 @@ public struct ApplyPlan: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct PreflightReviewReason: Equatable, Sendable, Identifiable {
+    public var id: String { "\(targetInstanceID?.rawValue ?? "global")-\(category.rawValue)-\(title)" }
+    public let targetInstanceID: TargetInstanceID?
+    public let category: Category
+    public let title: String
+    public let detail: String
+
+    public enum Category: String, Equatable, Sendable {
+        case conflict
+        case ownership
+        case permission
+        case ambiguousTarget
+        case setupNeeded
+        case unavailable
+    }
+
+    public init(
+        targetInstanceID: TargetInstanceID? = nil,
+        category: Category,
+        title: String,
+        detail: String
+    ) {
+        self.targetInstanceID = targetInstanceID
+        self.category = category
+        self.title = title
+        self.detail = detail
+    }
+}
+
 extension ApplyPlan {
-    public var hasReviewConditions: Bool {
-        !conflicts.isEmpty
-            || !preparationFailures.isEmpty
-            || !setupNeeds.isEmpty
-            || !unavailableCapabilities.isEmpty
-            || !unavailableTargetInstanceIDs.isEmpty
-            || targetPlans.contains {
-                !$0.requiredPermissions.isEmpty
-                    || !$0.conflicts.isEmpty
-                    || !$0.setupNeeds.isEmpty
+    public var readyTargetPlans: [AdapterPlan] {
+        targetPlans.filter { plan in
+            plan.conflicts.isEmpty
+                && plan.setupNeeds.isEmpty
+                && !unavailableTargetInstanceIDs.contains(plan.targetInstanceID)
+                && !preparationFailures.contains(where: { $0.targetInstanceID == plan.targetInstanceID })
+        }
+    }
+
+    public var readyTargetInstanceIDs: [TargetInstanceID] {
+        readyTargetPlans.map(\.targetInstanceID)
+    }
+
+    public func preflightReviewReasons(
+        acknowledgedUnavailableTargets: Set<TargetInstanceID> = []
+    ) -> [PreflightReviewReason] {
+        var reasons: [PreflightReviewReason] = []
+
+        // 1. Conflicts
+        for plan in targetPlans where !plan.conflicts.isEmpty {
+            for conflict in plan.conflicts {
+                reasons.append(
+                    PreflightReviewReason(
+                        targetInstanceID: plan.targetInstanceID,
+                        category: .conflict,
+                        title: "Conflict",
+                        detail: conflict
+                    )
+                )
             }
+        }
+        for conflict in conflicts {
+            reasons.append(
+                PreflightReviewReason(
+                    targetInstanceID: nil,
+                    category: .conflict,
+                    title: "Conflict",
+                    detail: conflict
+                )
+            )
+        }
+
+        // 2. Preparation Failures (including ownership changes, permissions, ambiguous targets)
+        for failure in preparationFailures {
+            let lower = failure.detail.lowercased()
+            let category: PreflightReviewReason.Category
+            let title: String
+            if lower.contains("nix") || lower.contains("linked") || lower.contains("ownership") {
+                category = .ownership
+                title = "Configuration ownership changed"
+            } else if lower.contains("permission") || lower.contains("notauthorized") {
+                category = .permission
+                title = "Permission needed"
+            } else if lower.contains("ambiguous") {
+                category = .ambiguousTarget
+                title = "Ambiguous configuration"
+            } else {
+                category = .setupNeeded
+                title = "Could not prepare Target"
+            }
+            reasons.append(
+                PreflightReviewReason(
+                    targetInstanceID: failure.targetInstanceID,
+                    category: category,
+                    title: title,
+                    detail: failure.detail
+                )
+            )
+        }
+
+        // 3. Setup Needs
+        for plan in targetPlans where !plan.setupNeeds.isEmpty {
+            for need in plan.setupNeeds {
+                let lower = (need.title + " " + need.detail).lowercased()
+                let category: PreflightReviewReason.Category = lower.contains("permission") ? .permission : .setupNeeded
+                reasons.append(
+                    PreflightReviewReason(
+                        targetInstanceID: plan.targetInstanceID,
+                        category: category,
+                        title: need.title,
+                        detail: need.detail
+                    )
+                )
+            }
+        }
+        for need in setupNeeds {
+            if reasons.contains(where: { $0.title == need.title && $0.detail == need.detail }) {
+                continue
+            }
+            let lower = (need.title + " " + need.detail).lowercased()
+            let category: PreflightReviewReason.Category = lower.contains("permission") ? .permission : .setupNeeded
+            reasons.append(
+                PreflightReviewReason(
+                    targetInstanceID: nil,
+                    category: category,
+                    title: need.title,
+                    detail: need.detail
+                )
+            )
+        }
+
+        // 4. Unavailable Targets (filter out previously acknowledged)
+        let unacknowledged = unavailableTargetInstanceIDs.filter { !acknowledgedUnavailableTargets.contains($0) }
+        for id in unacknowledged {
+            reasons.append(
+                PreflightReviewReason(
+                    targetInstanceID: id,
+                    category: .unavailable,
+                    title: "Target unavailable",
+                    detail: "No compatible adapter prepared this Target Instance."
+                )
+            )
+        }
+
+        return reasons
+    }
+
+    public func preflightExplanation(
+        acknowledgedUnavailableTargets: Set<TargetInstanceID> = []
+    ) -> String? {
+        let reasons = preflightReviewReasons(acknowledgedUnavailableTargets: acknowledgedUnavailableTargets)
+        guard !reasons.isEmpty else { return nil }
+        let affectedIDs = Set(reasons.compactMap(\.targetInstanceID))
+        let targetPhrase: String
+        if affectedIDs.isEmpty {
+            targetPhrase = "Review is required"
+        } else if affectedIDs.count == 1 {
+            targetPhrase = "1 Target Instance requires review"
+        } else {
+            targetPhrase = "\(affectedIDs.count) Target Instances require review"
+        }
+
+        var issueDescriptions: [String] = []
+        let categories = Set(reasons.map(\.category))
+        if categories.contains(.conflict) { issueDescriptions.append("conflicts") }
+        if categories.contains(.ownership) { issueDescriptions.append("configuration ownership changes") }
+        if categories.contains(.permission) { issueDescriptions.append("new permissions") }
+        if categories.contains(.ambiguousTarget) { issueDescriptions.append("ambiguous configuration") }
+        if categories.contains(.setupNeeded) { issueDescriptions.append("required setup") }
+        if categories.contains(.unavailable) { issueDescriptions.append("unavailable targets") }
+
+        return "Automatic Apply paused because \(targetPhrase): \(issueDescriptions.joined(separator: ", "))."
+    }
+
+    public var hasReviewConditions: Bool {
+        hasReviewConditions(acknowledgedUnavailableTargets: [])
+    }
+
+    public func hasReviewConditions(
+        acknowledgedUnavailableTargets: Set<TargetInstanceID> = []
+    ) -> Bool {
+        !preflightReviewReasons(acknowledgedUnavailableTargets: acknowledgedUnavailableTargets).isEmpty
     }
 
     public var isClean: Bool {
-        !hasReviewConditions && !targetPlans.isEmpty
+        isClean(acknowledgedUnavailableTargets: [])
+    }
+
+    public func isClean(
+        acknowledgedUnavailableTargets: Set<TargetInstanceID> = []
+    ) -> Bool {
+        !hasReviewConditions(acknowledgedUnavailableTargets: acknowledgedUnavailableTargets)
+            && !readyTargetPlans.isEmpty
     }
 }
 
@@ -450,6 +627,10 @@ public actor ThemeEngine {
         if let connectionAdapter = adapter as? any ConnectionAdapter {
             connectionAdaptersByID[adapter.id] = connectionAdapter
         }
+    }
+
+    internal func storePlanInFlight(_ plan: ApplyPlan) {
+        plansInFlight[plan.id] = plan
     }
 
     public func prepare(workspace: Workspace) async throws -> ApplyPlan {
@@ -660,6 +841,42 @@ public actor ThemeEngine {
                     configurationState: .unavailable,
                     runningInstanceReach: .unavailable,
                     detail: "The adapter is unavailable."
+                )
+                continue
+            }
+            if !targetPlan.conflicts.isEmpty {
+                let conflictDetail = targetPlan.conflicts.joined(separator: "; ")
+                outcomes[index] = TargetCapabilityOutcome(
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: targetPlan.capabilityID,
+                    sourceType: targetPlan.sourceType,
+                    sourceRevision: targetPlan.sourceRevision,
+                    configurationState: .conflicted,
+                    runningInstanceReach: .unavailable,
+                    detail: conflictDetail,
+                    rollbackState: .blocked,
+                    userActions: [Self.reviewExternalChangeAction]
+                )
+                continue
+            }
+            if !targetPlan.setupNeeds.isEmpty {
+                let setupDetail = targetPlan.setupNeeds.map(\.detail).joined(separator: "; ")
+                let isPermission = targetPlan.setupNeeds.contains {
+                    $0.title.localizedCaseInsensitiveContains("permission")
+                        || $0.detail.localizedCaseInsensitiveContains("permission")
+                }
+                outcomes[index] = TargetCapabilityOutcome(
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    adapterID: targetPlan.adapterID,
+                    capabilityID: targetPlan.capabilityID,
+                    sourceType: targetPlan.sourceType,
+                    sourceRevision: targetPlan.sourceRevision,
+                    configurationState: isPermission ? .permissionRequired : .failed,
+                    runningInstanceReach: .unavailable,
+                    detail: setupDetail,
+                    rollbackState: .notNeeded,
+                    userActions: targetPlan.setupNeeds
                 )
                 continue
             }

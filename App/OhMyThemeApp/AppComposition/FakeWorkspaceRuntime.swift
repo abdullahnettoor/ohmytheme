@@ -354,9 +354,57 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         if let applyResult {
             return applyResult
         }
+        let plan = prepareApplyPlanResult?.id == planID ? prepareApplyPlanResult : nil
         let orderedInstances = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances)
         let outcomes = orderedInstances.map { instance in
-            TargetCapabilityOutcome(
+            if let plan, let targetPlan = plan.targetPlans.first(where: { $0.targetInstanceID == instance.id }) {
+                if !targetPlan.conflicts.isEmpty {
+                    return TargetCapabilityOutcome(
+                        targetInstanceID: instance.id,
+                        adapterID: instance.adapterID,
+                        capabilityID: targetPlan.capabilityID,
+                        sourceType: targetPlan.sourceType,
+                        sourceRevision: targetPlan.sourceRevision,
+                        configurationState: .conflicted,
+                        runningInstanceReach: .unavailable,
+                        detail: targetPlan.conflicts.joined(separator: "; "),
+                        rollbackState: .blocked,
+                        userActions: []
+                    )
+                }
+                if !targetPlan.setupNeeds.isEmpty {
+                    let isPermission = targetPlan.setupNeeds.contains {
+                        $0.kind == .permission
+                            || $0.title.localizedCaseInsensitiveContains("permission")
+                            || $0.detail.localizedCaseInsensitiveContains("permission")
+                    }
+                    return TargetCapabilityOutcome(
+                        targetInstanceID: instance.id,
+                        adapterID: instance.adapterID,
+                        capabilityID: targetPlan.capabilityID,
+                        sourceType: targetPlan.sourceType,
+                        sourceRevision: targetPlan.sourceRevision,
+                        configurationState: isPermission ? .permissionRequired : .failed,
+                        runningInstanceReach: .unavailable,
+                        detail: targetPlan.setupNeeds.map(\.detail).joined(separator: "; "),
+                        rollbackState: .notNeeded,
+                        userActions: targetPlan.setupNeeds
+                    )
+                }
+            } else if let plan, plan.unavailableTargetInstanceIDs.contains(instance.id) {
+                return TargetCapabilityOutcome(
+                    targetInstanceID: instance.id,
+                    adapterID: instance.adapterID,
+                    capabilityID: "theme",
+                    sourceType: .unavailable,
+                    sourceRevision: "",
+                    configurationState: .unavailable,
+                    runningInstanceReach: .unavailable,
+                    detail: "Target unavailable.",
+                    rollbackState: .notNeeded
+                )
+            }
+            return TargetCapabilityOutcome(
                 targetInstanceID: instance.id,
                 adapterID: instance.adapterID,
                 capabilityID: "theme",
@@ -369,7 +417,12 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             )
         }
         let opID = UUID()
-        undoAvailabilityResult = .available(sourceOperationID: opID, changedTargetCount: outcomes.count)
+        let updatedCount = outcomes.filter { $0.configurationState == .updated }.count
+        if updatedCount > 0 {
+            undoAvailabilityResult = .available(sourceOperationID: opID, changedTargetCount: updatedCount)
+        } else {
+            undoAvailabilityResult = .unavailable
+        }
         let variantID: String
         if case .fixed(let v) = workspace.themeAssignment {
             variantID = v

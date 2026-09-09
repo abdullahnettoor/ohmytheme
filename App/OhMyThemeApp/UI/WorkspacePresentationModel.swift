@@ -171,6 +171,7 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var workspace: Workspace
     @Published private(set) var applicationTargets: [ApplicationTarget]
     @Published private(set) var applyPlan: ApplyPlan?
+    @Published private(set) var acknowledgedUnavailableTargetInstanceIDs: Set<TargetInstanceID> = []
     @Published private(set) var setupPlan: SetupPlan?
     @Published private(set) var setupPlanInvalidationReason: String?
     @Published private(set) var isPreparingSetupPlan = false
@@ -510,7 +511,7 @@ final class WorkspacePresentationModel: ObservableObject {
         }
         do {
             let prepared = try await runtime.prepareApplyPlan()
-            if prepared.isClean {
+            if prepared.isClean(acknowledgedUnavailableTargets: acknowledgedUnavailableTargetInstanceIDs) {
                 applyPlan = nil
                 let applied = try await runtime.apply(planID: prepared.id)
                 report = present(outcomes: applied.outcomes, kind: .apply)
@@ -540,6 +541,7 @@ final class WorkspacePresentationModel: ObservableObject {
             isApplyingTheme = false
         }
         do {
+            acknowledgedUnavailableTargetInstanceIDs.formUnion(applyPlan.unavailableTargetInstanceIDs)
             let applied = try await runtime.apply(planID: applyPlan.id)
             self.applyPlan = nil
             report = present(outcomes: applied.outcomes, kind: .apply)

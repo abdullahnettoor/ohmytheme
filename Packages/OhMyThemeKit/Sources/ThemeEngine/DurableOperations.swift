@@ -1834,6 +1834,40 @@ extension ThemeEngine {
             )
         }
 
+        if !plan.conflicts.isEmpty {
+            let conflictDetail = plan.conflicts.joined(separator: "; ")
+            try persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operationID,
+                    targetInstanceID: plan.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: plan.adapterID,
+                    adapterVersion: plan.adapterVersion,
+                    capabilityID: plan.capabilityID,
+                    phase: .conflicted,
+                    intendedChangeDigest: plan.intendedChangeDigest,
+                    staleStateToken: plan.staleStateToken,
+                    planDigest: planReference?.digest,
+                    receiptJSON: nil,
+                    detail: conflictDetail
+                )
+            )
+            return TargetCapabilityOutcome(
+                targetInstanceID: plan.targetInstanceID,
+                adapterID: plan.adapterID,
+                capabilityID: plan.capabilityID,
+                sourceType: plan.sourceType,
+                sourceRevision: plan.sourceRevision,
+                configurationState: .conflicted,
+                runningInstanceReach: .unavailable,
+                detail: conflictDetail,
+                rollbackState: .blocked,
+                userActions: [Self.reviewExternalChangeAction]
+            )
+        }
+
+
+
         // Write-boundary revalidation — a changed precondition becomes a conflict.
         if let writable = adapter as? any WritableThemeAdapter {
             do {
@@ -3094,7 +3128,7 @@ extension ThemeEngine {
 
     // MARK: Helpers
 
-    private static let reviewExternalChangeAction = UserAction(
+    internal static let reviewExternalChangeAction = UserAction(
         title: "Review external change",
         detail: "Review the external change before trying again."
     )

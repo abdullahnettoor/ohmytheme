@@ -1235,4 +1235,266 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNotNil(model.applyPlan, "Plan is retained for user review")
         XCTAssertNil(model.report)
     }
+
+    func testPreflightReviewStopsForConflictsOwnershipPermissionsAndAmbiguity() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let ghosttyID = TargetInstanceID(rawValue: "ghostty.app")
+        let macosID = TargetInstanceID(rawValue: "macos.appearance")
+        let instances = [
+            ConnectedTargetInstance(id: macosID, displayName: "macOS", adapterID: "macos.appearance"),
+            ConnectedTargetInstance(id: ghosttyID, displayName: "Ghostty", adapterID: "ghostty")
+        ]
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: instances,
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        
+        let targetPlans = [
+            AdapterPlan(
+                targetInstanceID: macosID,
+                adapterID: "macos.appearance",
+                adapterVersion: "1.0.0",
+                capabilityID: "theme",
+                payload: AdapterPayloadEnvelope(adapterID: "fake", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+                intendedChangeDigest: "digest",
+                expectedSideEffects: [],
+                requiredPermissions: ["Automation control of System Events"],
+                sourceType: .upstream,
+                sourceRevision: "1",
+                activationReach: .currentInstances,
+                setupNeeds: [UserAction(title: "Permission needed", detail: "Allow Automation control of System Events.", kind: .permission)],
+                conflicts: []
+            ),
+            AdapterPlan(
+                targetInstanceID: ghosttyID,
+                adapterID: "ghostty",
+                adapterVersion: "1.0.0",
+                capabilityID: "theme",
+                payload: AdapterPayloadEnvelope(adapterID: "fake", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+                intendedChangeDigest: "digest",
+                expectedSideEffects: ["Update ghostty config"],
+                requiredPermissions: [],
+                sourceType: .upstream,
+                sourceRevision: "1",
+                activationReach: .reloadRequired,
+                setupNeeds: [],
+                conflicts: []
+            )
+        ]
+        
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [macosID, ghosttyID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [UserAction(title: "Permission needed", detail: "Allow Automation control of System Events.", kind: .permission)],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: targetPlans
+        )
+        
+        let model = WorkspacePresentationModel(runtime: runtime)
+        
+        // 1. Initial Apply stops before mutation
+        let result = try await model.applyDesiredTheme()
+        XCTAssertNil(result)
+        XCTAssertEqual(runtime.applyCalls.count, 0, "No target changes before review resolution")
+        XCTAssertNotNil(model.applyPlan)
+        
+        // 2. Preflight review reasons identify affected targets and explanation
+        let reasons = model.applyPlan?.preflightReviewReasons(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs) ?? []
+        XCTAssertEqual(reasons.count, 1)
+        XCTAssertEqual(reasons.first?.targetInstanceID, macosID)
+        XCTAssertEqual(reasons.first?.category, .permission)
+        
+        let explanation = model.applyPlan?.preflightExplanation(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs)
+        XCTAssertNotNil(explanation)
+        XCTAssertTrue(explanation!.contains("Automatic Apply paused because"))
+        
+        // Ready targets list
+        XCTAssertEqual(model.applyPlan?.readyTargetInstanceIDs, [ghosttyID])
+        
+        // 3. Apply to Ready Targets mutates only ready instances and yields honest report
+        let appliedReport = try await model.applyPreparedPlan()
+        XCTAssertNotNil(appliedReport)
+        XCTAssertEqual(runtime.applyCalls.count, 1)
+        XCTAssertNil(model.applyPlan)
+        XCTAssertEqual(model.report?.title, "Theme applied with remaining work")
+        
+        // macOS should be permissionRequired, ghostty should be updated
+        let macosOutcome = model.report?.groups.first(where: { $0.id == macosID })?.outcomes.first
+        XCTAssertEqual(macosOutcome?.configuration, "Permission required")
+        let ghosttyOutcome = model.report?.groups.first(where: { $0.id == ghosttyID })?.outcomes.first
+        XCTAssertEqual(ghosttyOutcome?.configuration, "Updated")
+    }
+
+    func testPreviouslyAcknowledgedUnavailableTargetsDoNotBlockRoutineApply() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let ghosttyID = TargetInstanceID(rawValue: "ghostty.app")
+        let unavailID = TargetInstanceID(rawValue: "unavail.target")
+        let instances = [
+            ConnectedTargetInstance(id: ghosttyID, displayName: "Ghostty", adapterID: "ghostty"),
+            ConnectedTargetInstance(id: unavailID, displayName: "Unavailable Target", adapterID: "unavail")
+        ]
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: instances,
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        
+        let ghosttyPlan = AdapterPlan(
+            targetInstanceID: ghosttyID,
+            adapterID: "ghostty",
+            adapterVersion: "1.0.0",
+            capabilityID: "theme",
+            payload: AdapterPayloadEnvelope(adapterID: "fake", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+            intendedChangeDigest: "digest",
+            expectedSideEffects: [],
+            requiredPermissions: [],
+            sourceType: .upstream,
+            sourceRevision: "1",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: []
+        )
+        
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [ghosttyID, unavailID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [unavailID],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: [ghosttyPlan]
+        )
+        
+        let model = WorkspacePresentationModel(runtime: runtime)
+        
+        // First apply stops because unavailID is not yet acknowledged
+        let firstResult = try await model.applyDesiredTheme()
+        XCTAssertNil(firstResult)
+        XCTAssertNotNil(model.applyPlan)
+        
+        // User chooses Apply to ready Targets
+        _ = try await model.applyPreparedPlan()
+        XCTAssertTrue(model.acknowledgedUnavailableTargetInstanceIDs.contains(unavailID))
+        
+        // Next routine apply: unavailID is acknowledged, so apply proceeds directly without pausing!
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [ghosttyID, unavailID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [unavailID],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: [ghosttyPlan]
+        )
+        
+        let secondResult = try await model.applyDesiredTheme()
+        XCTAssertNotNil(secondResult, "Routine Apply should not be blocked by previously acknowledged unavailable target")
+        XCTAssertEqual(runtime.applyCalls.count, 2)
+    }
+
+    func testDocumentedReachRequirementsDoNotBlockRoutineApply() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let ghosttyID = TargetInstanceID(rawValue: "ghostty.app")
+        let starshipID = TargetInstanceID(rawValue: "starship.prompt")
+        let instances = [
+            ConnectedTargetInstance(id: ghosttyID, displayName: "Ghostty", adapterID: "ghostty"),
+            ConnectedTargetInstance(id: starshipID, displayName: "Starship", adapterID: "starship")
+        ]
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: instances,
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [ghosttyID, starshipID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: [
+                AdapterPlan(
+                    targetInstanceID: ghosttyID,
+                    adapterID: "ghostty",
+                    adapterVersion: "1.0.0",
+                    capabilityID: "theme",
+                    payload: AdapterPayloadEnvelope(adapterID: "fake", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+                    intendedChangeDigest: "digest",
+                    expectedSideEffects: [],
+                    requiredPermissions: [],
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    activationReach: .reloadRequired,
+                    setupNeeds: [],
+                    conflicts: []
+                ),
+                AdapterPlan(
+                    targetInstanceID: starshipID,
+                    adapterID: "starship",
+                    adapterVersion: "1.0.0",
+                    capabilityID: "theme",
+                    payload: AdapterPayloadEnvelope(adapterID: "fake", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+                    intendedChangeDigest: "digest",
+                    expectedSideEffects: [],
+                    requiredPermissions: [],
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    activationReach: .nextPrompt,
+                    setupNeeds: [],
+                    conflicts: []
+                )
+            ]
+        )
+        
+        let model = WorkspacePresentationModel(runtime: runtime)
+        let result = try await model.applyDesiredTheme()
+        XCTAssertNotNil(result, "Documented reload/nextPrompt reach must not block routine Apply")
+        XCTAssertEqual(runtime.applyCalls.count, 1)
+    }
 }

@@ -366,6 +366,32 @@ struct WorkspaceControlsView: View {
             sectionHeading(
                 "Apply Plan", detail: "Prepared for \(plan.targetInstanceIDs.count) Target Instances.")
 
+            if let explanation = plan.preflightExplanation(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs) {
+                Text(explanation)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("preflight-review-explanation")
+            }
+
+            let reasons = plan.preflightReviewReasons(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs)
+            if !reasons.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(reasons) { reason in
+                        let targetName: String? = reason.targetInstanceID.flatMap { targetID in
+                            model.workspace.connectedTargetInstances.first(where: { $0.id == targetID })?.displayName
+                                ?? model.applicationTargets.flatMap(\.instances).first(where: { $0.id == targetID })?.displayName
+                        }
+                        let reasonTitle = targetName.map { "\($0): \(reason.title)" } ?? reason.title
+                        messageRow(
+                            title: reasonTitle,
+                            detail: reason.detail,
+                            systemImage: reasonIcon(category: reason.category),
+                            color: reasonColor(category: reason.category)
+                        )
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 7) {
                 planFact("Source", value: plan.sourceType.rawValue.capitalized)
                 planFact("Expected reach", value: reachLabel(plan.activationReach))
@@ -434,12 +460,31 @@ struct WorkspaceControlsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(
                 model.isBusy
-                    || plan.targetPlans.isEmpty
+                    || plan.readyTargetPlans.isEmpty
             )
             .accessibilityIdentifier("apply-plan")
         }
         .padding(14)
         .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func reasonIcon(category: PreflightReviewReason.Category) -> String {
+        switch category {
+        case .conflict: "exclamationmark.triangle.fill"
+        case .ownership: "exclamationmark.circle"
+        case .permission: "lock.open"
+        case .ambiguousTarget: "questionmark.circle"
+        case .setupNeeded: "wrench.and.screwdriver"
+        case .unavailable: "minus.circle"
+        }
+    }
+
+    private func reasonColor(category: PreflightReviewReason.Category) -> Color {
+        switch category {
+        case .conflict, .ambiguousTarget: .red
+        case .ownership, .permission, .setupNeeded: .orange
+        case .unavailable: .secondary
+        }
     }
 
     private func reportSection(_ report: WorkspacePresentationModel.PresentedReport) -> some View {
