@@ -860,6 +860,94 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertEqual(runtime.prepareSetupPlanRetrySources.last!, failedReport.operationID)
     }
 
+    func testExecuteSetupPlanPresentsCombinedOutcomesOnRetry() async throws {
+        let instance1ID = TargetInstanceID(rawValue: "macos.appearance")
+        let instance2ID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instance1ID, instance2ID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let priorOperationID = UUID()
+        let retryReport = SetupReport(
+            operationID: UUID(),
+            retrySourceOperationID: priorOperationID,
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: instance2ID,
+                    adapterID: "ghostty",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Connected via retry."
+                )
+            ],
+            combinedOutcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: instance1ID,
+                    adapterID: "macos.appearance",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Connected earlier."
+                ),
+                TargetCapabilityOutcome(
+                    targetInstanceID: instance2ID,
+                    adapterID: "ghostty",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Connected via retry."
+                )
+            ]
+        )
+        runtime.executeSetupPlanResult = WorkspaceSetupResult(
+            snapshot: WorkspaceTargetSnapshot(workspace: workspace, targets: []),
+            report: retryReport
+        )
+
+        await model.prepareSetupPlan(retrySourceOperationID: priorOperationID)
+        _ = try await model.executeSetupPlan()
+
+        // Combined outcomes should be presented, showing both target1 and target2
+        XCTAssertEqual(model.report?.kind, .setup)
+        XCTAssertEqual(model.report?.groups.map(\.id), [instance1ID, instance2ID])
+    }
+
+    func testUpdatingInvalidatedRetryPlanPreservesRetrySourceOperationID() async throws {
+        let instanceID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [],
+            targetOptIns: [instanceID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let retrySourceID = UUID()
+        await model.prepareSetupPlan(retrySourceOperationID: retrySourceID)
+        XCTAssertEqual(model.setupPlan?.retrySourceOperationID, retrySourceID)
+
+        // Invalidate the retry plan
+        try await model.setTargetOptIn(instanceID, isOptedIn: false)
+        XCTAssertTrue(model.isSetupPlanInvalidated)
+
+        // Updating/re-preparing the plan preserves the retrySourceOperationID
+        await model.prepareSetupPlan(retrySourceOperationID: model.setupPlan?.retrySourceOperationID)
+        XCTAssertEqual(runtime.prepareSetupPlanRetrySources.last!, retrySourceID)
+    }
+
     func testExecuteSetupPlanBlocksConcurrentExecution() async throws {
         let instanceID = TargetInstanceID(rawValue: "ghostty.default")
         let workspace = Workspace(

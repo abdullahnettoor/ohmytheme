@@ -103,7 +103,7 @@ struct SetupPlanReviewView: View {
 
                 Button("Review Updated Plan") {
                     Task {
-                        await model.prepareSetupPlan()
+                        await model.prepareSetupPlan(retrySourceOperationID: plan.retrySourceOperationID)
                     }
                 }
                 .controlSize(.small)
@@ -401,7 +401,7 @@ struct SetupPlanReviewView: View {
             } else if model.isSetupPlanInvalidated {
                 Button("Update Plan") {
                     Task {
-                        await model.prepareSetupPlan()
+                        await model.prepareSetupPlan(retrySourceOperationID: plan.retrySourceOperationID)
                     }
                 }
                 .buttonStyle(.borderedProminent)

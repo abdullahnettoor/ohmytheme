@@ -601,6 +601,182 @@ struct SetupTransactionTests {
         )
     }
 
+    @Test("Retry Remaining excludes targets that are already connected successfully")
+    func retryRemainingExcludesAlreadyConnectedTargets() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let target1ID = TargetInstanceID(rawValue: "macos.appearance")
+        let target2ID = TargetInstanceID(rawValue: "starship.default")
+        let target1 = ConnectedTargetInstance(id: target1ID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let target2 = ConnectedTargetInstance(id: target2ID, displayName: "Starship", adapterID: "starship")
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "starship")
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter1, adapter2], persistence: fixture.store)
+
+        // Workspace where target1 is already connected successfully
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [target1],
+            targetOptIns: [target1ID, target2ID],
+            themeAssignment: nil
+        )
+
+        // Prepare retry remaining passing both candidate instances
+        let retryPlan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [target1, target2],
+            retrySourceOperationID: UUID()
+        )
+
+        // Excludes target1 because target1 is already connected
+        #expect(retryPlan.targetInstanceIDs == [target2ID])
+        #expect(retryPlan.targetPlans.map(\.targetInstanceID) == [target2ID])
+    }
+
+    @Test("Retry prepares a fresh Setup Plan and produces combined outcomes without erasing earlier receipts")
+    func retryProducesCombinedOutcomesWithoutErasingEarlierReceipts() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let target1ID = TargetInstanceID(rawValue: "macos.appearance")
+        let target2ID = TargetInstanceID(rawValue: "starship.default")
+        let target1 = ConnectedTargetInstance(id: target1ID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let target2 = ConnectedTargetInstance(id: target2ID, displayName: "Starship", adapterID: "starship")
+
+        let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
+        let adapter2 = RecordingWritableAdapter(id: "starship")
+        await adapter2.setBeforeConnectHook { _ in
+            throw RecordingConnectionFailedError()
+        }
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter1, adapter2], persistence: fixture.store)
+
+        var workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [target1ID, target2ID],
+            themeAssignment: nil
+        )
+
+        // 1. Initial attempt: target1 succeeds, target2 fails
+        let firstPlan = try await engine.prepareSetup(workspace: workspace, instances: [target1, target2])
+        let firstReport = try await engine.executeSetup(
+            plan: firstPlan,
+            workspace: workspace,
+            instances: [target1, target2]
+        )
+
+        #expect(firstReport.outcomes.count == 2)
+        #expect(firstReport.kind(for: target1ID) == .connected)
+        #expect(firstReport.kind(for: target2ID) == .failed)
+
+        // target1 connected in workspace, target2 remains unconnected
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: [target1],
+            targetOptIns: [target1ID, target2ID],
+            themeAssignment: nil
+        )
+
+        // Verify earlier receipts are saved durably in the journal
+        let initialRecords = try fixture.store.journalLoadRecords(operationID: firstReport.operationID)
+        #expect(initialRecords.count == 2)
+        #expect(initialRecords[0].receiptJSON != nil)
+
+        // 2. Fix target2 adapter so retry can succeed
+        await adapter2.setBeforeConnectHook(nil)
+
+        // 3. Prepare fresh setup plan for retry
+        let retryPlan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [target1, target2],
+            retrySourceOperationID: firstReport.operationID
+        )
+
+        // Fresh plan targets only unresolved target2
+        #expect(retryPlan.targetInstanceIDs == [target2ID])
+        #expect(retryPlan.retrySourceOperationID == firstReport.operationID)
+
+        // 4. Execute retry setup
+        let retryReport = try await engine.executeSetup(
+            plan: retryPlan,
+            workspace: workspace,
+            instances: [target2]
+        )
+
+        #expect(retryReport.retrySourceOperationID == firstReport.operationID)
+        #expect(retryReport.outcomes.count == 1) // only target2 executed in this transaction
+        #expect(retryReport.outcomes[0].targetInstanceID == target2ID)
+        #expect(retryReport.kind(for: target2ID) == .connected)
+
+        // Combined outcomes include both target1 (from prior transaction) and target2 (from retry)
+        #expect(retryReport.combinedOutcomes.count == 2)
+        #expect(retryReport.combinedOutcomes.map { $0.targetInstanceID } == [target1ID, target2ID])
+        #expect(retryReport.resolvedOutcomes.count == 2)
+        #expect(retryReport.unresolvedOutcomes.isEmpty)
+
+        // Verify earlier records from first attempt were NOT erased
+        let priorRecordsAfterRetry = try fixture.store.journalLoadRecords(operationID: firstReport.operationID)
+        #expect(priorRecordsAfterRetry.count == 2)
+        #expect(priorRecordsAfterRetry[0].receiptJSON != nil)
+
+        // Verify durable link between transactions in SQLite operations table
+        let durableRetryOp = try fixture.store.journalLoadOperation(id: retryReport.operationID)
+        #expect(durableRetryOp?.parentOperationID == firstReport.operationID)
+    }
+
+    @Test("Materially changed retry plans return to aggregate review before mutation")
+    func materiallyChangedRetryPlanRequiresReconfirmation() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let targetID = TargetInstanceID(rawValue: "starship.default")
+        let target = ConnectedTargetInstance(id: targetID, displayName: "Starship", adapterID: "starship")
+        let adapter = RecordingWritableAdapter(id: "starship")
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: fixture.store)
+
+        let initialWorkspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [targetID],
+            themeAssignment: nil
+        )
+
+        let plan = try await engine.prepareSetup(
+            workspace: initialWorkspace,
+            instances: [target],
+            retrySourceOperationID: UUID()
+        )
+
+        // Material change: user opts out or target opt-ins change
+        let changedWorkspace = Workspace(
+            id: initialWorkspace.id,
+            displayName: initialWorkspace.displayName,
+            connectedTargetInstances: [],
+            targetOptIns: [], // opted out
+            themeAssignment: nil
+        )
+
+        let validation = await engine.validateSetupPlanPreconditions(
+            plan: plan,
+            workspace: changedWorkspace,
+            currentInstances: [target],
+            availableTargetInstanceIDs: [targetID]
+        )
+
+        switch validation {
+        case .invalidated(let reason):
+            #expect(reason.contains("Target Opt-ins"))
+        case .valid:
+            Issue.record("Expected plan to be invalidated due to opt-ins change")
+        }
+    }
+
     // Recovery reconciliation for interrupted setup
     @Test("Interrupted setup operation is reconciled cleanly on engine startup")
     func interruptedSetupIsReconciled() async throws {

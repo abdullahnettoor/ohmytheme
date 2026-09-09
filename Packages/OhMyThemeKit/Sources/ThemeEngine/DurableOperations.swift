@@ -31,6 +31,7 @@ public struct SetupReport: Codable, Equatable, Sendable {
     public enum OutcomeKind: String, Codable, Equatable, Sendable {
         case connected
         case unchanged
+        case skipped
         case needsPermission
         case conflict
         case failed
@@ -41,20 +42,41 @@ public struct SetupReport: Codable, Equatable, Sendable {
     public let operationID: UUID
     public let retrySourceOperationID: UUID?
     public let outcomes: [TargetCapabilityOutcome]
+    public let combinedOutcomes: [TargetCapabilityOutcome]
+
+    enum CodingKeys: String, CodingKey {
+        case operationID
+        case retrySourceOperationID
+        case outcomes
+        case combinedOutcomes
+    }
 
     public init(
         operationID: UUID,
         retrySourceOperationID: UUID? = nil,
-        outcomes: [TargetCapabilityOutcome]
+        outcomes: [TargetCapabilityOutcome],
+        combinedOutcomes: [TargetCapabilityOutcome]? = nil
     ) {
         self.operationID = operationID
         self.retrySourceOperationID = retrySourceOperationID
         self.outcomes = outcomes
+        self.combinedOutcomes = combinedOutcomes ?? outcomes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        operationID = try container.decode(UUID.self, forKey: .operationID)
+        retrySourceOperationID = try container.decodeIfPresent(UUID.self, forKey: .retrySourceOperationID)
+        outcomes = try container.decode([TargetCapabilityOutcome].self, forKey: .outcomes)
+        combinedOutcomes = try container.decodeIfPresent([TargetCapabilityOutcome].self, forKey: .combinedOutcomes) ?? outcomes
     }
 
     public func outcomeKind(for outcome: TargetCapabilityOutcome) -> OutcomeKind {
         if outcome.rollbackState == .recoveryRequired {
             return .recoveryRequired
+        }
+        if outcome.configurationState == .unchanged && outcome.detail == "Skipped after Cancel Remaining." {
+            return .skipped
         }
         switch outcome.configurationState {
         case .updated:
@@ -73,38 +95,56 @@ public struct SetupReport: Codable, Equatable, Sendable {
     }
 
     public func kind(for targetInstanceID: TargetInstanceID) -> OutcomeKind? {
-        guard let outcome = outcomes.first(where: { $0.targetInstanceID == targetInstanceID }) else {
+        guard let outcome = combinedOutcomes.first(where: { $0.targetInstanceID == targetInstanceID }) else {
             return nil
         }
         return outcomeKind(for: outcome)
     }
 
     public var connectedOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .connected }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .connected }
     }
 
     public var unchangedOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .unchanged }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .unchanged }
+    }
+
+    public var skippedOutcomes: [TargetCapabilityOutcome] {
+        combinedOutcomes.filter { outcomeKind(for: $0) == .skipped }
     }
 
     public var needsPermissionOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .needsPermission }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .needsPermission }
     }
 
     public var conflictOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .conflict }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .conflict }
     }
 
     public var failedOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .failed }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .failed }
     }
 
     public var unavailableOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .unavailable }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .unavailable }
     }
 
     public var recoveryRequiredOutcomes: [TargetCapabilityOutcome] {
-        outcomes.filter { outcomeKind(for: $0) == .recoveryRequired }
+        combinedOutcomes.filter { outcomeKind(for: $0) == .recoveryRequired }
+    }
+
+    public var resolvedOutcomes: [TargetCapabilityOutcome] {
+        combinedOutcomes.filter {
+            let k = outcomeKind(for: $0)
+            return k == .connected || k == .unchanged
+        }
+    }
+
+    public var unresolvedOutcomes: [TargetCapabilityOutcome] {
+        combinedOutcomes.filter {
+            let k = outcomeKind(for: $0)
+            return k == .failed || k == .needsPermission || k == .conflict || k == .unavailable || k == .skipped || k == .recoveryRequired
+        }
     }
 }
 
@@ -153,7 +193,8 @@ extension ThemeEngine {
         instances: [ConnectedTargetInstance],
         retrySourceOperationID: UUID? = nil
     ) async throws -> SetupPlan {
-        let orderedInstances = WorkspaceTargetOrder.ordered(instances)
+        let unconfigured = instances.filter { !workspace.isConnected($0.id) }
+        let orderedInstances = WorkspaceTargetOrder.ordered(unconfigured)
         var targetPlans: [ConnectionPlan] = []
         var preparationFailures: [TargetSetupPreparationFailure] = []
         var expectedSideEffects: [String] = []
@@ -1080,10 +1121,121 @@ extension ThemeEngine {
             try persistence.journalTransitionState(operationID: operation.id, to: allFailed ? .failed : .applied)
         }
 
+        var combinedOutcomes = outcomes
+        if let parentID = plan.retrySourceOperationID, let persistence = self.persistenceStore {
+            do {
+                let priorOutcomes = try loadLineageOutcomes(for: parentID, persistence: persistence)
+                var mergedByID: [TargetInstanceID: TargetCapabilityOutcome] = [:]
+                for outcome in priorOutcomes {
+                    mergedByID[outcome.targetInstanceID] = outcome
+                }
+                for outcome in outcomes {
+                    mergedByID[outcome.targetInstanceID] = outcome
+                }
+                combinedOutcomes = Array(mergedByID.values).sorted { left, right in
+                    let leftRank = WorkspaceTargetOrder.rank(adapterID: left.adapterID)
+                    let rightRank = WorkspaceTargetOrder.rank(adapterID: right.adapterID)
+                    if leftRank != rightRank { return leftRank < rightRank }
+                    if left.adapterID != right.adapterID { return left.adapterID < right.adapterID }
+                    return left.targetInstanceID.rawValue < right.targetInstanceID.rawValue
+                }
+            } catch {
+                combinedOutcomes = outcomes
+            }
+        }
+
         return SetupReport(
             operationID: operation.id,
             retrySourceOperationID: plan.retrySourceOperationID,
-            outcomes: outcomes
+            outcomes: outcomes,
+            combinedOutcomes: combinedOutcomes
+        )
+    }
+
+    private func loadLineageOutcomes(
+        for parentOperationID: UUID,
+        persistence: PersistenceStore
+    ) throws -> [TargetCapabilityOutcome] {
+        var operationChain: [UUID] = []
+        var nextID: UUID? = parentOperationID
+        var visited: Set<UUID> = []
+
+        while let currentID = nextID, !visited.contains(currentID) {
+            visited.insert(currentID)
+            operationChain.append(currentID)
+            if let op = try persistence.journalLoadOperation(id: currentID) {
+                nextID = op.parentOperationID
+            } else {
+                break
+            }
+        }
+
+        var mergedByID: [TargetInstanceID: TargetCapabilityOutcome] = [:]
+        for opID in operationChain.reversed() {
+            let records = try persistence.journalLoadRecords(operationID: opID)
+            for record in records {
+                let outcome = try outcome(from: record)
+                mergedByID[record.targetInstanceID] = outcome
+            }
+        }
+
+        return Array(mergedByID.values)
+    }
+
+    private func outcome(from record: JournaledRecord) throws -> TargetCapabilityOutcome {
+        if let receiptJSON = record.receiptJSON,
+            let receiptData = receiptJSON.data(using: .utf8),
+            let receipt = try? JSONDecoder().decode(ConnectionReceipt.self, from: receiptData)
+        {
+            return TargetCapabilityOutcome(
+                targetInstanceID: record.targetInstanceID,
+                adapterID: record.adapterID,
+                capabilityID: record.capabilityID,
+                sourceType: .unavailable,
+                sourceRevision: "n/a",
+                configurationState: receipt.configurationState,
+                runningInstanceReach: receipt.runningInstanceReach,
+                detail: receipt.detail,
+                userActions: Self.activationActions(
+                    for: receipt.runningInstanceReach,
+                    adapterID: record.adapterID
+                )
+            )
+        }
+
+        let configurationState: ConfigurationState
+        switch record.phase {
+        case .skipped:
+            configurationState = .unchanged
+        case .failed:
+            if let detail = record.detail?.lowercased() {
+                if detail.contains("permission") {
+                    configurationState = .permissionRequired
+                } else if detail.contains("conflict") {
+                    configurationState = .conflicted
+                } else if detail.contains("unavailable") {
+                    configurationState = .unavailable
+                } else {
+                    configurationState = .failed
+                }
+            } else {
+                configurationState = .failed
+            }
+        case .applied:
+            configurationState = .updated
+        default:
+            configurationState = .failed
+        }
+
+        return TargetCapabilityOutcome(
+            targetInstanceID: record.targetInstanceID,
+            adapterID: record.adapterID,
+            capabilityID: record.capabilityID,
+            sourceType: .unavailable,
+            sourceRevision: "n/a",
+            configurationState: configurationState,
+            runningInstanceReach: .unavailable,
+            detail: record.detail
         )
     }
 

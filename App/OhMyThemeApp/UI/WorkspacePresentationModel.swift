@@ -449,7 +449,7 @@ final class WorkspacePresentationModel: ObservableObject {
             setupPlanInvalidationReason = nil
             setupProgress = nil
             latestSetupReport = result.report
-            report = present(outcomes: result.report.outcomes, kind: .setup)
+            report = present(outcomes: result.report.combinedOutcomes, kind: .setup)
             return result.report
         } catch {
             if case ProductionWorkspaceRuntimeError.setupPlanInvalidated(let reason) = error {
