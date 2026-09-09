@@ -200,10 +200,6 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published var selectedSection: NavigationSection = .overview
     weak var presenceController: AppPresenceController?
 
-    var isWorkActive: Bool {
-        isExecutingSetup || isApplyingTheme
-    }
-
     func navigateTo(targetState: NotificationTargetState) {
         switch targetState {
         case .setupResults:

@@ -68,7 +68,7 @@ final class AppPresenceController: ObservableObject {
     ) {
         self.platform = platform
         self.launchAtLoginPlatform = launchAtLoginPlatform
-        let resolvedNotificationClient = notificationClient ?? (platform as? any NotificationClient) ?? ProductionNotificationClient()
+        let resolvedNotificationClient = notificationClient ?? ProductionNotificationClient()
         self.notificationClient = resolvedNotificationClient
         self.defaults = defaults
         self.runtime = runtime
@@ -119,9 +119,22 @@ final class AppPresenceController: ObservableObject {
         if runtime?.unresolvedRecovery != nil {
             return "My Mac: Needs attention (recovery required)"
         }
+        var targetsNeedingAttention = Set<TargetInstanceID>()
+        if let setupOutcomes = runtime?.latestSetupReport?.unresolvedOutcomes {
+            for outcome in setupOutcomes {
+                targetsNeedingAttention.insert(outcome.targetInstanceID)
+            }
+        }
+        if let status = runtime?.workspaceThemeStatus {
+            for outcome in status.targetOutcomes where outcome.status == .needsAttention {
+                targetsNeedingAttention.insert(outcome.targetInstanceID)
+            }
+        }
         let setupAttentionCount = runtime?.latestSetupReport?.unresolvedOutcomes.count ?? 0
         let themeAttentionCount = runtime?.workspaceThemeStatus?.needsAttentionCount ?? 0
-        let totalAttentionCount = max(themeAttentionCount, setupAttentionCount)
+        let totalAttentionCount = targetsNeedingAttention.isEmpty
+            ? max(themeAttentionCount, setupAttentionCount)
+            : targetsNeedingAttention.count
         if totalAttentionCount > 0 {
             return "My Mac: Needs attention (\(totalAttentionCount))"
         }
@@ -279,15 +292,13 @@ final class AppPresenceController: ObservableObject {
         }
     }
 
-    func setIsWorkActiveForTesting(_ active: Bool) {
-        isWorkActive = active
-    }
-
     @discardableResult
     func requestNotificationPermissionJustInTimeIfNeeded() async -> Bool {
         guard !isMenuBarVisible else { return false }
         guard isWorkActive else { return false }
-        guard notificationPermissionStatus == .notDetermined else { return false }
+        let currentStatus = await notificationClient.permissionStatus
+        notificationPermissionStatus = currentStatus
+        guard currentStatus == .notDetermined else { return false }
         do {
             let granted = try await notificationClient.requestAuthorization()
             notificationPermissionStatus = granted ? .authorized : .denied
@@ -338,13 +349,18 @@ final class AppPresenceController: ObservableObject {
             body = error.localizedDescription
             targetState = .setupResults
         case .apply(let report):
-            let failedCount = report.outcomes.filter {
-                $0.configurationState == .failed || $0.rollbackState == .recoveryRequired
-            }.count
+            let attentionOutcomes = report.outcomes.filter { outcome in
+                switch outcome.configurationState {
+                case .permissionRequired, .conflicted, .failed:
+                    return true
+                case .updated, .unchanged, .unavailable:
+                    return outcome.rollbackState == .recoveryRequired
+                }
+            }
             let themeAttentionCount = runtime?.workspaceThemeStatus?.needsAttentionCount ?? 0
             let hasRecovery = runtime?.unresolvedRecovery != nil
 
-            if failedCount == 0 && themeAttentionCount == 0 && !hasRecovery {
+            if attentionOutcomes.isEmpty && themeAttentionCount == 0 && !hasRecovery {
                 needsAttention = false
                 title = ""
                 body = ""
@@ -355,10 +371,23 @@ final class AppPresenceController: ObservableObject {
                 if hasRecovery {
                     body = "A target encountered a failure requiring recovery."
                     targetState = .recovery
-                } else if failedCount > 0 {
-                    body = failedCount == 1
-                        ? "1 target failed to apply the desired theme."
-                        : "\(failedCount) targets failed to apply the desired theme."
+                } else if !attentionOutcomes.isEmpty {
+                    let count = attentionOutcomes.count
+                    let hasPermission = attentionOutcomes.contains { $0.configurationState == .permissionRequired }
+                    let hasConflict = attentionOutcomes.contains { $0.configurationState == .conflicted }
+                    if hasPermission {
+                        body = count == 1
+                            ? "1 target requires permission to apply the theme."
+                            : "\(count) targets require permission or attention."
+                    } else if hasConflict {
+                        body = count == 1
+                            ? "1 target has a conflicting configuration."
+                            : "\(count) targets require conflict resolution or attention."
+                    } else {
+                        body = count == 1
+                            ? "1 target failed to apply the desired theme."
+                            : "\(count) targets failed to apply the desired theme."
+                    }
                     targetState = .applyResults
                 } else {
                     body = themeAttentionCount == 1
