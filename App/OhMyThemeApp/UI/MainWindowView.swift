@@ -23,7 +23,13 @@ enum NavigationSection: String, CaseIterable, Identifiable, Hashable {
 struct MainWindowView: View {
     @ObservedObject var presenceController: AppPresenceController
     @ObservedObject var model: WorkspacePresentationModel
-    @State private var selectedSection: NavigationSection? = .overview
+
+    private var selectedSectionBinding: Binding<NavigationSection?> {
+        Binding(
+            get: { model.selectedSection },
+            set: { if let val = $0 { model.selectedSection = val } }
+        )
+    }
 
     var body: some View {
         Group {
@@ -31,7 +37,7 @@ struct MainWindowView: View {
                 OnboardingView(model: model)
             } else {
                 NavigationSplitView {
-                    List(NavigationSection.allCases, selection: $selectedSection) { section in
+                    List(NavigationSection.allCases, selection: selectedSectionBinding) { section in
                         NavigationLink(value: section) {
                             Label(section.title, systemImage: section.systemImage)
                         }
@@ -40,7 +46,7 @@ struct MainWindowView: View {
                     .navigationTitle("Oh My Theme")
                     .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
                 } detail: {
-                    switch selectedSection ?? .overview {
+                    switch model.selectedSection {
                     case .overview:
                         OverviewView(model: model)
                     case .themes:

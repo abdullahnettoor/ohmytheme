@@ -10,6 +10,7 @@ import XCTest
 final class AppPresenceTests: XCTestCase {
     private var platform: FakeAppPresencePlatform!
     private var launchAtLogin: FakeLaunchAtLoginPlatform!
+    private var notificationClient: FakeNotificationClient!
     private var defaults: FakeAppPresenceDefaults!
     private var runtime: FakeWorkspaceRuntime!
 
@@ -17,6 +18,7 @@ final class AppPresenceTests: XCTestCase {
         try await super.setUp()
         platform = FakeAppPresencePlatform()
         launchAtLogin = FakeLaunchAtLoginPlatform(status: .disabled)
+        notificationClient = FakeNotificationClient()
         defaults = FakeAppPresenceDefaults()
         runtime = FakeWorkspaceRuntime(workspace: .myMac)
     }
@@ -25,7 +27,8 @@ final class AppPresenceTests: XCTestCase {
         launchStatus: LaunchAtLoginStatus = .disabled,
         storedMenuBarVisible: Bool? = nil,
         persistenceError: String? = nil,
-        runtime customRuntime: FakeWorkspaceRuntime? = nil
+        runtime customRuntime: FakeWorkspaceRuntime? = nil,
+        notificationClient customNotificationClient: FakeNotificationClient? = nil
     ) -> AppPresenceController {
         if let storedMenuBarVisible {
             defaults.set(storedMenuBarVisible, forKey: AppPresenceDefaultsKeys.isMenuBarVisible)
@@ -35,9 +38,11 @@ final class AppPresenceTests: XCTestCase {
             persistenceError: persistenceError
         )
         launchAtLogin.status = launchStatus
+        let notif = customNotificationClient ?? notificationClient ?? FakeNotificationClient()
         return AppPresenceController(
             platform: platform,
             launchAtLoginPlatform: launchAtLogin,
+            notificationClient: notif,
             defaults: defaults,
             runtime: rt
         )
@@ -297,7 +302,7 @@ final class AppPresenceTests: XCTestCase {
     }
 
     func testRefreshingNotificationPermissionReadsThePlatform() async {
-        platform.currentNotificationPermissionStatus = .denied
+        notificationClient.permissionStatus = .denied
         let controller = makeController()
 
         await controller.refreshNotificationPermissionStatus()
@@ -349,7 +354,261 @@ final class AppPresenceTests: XCTestCase {
         XCTAssertEqual(controller.workspaceHealth, "My Mac: 1 pending")
     }
 
-    func testQuittingAppTerminatesPlatform() {
+    // MARK: - 6. Notifications for Hidden Work (Issue #41)
+    func testNotificationPermissionRequestedJustInTimeWhenWorkHidden() async {
+        let controller = makeController(storedMenuBarVisible: false)
+        controller.mainWindowDidOpen()
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 0)
+
+        controller.workDidStart()
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 0)
+
+        // Closing window while menu bar is hidden and work is active triggers just-in-time request
+        let task = controller.mainWindowDidClose()
+        _ = await task?.value
+
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 1)
+        XCTAssertEqual(controller.notificationPermissionStatus, .authorized)
+    }
+
+    func testNotificationPermissionRequestedWhenMenuBarHiddenWhileWorkAlreadyRunningInClosedWindow() async {
+        let controller = makeController(storedMenuBarVisible: true)
+        controller.workDidStart()
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 0)
+
+        // Menu bar is hidden while window is closed and work is running
+        await controller.setMenuBarVisible(false)
+
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 1)
+        XCTAssertEqual(controller.notificationPermissionStatus, .authorized)
+    }
+
+    func testNotificationPermissionNotRequestedIfMenuBarIsVisible() async {
+        let controller = makeController(storedMenuBarVisible: true)
+        controller.mainWindowDidOpen()
+        controller.workDidStart()
+
+        let task = controller.mainWindowDidClose()
+        _ = await task?.value
+
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 0)
+        XCTAssertEqual(controller.notificationPermissionStatus, .notDetermined)
+    }
+
+    func testNotificationPermissionNotRequestedIfNoWorkActive() async {
+        let controller = makeController(storedMenuBarVisible: false)
+        controller.mainWindowDidOpen()
+
+        let task = controller.mainWindowDidClose()
+        _ = await task?.value
+
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 0)
+    }
+
+    func testPermissionDenialIsRespectedWithoutReprompting() async {
+        notificationClient.requestAuthorizationResult = false
+        let controller = makeController(storedMenuBarVisible: false)
+        controller.mainWindowDidOpen()
+        controller.workDidStart()
+
+        let task = controller.mainWindowDidClose()
+        _ = await task?.value
+
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 1)
+        XCTAssertEqual(controller.notificationPermissionStatus, .denied)
+
+        // Next work start while hidden must not reprompt
+        controller.workDidStart()
+        XCTAssertEqual(notificationClient.requestAuthorizationCallCount, 1)
+
+        // Work finishes with attention needed, but permission was denied -> no notifications posted
+        let failureOutcome = TargetCapabilityOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            adapterID: "ghostty",
+            capabilityID: "connection",
+            sourceType: .unavailable,
+            sourceRevision: "n/a",
+            configurationState: .failed,
+            runningInstanceReach: .unavailable,
+            detail: "Grant permissions"
+        )
+        let report = SetupReport(
+            operationID: UUID(),
+            outcomes: [failureOutcome]
+        )
+        await controller.workDidFinish(.setup(report))
+
+        XCTAssertEqual(notificationClient.postedNotifications.count, 0)
+    }
+
+    func testSuccessfulHiddenWorkPostsNoNotification() async {
+        notificationClient.permissionStatus = .authorized
+        let controller = makeController(storedMenuBarVisible: false)
+        controller.workDidStart()
+
+        // Successful setup report
+        let successOutcome = TargetCapabilityOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            adapterID: "ghostty",
+            capabilityID: "connection",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            configurationState: .updated,
+            runningInstanceReach: .currentInstances,
+            detail: "Installed"
+        )
+        let setupReport = SetupReport(
+            operationID: UUID(),
+            outcomes: [successOutcome]
+        )
+        await controller.workDidFinish(.setup(setupReport))
+
+        XCTAssertEqual(notificationClient.postedNotifications.count, 0)
+
+        // Successful apply report
+        controller.workDidStart()
+        let applyReport = DurableApplyReport(
+            operationID: UUID(),
+            variantID: "catppuccin/mocha",
+            outcomes: []
+        )
+        await controller.workDidFinish(.apply(applyReport))
+
+        XCTAssertEqual(notificationClient.postedNotifications.count, 0)
+    }
+
+    func testWorkFinishingWhileMainWindowOpenPostsNoNotification() async {
+        notificationClient.permissionStatus = .authorized
+        let controller = makeController(storedMenuBarVisible: false)
+        controller.mainWindowDidOpen()
+        controller.workDidStart()
+
+        let failureOutcome = TargetCapabilityOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            adapterID: "ghostty",
+            capabilityID: "connection",
+            sourceType: .unavailable,
+            sourceRevision: "n/a",
+            configurationState: .failed,
+            runningInstanceReach: .unavailable,
+            detail: "Grant permissions"
+        )
+        let setupReport = SetupReport(
+            operationID: UUID(),
+            outcomes: [failureOutcome]
+        )
+        await controller.workDidFinish(.setup(setupReport))
+
+        // When main window is open, user sees it in-app; no notification should be posted
+        XCTAssertEqual(notificationClient.postedNotifications.count, 0)
+    }
+
+    func testHiddenSetupNeedsAttentionPostsNotificationAndActionNavigatesToResults() async {
+        notificationClient.permissionStatus = .authorized
+        let controller = makeController(storedMenuBarVisible: false)
+        let model = WorkspacePresentationModel(runtime: runtime)
+        controller.presentationModel = model
+        model.presenceController = controller
+
+        controller.workDidStart()
+        let failureOutcome = TargetCapabilityOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            adapterID: "ghostty",
+            capabilityID: "connection",
+            sourceType: .unavailable,
+            sourceRevision: "n/a",
+            configurationState: .failed,
+            runningInstanceReach: .unavailable,
+            detail: "Grant permissions"
+        )
+        let setupReport = SetupReport(
+            operationID: UUID(),
+            outcomes: [failureOutcome]
+        )
+        await controller.workDidFinish(.setup(setupReport))
+
+        XCTAssertEqual(notificationClient.postedNotifications.count, 1)
+        let posted = notificationClient.postedNotifications[0]
+        XCTAssertEqual(posted.title, "Setup Needs Attention")
+        XCTAssertEqual(posted.targetState, .setupResults)
+
+        // User clicks/activates notification action
+        notificationClient.onNotificationAction?(posted.targetState)
+
+        XCTAssertTrue(controller.isMainWindowOpen)
+        XCTAssertEqual(platform.activationPolicy, .regular)
+        XCTAssertEqual(platform.activateAppCallCount, 1)
+        XCTAssertEqual(model.selectedSection, .apps)
+    }
+
+    func testHiddenApplyNeedsAttentionPostsNotificationAndActionNavigatesToOverview() async {
+        notificationClient.permissionStatus = .authorized
+        let controller = makeController(storedMenuBarVisible: false)
+        let model = WorkspacePresentationModel(runtime: runtime)
+        model.selectedSection = .themes
+        controller.presentationModel = model
+        model.presenceController = controller
+
+        controller.workDidStart()
+        let failedOutcome = TargetCapabilityOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            adapterID: "ghostty",
+            capabilityID: "theme",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            configurationState: .failed,
+            runningInstanceReach: .unavailable,
+            detail: "Check permissions"
+        )
+        let applyReport = DurableApplyReport(
+            operationID: UUID(),
+            variantID: "catppuccin/mocha",
+            outcomes: [failedOutcome]
+        )
+        await controller.workDidFinish(.apply(applyReport))
+
+        XCTAssertEqual(notificationClient.postedNotifications.count, 1)
+        let posted = notificationClient.postedNotifications[0]
+        XCTAssertEqual(posted.title, "Theme Apply Needs Attention")
+        XCTAssertEqual(posted.targetState, .applyResults)
+
+        notificationClient.onNotificationAction?(posted.targetState)
+
+        XCTAssertTrue(controller.isMainWindowOpen)
+        XCTAssertEqual(platform.activationPolicy, .regular)
+        XCTAssertEqual(model.selectedSection, .overview)
+    }
+
+    func testNeedsAttentionDurableInWorkspaceHealthWhenNotificationsUnavailable() async {
+        notificationClient.permissionStatus = .denied
+        let fakeRuntime = FakeWorkspaceRuntime(workspace: .myMac)
+        let failureOutcome = TargetCapabilityOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            adapterID: "ghostty",
+            capabilityID: "connection",
+            sourceType: .unavailable,
+            sourceRevision: "n/a",
+            configurationState: .failed,
+            runningInstanceReach: .unavailable,
+            detail: "Grant permissions"
+        )
+        fakeRuntime.latestSetupReport = SetupReport(
+            operationID: UUID(),
+            outcomes: [failureOutcome]
+        )
+        let controller = makeController(
+            storedMenuBarVisible: true,
+            runtime: fakeRuntime
+        )
+
+        XCTAssertEqual(controller.workspaceHealth, "My Mac: Needs attention (1)")
+
+        // Reopening main window
+        controller.openMainWindow()
+        XCTAssertTrue(controller.isMainWindowOpen)
+    }
+
+        func testQuittingAppTerminatesPlatform() {
         let controller = makeController()
 
         controller.quitApp()
@@ -359,6 +618,30 @@ final class AppPresenceTests: XCTestCase {
 }
 
 // MARK: - Test Doubles (Independent of AppKit internals)
+
+@MainActor
+final class FakeNotificationClient: NotificationClient {
+    var permissionStatus: NotificationPermissionStatus
+    var requestAuthorizationCallCount = 0
+    var requestAuthorizationResult = true
+    var postedNotifications: [PostedNotification] = []
+    var onNotificationAction: ((NotificationTargetState?) -> Void)?
+
+    init(permissionStatus: NotificationPermissionStatus = .notDetermined) {
+        self.permissionStatus = permissionStatus
+    }
+
+    func requestAuthorization() async throws -> Bool {
+        requestAuthorizationCallCount += 1
+        let granted = requestAuthorizationResult
+        permissionStatus = granted ? .authorized : .denied
+        return granted
+    }
+
+    func postNotification(id: String, title: String, body: String, targetState: NotificationTargetState?) async throws {
+        postedNotifications.append(PostedNotification(id: id, title: title, body: body, targetState: targetState))
+    }
+}
 
 @MainActor
 final class FakeAppPresencePlatform: AppPresencePlatform {

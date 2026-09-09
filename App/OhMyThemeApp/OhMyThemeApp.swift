@@ -39,12 +39,16 @@ struct OhMyThemeApp: App {
         let platform = ProductionAppPresencePlatform()
         self.platform = platform
         let launchClient = LaunchAtLoginClient()
+        let notificationClient = ProductionNotificationClient()
         let controller = AppPresenceController(
             platform: platform,
             launchAtLoginPlatform: launchClient,
+            notificationClient: notificationClient,
             defaults: UserDefaults.standard,
             runtime: runtime
         )
+        controller.presentationModel = workspaceModel
+        workspaceModel.presenceController = controller
         _presenceController = StateObject(wrappedValue: controller)
         AppDelegate.shared?.presenceController = controller
     }

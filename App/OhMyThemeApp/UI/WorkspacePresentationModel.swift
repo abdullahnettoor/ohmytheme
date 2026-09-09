@@ -197,6 +197,24 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var operationError: String?
     @Published private(set) var isBusy = false
     @Published private(set) var isReady = true
+    @Published var selectedSection: NavigationSection = .overview
+    weak var presenceController: AppPresenceController?
+
+    var isWorkActive: Bool {
+        isExecutingSetup || isApplyingTheme
+    }
+
+    func navigateTo(targetState: NotificationTargetState) {
+        switch targetState {
+        case .setupResults:
+            if latestSetupReport != nil {
+                hasAcknowledgedSetupResults = false
+            }
+            selectedSection = .apps
+        case .applyResults, .recovery, .preflightReview:
+            selectedSection = .overview
+        }
+    }
 
     private let runtime: any WorkspaceRuntime
 
@@ -635,6 +653,7 @@ final class WorkspacePresentationModel: ObservableObject {
         isExecutingSetup = true
         isBusy = true
         operationError = nil
+        presenceController?.workDidStart()
         defer {
             isExecutingSetup = false
             isBusy = false
@@ -652,8 +671,10 @@ final class WorkspacePresentationModel: ObservableObject {
             setupProgress = nil
             latestSetupReport = result.report
             report = present(outcomes: result.report.combinedOutcomes, kind: .setup)
+            await presenceController?.workDidFinish(.setup(result.report))
             return result.report
         } catch {
+            await presenceController?.workDidFinish(.setupFailed(error))
             if case ProductionWorkspaceRuntimeError.setupPlanInvalidated(let reason) = error {
                 setupPlanInvalidationReason = reason
             } else if case DurableOperationError.operationCancelled = error {
@@ -696,6 +717,7 @@ final class WorkspacePresentationModel: ObservableObject {
         isBusy = true
         isApplyingTheme = true
         operationError = nil
+        presenceController?.workDidStart()
         defer {
             isBusy = false
             isApplyingTheme = false
@@ -714,8 +736,10 @@ final class WorkspacePresentationModel: ObservableObject {
             report = present(outcomes: applied.outcomes, kind: .apply)
             await refreshUndoAvailability()
             operationError = nil
+            await presenceController?.workDidFinish(.apply(applied))
             return applied
         } catch {
+            await presenceController?.workDidFinish(.applyFailed(error))
             applyProgress = nil
             if case DurableOperationError.operationCancelled = error {
                 operationError = "Theme application was cancelled."
@@ -732,6 +756,7 @@ final class WorkspacePresentationModel: ObservableObject {
         isBusy = true
         isApplyingTheme = true
         operationError = nil
+        presenceController?.workDidStart()
         defer {
             isBusy = false
             isApplyingTheme = false
@@ -751,12 +776,15 @@ final class WorkspacePresentationModel: ObservableObject {
                 self.latestApplyReport = applied
                 report = present(outcomes: applied.outcomes, kind: .apply)
                 await refreshUndoAvailability()
+                await presenceController?.workDidFinish(.apply(applied))
                 return applied
             } else {
                 applyPlan = prepared
+                await presenceController?.workDidFinish(.preflightPaused(prepared))
                 return nil
             }
         } catch {
+            await presenceController?.workDidFinish(.applyFailed(error))
             self.applyProgress = nil
             if case DurableOperationError.operationCancelled = error {
                 operationError = "Theme application was cancelled."
@@ -776,6 +804,7 @@ final class WorkspacePresentationModel: ObservableObject {
         isBusy = true
         isApplyingTheme = true
         operationError = nil
+        presenceController?.workDidStart()
         defer {
             isBusy = false
             isApplyingTheme = false
@@ -801,8 +830,10 @@ final class WorkspacePresentationModel: ObservableObject {
             self.latestApplyReport = applied
             report = present(outcomes: applied.outcomes, kind: .apply)
             await refreshUndoAvailability()
+            await presenceController?.workDidFinish(.apply(applied))
             return applied
         } catch {
+            await presenceController?.workDidFinish(.applyFailed(error))
             self.applyProgress = nil
             if case DurableOperationError.operationCancelled = error {
                 operationError = "Theme application was cancelled."

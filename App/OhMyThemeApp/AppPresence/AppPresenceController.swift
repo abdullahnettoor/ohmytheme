@@ -30,9 +30,12 @@ final class AppPresenceController: ObservableObject {
 
     private let platform: AppPresencePlatform
     private let launchAtLoginPlatform: LaunchAtLoginPlatform
+    private let notificationClient: any NotificationClient
     private let defaults: AppPresenceDefaults
     private let runtime: (any WorkspaceRuntime)?
     private var runtimeStatusCancellable: AnyCancellable?
+
+    weak var presentationModel: WorkspacePresentationModel?
 
     @Published private(set) var isMainWindowOpen = false
     @Published private(set) var isMenuBarVisible: Bool
@@ -43,6 +46,7 @@ final class AppPresenceController: ObservableObject {
     @Published private(set) var menuBarVisibilityError: String?
     @Published private(set) var notificationPermissionStatus: NotificationPermissionStatus = .notDetermined
     @Published private(set) var isChangingAppPresencePreference = false
+    @Published private(set) var isWorkActive = false
 
     var isMenuBarVisibleBinding: Binding<Bool> {
         Binding(
@@ -58,11 +62,14 @@ final class AppPresenceController: ObservableObject {
     init(
         platform: AppPresencePlatform,
         launchAtLoginPlatform: LaunchAtLoginPlatform,
+        notificationClient: (any NotificationClient)? = nil,
         defaults: AppPresenceDefaults = UserDefaults.standard,
         runtime: (any WorkspaceRuntime)? = nil
     ) {
         self.platform = platform
         self.launchAtLoginPlatform = launchAtLoginPlatform
+        let resolvedNotificationClient = notificationClient ?? (platform as? any NotificationClient) ?? ProductionNotificationClient()
+        self.notificationClient = resolvedNotificationClient
         self.defaults = defaults
         self.runtime = runtime
         self.launchAtLoginStatus = launchAtLoginPlatform.status
@@ -88,6 +95,10 @@ final class AppPresenceController: ObservableObject {
             MenuBarPresence.clearHiddenStatusItemPreferences(in: defaults)
         }
 
+        self.notificationClient.onNotificationAction = { [weak self] targetState in
+            self?.openMainWindow(navigatingTo: targetState)
+        }
+
         runtimeStatusCancellable = runtime?.workspaceStatusPublisher.sink { [weak self] in
             self?.objectWillChange.send()
         }
@@ -108,10 +119,13 @@ final class AppPresenceController: ObservableObject {
         if runtime?.unresolvedRecovery != nil {
             return "My Mac: Needs attention (recovery required)"
         }
+        let setupAttentionCount = runtime?.latestSetupReport?.unresolvedOutcomes.count ?? 0
+        let themeAttentionCount = runtime?.workspaceThemeStatus?.needsAttentionCount ?? 0
+        let totalAttentionCount = max(themeAttentionCount, setupAttentionCount)
+        if totalAttentionCount > 0 {
+            return "My Mac: Needs attention (\(totalAttentionCount))"
+        }
         if let status = runtime?.workspaceThemeStatus {
-            if status.needsAttentionCount > 0 {
-                return "My Mac: Needs attention (\(status.needsAttentionCount))"
-            }
             if status.pendingCount > 0 {
                 return "My Mac: \(status.pendingCount) pending"
             }
@@ -128,12 +142,19 @@ final class AppPresenceController: ObservableObject {
         platform.activateApp()
     }
 
-    func mainWindowDidClose() {
+    @discardableResult
+    func mainWindowDidClose() -> Task<Bool, Never>? {
         isMainWindowOpen = false
         platform.setActivationPolicy(.accessory)
+        if !isMenuBarVisible && isWorkActive {
+            return Task {
+                await requestNotificationPermissionJustInTimeIfNeeded()
+            }
+        }
+        return nil
     }
 
-    func openMainWindow() {
+    func openMainWindow(navigatingTo targetState: NotificationTargetState? = nil) {
         if isMainWindowOpen {
             platform.focusMainWindow()
         } else {
@@ -142,6 +163,10 @@ final class AppPresenceController: ObservableObject {
         }
         platform.setActivationPolicy(.regular)
         platform.activateApp()
+
+        if let targetState {
+            presentationModel?.navigateTo(targetState: targetState)
+        }
     }
 
     @discardableResult
@@ -185,6 +210,8 @@ final class AppPresenceController: ObservableObject {
 
         if visible {
             MenuBarPresence.clearHiddenStatusItemPreferences(in: defaults)
+        } else if isWorkActive && !isMainWindowOpen {
+            await requestNotificationPermissionJustInTimeIfNeeded()
         }
         updateLaunchAtLoginEligibility()
     }
@@ -215,7 +242,7 @@ final class AppPresenceController: ObservableObject {
     }
 
     func refreshNotificationPermissionStatus() async {
-        notificationPermissionStatus = await platform.notificationPermissionStatus()
+        notificationPermissionStatus = await notificationClient.permissionStatus
     }
 
     func refreshLaunchAtLoginStatus() {
@@ -239,6 +266,134 @@ final class AppPresenceController: ObservableObject {
                 launchAtLoginExplanation = nil
             }
         }
+    }
+
+    // MARK: - Work Lifecycle & Notifications
+
+    func workDidStart() {
+        isWorkActive = true
+        if !isMenuBarVisible && !isMainWindowOpen {
+            Task {
+                await requestNotificationPermissionJustInTimeIfNeeded()
+            }
+        }
+    }
+
+    func setIsWorkActiveForTesting(_ active: Bool) {
+        isWorkActive = active
+    }
+
+    @discardableResult
+    func requestNotificationPermissionJustInTimeIfNeeded() async -> Bool {
+        guard !isMenuBarVisible else { return false }
+        guard isWorkActive else { return false }
+        guard notificationPermissionStatus == .notDetermined else { return false }
+        do {
+            let granted = try await notificationClient.requestAuthorization()
+            notificationPermissionStatus = granted ? .authorized : .denied
+            return granted
+        } catch {
+            notificationPermissionStatus = .denied
+            return false
+        }
+    }
+
+    enum HiddenWorkResult {
+        case setup(SetupReport)
+        case apply(DurableApplyReport)
+        case setupFailed(Error)
+        case applyFailed(Error)
+        case preflightPaused(ApplyPlan)
+    }
+
+    func workDidFinish(_ result: HiddenWorkResult) async {
+        isWorkActive = false
+
+        guard !isMainWindowOpen else { return }
+
+        let needsAttention: Bool
+        let title: String
+        let body: String
+        let targetState: NotificationTargetState
+
+        switch result {
+        case .setup(let report):
+            let unresolved = report.unresolvedOutcomes
+            if unresolved.isEmpty {
+                needsAttention = false
+                title = ""
+                body = ""
+                targetState = .setupResults
+            } else {
+                needsAttention = true
+                title = "Setup Needs Attention"
+                body = unresolved.count == 1
+                    ? "1 target requires attention to complete setup."
+                    : "\(unresolved.count) targets require attention to complete setup."
+                targetState = .setupResults
+            }
+        case .setupFailed(let error):
+            needsAttention = true
+            title = "Setup Failed"
+            body = error.localizedDescription
+            targetState = .setupResults
+        case .apply(let report):
+            let failedCount = report.outcomes.filter {
+                $0.configurationState == .failed || $0.rollbackState == .recoveryRequired
+            }.count
+            let themeAttentionCount = runtime?.workspaceThemeStatus?.needsAttentionCount ?? 0
+            let hasRecovery = runtime?.unresolvedRecovery != nil
+
+            if failedCount == 0 && themeAttentionCount == 0 && !hasRecovery {
+                needsAttention = false
+                title = ""
+                body = ""
+                targetState = .applyResults
+            } else {
+                needsAttention = true
+                title = "Theme Apply Needs Attention"
+                if hasRecovery {
+                    body = "A target encountered a failure requiring recovery."
+                    targetState = .recovery
+                } else if failedCount > 0 {
+                    body = failedCount == 1
+                        ? "1 target failed to apply the desired theme."
+                        : "\(failedCount) targets failed to apply the desired theme."
+                    targetState = .applyResults
+                } else {
+                    body = themeAttentionCount == 1
+                        ? "1 target requires attention."
+                        : "\(themeAttentionCount) targets require attention."
+                    targetState = .applyResults
+                }
+            }
+        case .applyFailed(let error):
+            needsAttention = true
+            title = "Theme Apply Failed"
+            body = error.localizedDescription
+            targetState = .applyResults
+        case .preflightPaused(let plan):
+            needsAttention = true
+            title = "Theme Apply Paused"
+            let explanation = plan.preflightExplanation(acknowledgedUnavailableTargets: [])
+            body = explanation ?? "Review required before applying changes."
+            targetState = .preflightReview
+        }
+
+        guard needsAttention else { return }
+
+        let currentPermission = await notificationClient.permissionStatus
+        notificationPermissionStatus = currentPermission
+        guard currentPermission == .authorized || currentPermission == .provisional else {
+            return
+        }
+
+        try? await notificationClient.postNotification(
+            id: UUID().uuidString,
+            title: title,
+            body: body,
+            targetState: targetState
+        )
     }
 
     // MARK: - App Termination

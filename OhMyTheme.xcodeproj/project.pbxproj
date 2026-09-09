@@ -25,6 +25,7 @@
 		D00300000000000000000001 /* ProductionWorkspaceRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */; };
 		E00100000000000000000001 /* AppPresencePlatform.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00100000000000000000002 /* AppPresencePlatform.swift */; };
 		E00200000000000000000001 /* AppPresenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00200000000000000000002 /* AppPresenceController.swift */; };
+		E01300000000000000000001 /* NotificationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E01300000000000000000002 /* NotificationClient.swift */; };
 		E00300000000000000000001 /* MainWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00300000000000000000002 /* MainWindowView.swift */; };
 		E00400000000000000000001 /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00400000000000000000002 /* OverviewView.swift */; };
 		E00500000000000000000001 /* ThemesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00500000000000000000002 /* ThemesView.swift */; };
@@ -71,6 +72,7 @@
 		D00300000000000000000002 /* ProductionWorkspaceRuntimeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProductionWorkspaceRuntimeTests.swift; sourceTree = "<group>"; };
 		E00100000000000000000002 /* AppPresencePlatform.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPresencePlatform.swift; sourceTree = "<group>"; };
 		E00200000000000000000002 /* AppPresenceController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppPresenceController.swift; sourceTree = "<group>"; };
+		E01300000000000000000002 /* NotificationClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NotificationClient.swift; sourceTree = "<group>"; };
 		E00300000000000000000002 /* MainWindowView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainWindowView.swift; sourceTree = "<group>"; };
 		E00400000000000000000002 /* OverviewView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
 		E00500000000000000000002 /* ThemesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ThemesView.swift; sourceTree = "<group>"; };
@@ -123,6 +125,7 @@
 			children = (
 				E00100000000000000000002 /* AppPresencePlatform.swift */,
 				E00200000000000000000002 /* AppPresenceController.swift */,
+				E01300000000000000000002 /* NotificationClient.swift */,
 			);
 			name = AppPresence;
 			path = AppPresence;
@@ -385,6 +388,7 @@
 				D00200000000000000000001 /* FakeWorkspaceRuntime.swift in Sources */,
 				E00100000000000000000001 /* AppPresencePlatform.swift in Sources */,
 				E00200000000000000000001 /* AppPresenceController.swift in Sources */,
+				E01300000000000000000001 /* NotificationClient.swift in Sources */,
 				E00300000000000000000001 /* MainWindowView.swift in Sources */,
 				E00400000000000000000001 /* OverviewView.swift in Sources */,
 				E00500000000000000000001 /* ThemesView.swift in Sources */,
