@@ -64,6 +64,37 @@ protocol WorkspaceRuntime: AnyObject, ObservableObject {
 struct WorkspaceTargetSnapshot: Equatable {
     let workspace: Workspace
     let targets: [WorkspacePresentationModel.ApplicationTarget]
+    let replacementSuggestions: [ConnectionReplacementSuggestion]
+
+    init(
+        workspace: Workspace,
+        targets: [WorkspacePresentationModel.ApplicationTarget],
+        replacementSuggestions: [ConnectionReplacementSuggestion] = []
+    ) {
+        self.workspace = workspace
+        self.targets = targets
+        self.replacementSuggestions = replacementSuggestions
+    }
+}
+
+/// A newly discovered Target Instance that may replace a Connected Target
+/// Instance which disappeared from discovery. Suggestions never opt in,
+/// connect, or transfer state; connecting a replacement follows the normal
+/// fresh Setup Plan and Setup Transaction rules.
+struct ReplacementCandidate: Equatable {
+    let id: TargetInstanceID
+    let displayName: String
+}
+
+/// A reviewed Connection Replacement suggestion: a missing Connected Target
+/// Instance retains its own identity, opt-in, baseline, and recovery state
+/// while a related newly discovered instance is offered as a separate,
+/// not-selected candidate. No Target Opt-in, Connection Baseline, identity,
+/// Configuration Ownership, or external state transfers automatically.
+struct ConnectionReplacementSuggestion: Equatable {
+    let oldInstance: ConnectedTargetInstance
+    let newCandidates: [ReplacementCandidate]
+    let oldBaselineCapturedAt: Date?
 }
 
 struct WorkspaceConnectionResult: Equatable {

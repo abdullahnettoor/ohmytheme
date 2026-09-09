@@ -40,6 +40,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var relinquishResult: WorkspaceRelinquishResult?
     var relinquishError: (any Error)?
 
+    var replacementSuggestions: [ConnectionReplacementSuggestion] = []
+
     var setupPlanToReturn: SetupPlan?
     var setupPlanError: (any Error)?
 
@@ -167,10 +169,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         if let startResult {
             return startResult
         }
-        return WorkspaceTargetSnapshot(
-            workspace: workspace,
-            targets: defaultTargets(for: workspace)
-        )
+        return snapshot(for: workspace)
     }
 
     func refreshTargets() async throws -> WorkspaceTargetSnapshot {
@@ -183,10 +182,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             workspace = refreshTargetsResult.workspace
             return refreshTargetsResult
         }
-        return WorkspaceTargetSnapshot(
-            workspace: workspace,
-            targets: defaultTargets(for: workspace)
-        )
+        return snapshot(for: workspace)
     }
 
     func reviewConnection(optionID: TargetInstanceID) async throws -> ConnectionPlan {
@@ -233,10 +229,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         )
         _ = try? await verifyThemeStatus()
         return WorkspaceConnectionResult(
-            snapshot: WorkspaceTargetSnapshot(
-                workspace: workspace,
-                targets: defaultTargets(for: workspace)
-            ),
+            snapshot: snapshot(for: workspace),
             report: connectionReport(
                 targetInstanceID: optionID,
                 capabilityID: "connection",
@@ -268,10 +261,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         )
         _ = try? await verifyThemeStatus()
         return WorkspaceConnectionResult(
-            snapshot: WorkspaceTargetSnapshot(
-                workspace: workspace,
-                targets: defaultTargets(for: workspace)
-            ),
+            snapshot: snapshot(for: workspace),
             report: connectionReport(
                 targetInstanceID: targetInstanceID,
                 capabilityID: "disconnect",
@@ -337,10 +327,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             detail: "Management relinquished for \(instance.displayName) without restoration."
         )
         return WorkspaceRelinquishResult(
-            snapshot: WorkspaceTargetSnapshot(
-                workspace: workspace,
-                targets: defaultTargets(for: workspace)
-            ),
+            snapshot: snapshot(for: workspace),
             report: report
         )
     }
@@ -428,10 +415,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         )
         _ = try? await verifyThemeStatus()
         return WorkspaceSetupResult(
-            snapshot: WorkspaceTargetSnapshot(
-                workspace: workspace,
-                targets: defaultTargets(for: workspace)
-            ),
+            snapshot: snapshot(for: workspace),
             report: SetupReport(
                 operationID: UUID(),
                 outcomes: outcomes
@@ -665,10 +649,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             themeAssignment: workspace.themeAssignment
         )
         _ = try? await verifyThemeStatus()
-        return WorkspaceTargetSnapshot(
-            workspace: workspace,
-            targets: defaultTargets(for: workspace)
-        )
+        return snapshot(for: workspace)
     }
 
     func selectAllRecommended() async throws -> WorkspaceTargetSnapshot {
@@ -684,10 +665,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             themeAssignment: workspace.themeAssignment
         )
         _ = try? await verifyThemeStatus()
-        return WorkspaceTargetSnapshot(
-            workspace: workspace,
-            targets: defaultTargets(for: workspace)
-        )
+        return snapshot(for: workspace)
     }
 
     func selectRecommended(
@@ -706,9 +684,14 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             themeAssignment: workspace.themeAssignment
         )
         _ = try? await verifyThemeStatus()
-        return WorkspaceTargetSnapshot(
+        return snapshot(for: workspace)
+    }
+
+    private func snapshot(for workspace: Workspace) -> WorkspaceTargetSnapshot {
+        WorkspaceTargetSnapshot(
             workspace: workspace,
-            targets: defaultTargets(for: workspace)
+            targets: defaultTargets(for: workspace),
+            replacementSuggestions: replacementSuggestions
         )
     }
 

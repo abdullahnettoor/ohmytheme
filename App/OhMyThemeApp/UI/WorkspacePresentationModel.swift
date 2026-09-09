@@ -199,6 +199,7 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var isReviewingDisconnect = false
     @Published private(set) var relinquishReport: RelinquishReport?
     @Published private(set) var isRelinquishingManagement = false
+    @Published private(set) var replacementSuggestions: [ConnectionReplacementSuggestion] = []
     @Published private(set) var operationError: String?
     @Published private(set) var isBusy = false
     @Published private(set) var isReady = true
@@ -516,7 +517,7 @@ final class WorkspacePresentationModel: ObservableObject {
         operationError = nil
         do {
             let snapshot = try await runtime.start()
-            replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+            replaceWorkspace(snapshot)
             latestSetupReport = runtime.latestSetupReport
             latestApplyReport = runtime.latestApplyReport
             onboardingDisposition = runtime.onboardingDisposition
@@ -548,31 +549,31 @@ final class WorkspacePresentationModel: ObservableObject {
         report = present(outcomes: result.report.outcomes, kind: .connection)
         approvalRequiredFor = nil
         self.connectionReview = nil
-        replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+        replaceWorkspace(result.snapshot)
         await refreshUndoAvailability()
     }
 
     func refreshTargets() async throws {
         let snapshot = try await runtime.refreshTargets()
-        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        replaceWorkspace(snapshot)
         await revalidateSetupPlan()
     }
 
     func setTargetOptIn(_ instanceID: TargetInstanceID, isOptedIn: Bool) async throws {
         let snapshot = try await runtime.setTargetOptIn(instanceID: instanceID, isOptedIn: isOptedIn)
-        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        replaceWorkspace(snapshot)
         await revalidateSetupPlan()
     }
 
     func selectAllRecommended() async throws {
         let snapshot = try await runtime.selectAllRecommended()
-        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        replaceWorkspace(snapshot)
         await revalidateSetupPlan()
     }
 
     func selectRecommended(for applicationID: String) async throws {
         let snapshot = try await runtime.selectRecommended(applicationID: applicationID)
-        replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+        replaceWorkspace(snapshot)
         await revalidateSetupPlan()
     }
 
@@ -669,7 +670,7 @@ final class WorkspacePresentationModel: ObservableObject {
                     self?.setupProgress = progress
                 }
             }
-            replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+            replaceWorkspace(result.snapshot)
             setupPlan = nil
             setupPlanInvalidationReason = nil
             setupProgress = nil
@@ -854,7 +855,7 @@ final class WorkspacePresentationModel: ObservableObject {
         disconnectReview = nil
         disconnectReviewTarget = nil
         relinquishReport = nil
-        replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+        replaceWorkspace(result.snapshot)
         await refreshUndoAvailability()
         operationError = nil
     }
@@ -893,7 +894,7 @@ final class WorkspacePresentationModel: ObservableObject {
         disconnectReview = nil
         disconnectReviewTarget = nil
         report = nil
-        replaceWorkspace(result.snapshot.workspace, targets: result.snapshot.targets)
+        replaceWorkspace(result.snapshot)
         await refreshUndoAvailability()
         operationError = nil
         return result.report
@@ -995,8 +996,13 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     func replaceWorkspace(_ workspace: Workspace, targets: [ApplicationTarget]) {
-        self.workspace = workspace
-        applicationTargets = targets
+        replaceWorkspace(WorkspaceTargetSnapshot(workspace: workspace, targets: targets))
+    }
+
+    func replaceWorkspace(_ snapshot: WorkspaceTargetSnapshot) {
+        self.workspace = snapshot.workspace
+        applicationTargets = snapshot.targets
+        replacementSuggestions = snapshot.replacementSuggestions
         applyPlan = nil
     }
 

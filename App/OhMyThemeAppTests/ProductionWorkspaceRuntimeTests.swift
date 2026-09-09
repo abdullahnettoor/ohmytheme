@@ -719,6 +719,179 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         }
     }
 
+    // MARK: - Connection Replacement (#43)
+
+    private func makeWallpaperRuntime(
+        getDisplays: @escaping @MainActor () -> [MacOSWallpaperConnectedDisplay]
+    ) -> ProductionWorkspaceRuntime {
+        ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: packs,
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: getDisplays())),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+    }
+
+    @discardableResult
+    private func persistConnectedWallpaperDisplay(_ displayID: UInt32) throws -> TargetInstanceID {
+        let targetID = MacOSWallpaperAdapter.targetInstanceID(forDisplayID: displayID)
+        let instance = ConnectedTargetInstance(
+            id: targetID,
+            displayName: "Wallpaper (Display \(displayID))",
+            adapterID: "macos.wallpaper"
+        )
+        try persistence.saveWorkspace(
+            Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [instance],
+                targetOptIns: [targetID]
+            ),
+            targetInstances: [
+                PersistedTargetInstance(
+                    id: targetID,
+                    displayName: instance.displayName,
+                    adapterID: instance.adapterID,
+                    isConnected: true,
+                    isOptedIn: true
+                )
+            ]
+        )
+        let operation = try persistence.journalStartOperation(
+            kind: .connect,
+            workspaceID: .myMac,
+            variantID: nil
+        )
+        try persistence.saveConnectionPreparation(
+            record: JournaledRecord(
+                operationID: operation.id,
+                targetInstanceID: targetID,
+                ordinal: 0,
+                adapterID: instance.adapterID,
+                adapterVersion: "1.0.0",
+                capabilityID: "connection",
+                phase: .applied,
+                intendedChangeDigest: "test-connect-display-\(displayID)",
+                staleStateToken: nil,
+                planDigest: nil,
+                receiptJSON: nil,
+                detail: "Test baseline for display \(displayID)."
+            ),
+            baseline: Data("baseline-display-\(displayID)".utf8)
+        )
+        try persistence.journalTransitionState(operationID: operation.id, to: .applied)
+        return targetID
+    }
+
+    func testMissingConnectedInstanceRemainsUnavailableAndRetainsRecoveryState() async throws {
+        let display1 = try persistConnectedWallpaperDisplay(1)
+        let runtime = makeWallpaperRuntime(getDisplays: { [] })
+
+        let snapshot = try await runtime.start()
+
+        XCTAssertTrue(runtime.workspace.isConnected(display1))
+        XCTAssertTrue(runtime.workspace.isOptedIn(display1))
+        XCTAssertNotNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: display1))
+        let macosTarget = try XCTUnwrap(snapshot.targets.first { $0.id == "macos" })
+        let missingItem = try XCTUnwrap(macosTarget.instances.first { $0.id == display1 })
+        XCTAssertEqual(missingItem.managementState, .needsAttention)
+        XCTAssertTrue(missingItem.isConnected)
+        XCTAssertTrue(snapshot.replacementSuggestions.isEmpty)
+    }
+
+    func testRelatedNewInstanceIsSuggestedWithoutAutoSelectionOrTransfer() async throws {
+        let display1 = try persistConnectedWallpaperDisplay(1)
+        let display2 = MacOSWallpaperAdapter.targetInstanceID(forDisplayID: 2)
+        let runtime = makeWallpaperRuntime(getDisplays: {
+            [MacOSWallpaperConnectedDisplay(displayID: 2, currentImageURL: nil, currentPlacement: nil)]
+        })
+
+        let snapshot = try await runtime.start()
+
+        let suggestions = snapshot.replacementSuggestions
+        XCTAssertEqual(suggestions.count, 1)
+        let suggestion = try XCTUnwrap(suggestions.first)
+        XCTAssertEqual(suggestion.oldInstance.id, display1)
+        XCTAssertEqual(suggestion.newCandidates.map(\.id), [display2])
+        XCTAssertNotNil(suggestion.oldBaselineCapturedAt)
+        XCTAssertTrue(runtime.workspace.isConnected(display1))
+        XCTAssertEqual(runtime.workspace.targetOptIns, [display1])
+        XCTAssertFalse(runtime.workspace.isOptedIn(display2))
+        XCTAssertNotNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: display1))
+        XCTAssertNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: display2))
+    }
+
+    func testUnrelatedInstancesAreNotSuggestedAsReplacements() async throws {
+        let display1 = try persistConnectedWallpaperDisplay(1)
+        let adapter = RecordingWritableAdapter(id: "recording")
+        let runtime = ProductionWorkspaceRuntime(
+            store: store,
+            themePacks: packs,
+            additionalAdapters: [adapter],
+            targetDiscoveryProvider: {
+                WorkspaceTargetDiscovery(
+                    ghostty: .failure(DiscoveryUnavailable.expectedInTest),
+                    wallpaper: .success(MacOSWallpaperDiscoveryReport(displays: [])),
+                    starship: .failure(DiscoveryUnavailable.expectedInTest),
+                    vscode: .failure(DiscoveryUnavailable.expectedInTest)
+                )
+            },
+            vscodeCompanionBootstrap: { nil }
+        )
+
+        let snapshot = try await runtime.start()
+
+        XCTAssertTrue(snapshot.replacementSuggestions.isEmpty)
+        XCTAssertTrue(runtime.workspace.isConnected(display1))
+    }
+
+    func testOptedInCandidateIsNotSuggestedAndSuggestionClears() async throws {
+        let display1 = try persistConnectedWallpaperDisplay(1)
+        let display2 = MacOSWallpaperAdapter.targetInstanceID(forDisplayID: 2)
+        var currentDisplays = [
+            MacOSWallpaperConnectedDisplay(displayID: 2, currentImageURL: nil, currentPlacement: nil)
+        ]
+        let runtime = makeWallpaperRuntime(getDisplays: { currentDisplays })
+
+        let initialSnapshot = try await runtime.start()
+        XCTAssertEqual(initialSnapshot.replacementSuggestions.count, 1)
+
+        _ = try await runtime.setTargetOptIn(instanceID: display2, isOptedIn: true)
+        currentDisplays = [
+            MacOSWallpaperConnectedDisplay(displayID: 2, currentImageURL: nil, currentPlacement: nil)
+        ]
+        let refreshedSnapshot = try await runtime.refreshTargets()
+
+        XCTAssertTrue(refreshedSnapshot.replacementSuggestions.isEmpty)
+        XCTAssertTrue(runtime.workspace.isConnected(display1))
+        XCTAssertTrue(runtime.workspace.isOptedIn(display2))
+    }
+
+    func testReplacementFollowsNormalFreshSetupPlanRules() async throws {
+        let display1 = try persistConnectedWallpaperDisplay(1)
+        let display2 = MacOSWallpaperAdapter.targetInstanceID(forDisplayID: 2)
+        let runtime = makeWallpaperRuntime(getDisplays: {
+            [MacOSWallpaperConnectedDisplay(displayID: 2, currentImageURL: nil, currentPlacement: nil)]
+        })
+        _ = try await runtime.start()
+
+        _ = try await runtime.setTargetOptIn(instanceID: display2, isOptedIn: true)
+        let plan = try await runtime.prepareSetupPlan()
+
+        XCTAssertEqual(Set(plan.targetInstanceIDs), [display2])
+        XCTAssertFalse(plan.targetInstanceIDs.contains(display1))
+        XCTAssertNil(plan.retrySourceOperationID)
+        XCTAssertNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: display2))
+        XCTAssertNotNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: display1))
+    }
+
     func testExperimentalAdapterRemainsVisibleButIsNotRecommended() async throws {
         let adapterID = "experimental_shell"
         let adapter = RecordingWritableAdapter(id: adapterID)

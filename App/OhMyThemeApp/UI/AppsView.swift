@@ -25,6 +25,10 @@ struct AppsView: View {
                     }
                 }
 
+                if !model.replacementSuggestions.isEmpty {
+                    replacementSection(model.replacementSuggestions)
+                }
+
                 if let report = model.report, report.kind == .setup {
                     setupReportSection(report)
                 }
@@ -443,6 +447,94 @@ struct AppsView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .accessibilityIdentifier("target-instance-row-\(instance.id.rawValue)")
+    }
+
+    private func replacementSection(_ suggestions: [ConnectionReplacementSuggestion]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Connection Replacement")
+                .font(.headline)
+            Text(
+                "A connected Target disappeared. Review the old and new identities below. "
+                    + "Nothing transfers automatically."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            ForEach(suggestions, id: \.oldInstance.id) { suggestion in
+                replacementCard(suggestion)
+            }
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityIdentifier("connection-replacement-section")
+    }
+
+    private func replacementCard(_ suggestion: ConnectionReplacementSuggestion) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Previous Target (still connected)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(suggestion.oldInstance.displayName)
+                    .font(.callout.weight(.medium))
+                Text(suggestion.oldInstance.id.rawValue)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                if let capturedAt = suggestion.oldBaselineCapturedAt {
+                    Text(
+                        "Unavailable. Connection Baseline retained from \(capturedAt.formatted(date: .abbreviated, time: .shortened))."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Unavailable. No Connection Baseline recorded.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityIdentifier("replacement-old-\(suggestion.oldInstance.id.rawValue)")
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Suggested replacement (not selected)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(suggestion.newCandidates, id: \.id) { candidate in
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(candidate.displayName)
+                                .font(.callout.weight(.medium))
+                            Text(candidate.id.rawValue)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        Button("Opt In") {
+                            model.perform {
+                                try await model.setTargetOptIn(candidate.id, isOptedIn: true)
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(model.isBusy)
+                        .accessibilityIdentifier("replacement-opt-in-\(candidate.id.rawValue)")
+                    }
+                }
+                Text(
+                    "Opting in only selects the new instance. Connecting it follows the normal Setup Plan review, "
+                        + "and the previous Target keeps its own opt-in, baseline, and recovery state."
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("connection-replacement-\(suggestion.oldInstance.id.rawValue)")
     }
 
     private func stateColor(_ state: TargetManagementState) -> Color {

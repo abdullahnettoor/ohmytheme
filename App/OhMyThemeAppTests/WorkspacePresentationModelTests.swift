@@ -614,6 +614,47 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNotNil(model.relinquishReport)
     }
 
+    func testReplacementSuggestionsSurfaceForReviewWithoutTransferringState() async throws {
+        let oldInstance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "macos.wallpaper:display:1"),
+            displayName: "Wallpaper (Display 1)",
+            adapterID: "macos.wallpaper"
+        )
+        let newCandidateID = TargetInstanceID(rawValue: "macos.wallpaper:display:2")
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [oldInstance]
+            )
+        )
+        runtime.replacementSuggestions = [
+            ConnectionReplacementSuggestion(
+                oldInstance: oldInstance,
+                newCandidates: [
+                    ReplacementCandidate(id: newCandidateID, displayName: "Wallpaper (Display 2)")
+                ],
+                oldBaselineCapturedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        ]
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        try await model.refreshTargets()
+
+        XCTAssertEqual(model.replacementSuggestions.count, 1)
+        let suggestion = try XCTUnwrap(model.replacementSuggestions.first)
+        XCTAssertEqual(suggestion.oldInstance.id, oldInstance.id)
+        XCTAssertEqual(suggestion.newCandidates.map(\.id), [newCandidateID])
+        XCTAssertNotNil(suggestion.oldBaselineCapturedAt)
+
+        try await model.setTargetOptIn(newCandidateID, isOptedIn: true)
+
+        XCTAssertTrue(model.workspace.isConnected(oldInstance.id))
+        XCTAssertTrue(model.workspace.isOptedIn(oldInstance.id))
+        XCTAssertTrue(model.workspace.isOptedIn(newCandidateID))
+        XCTAssertFalse(model.workspace.isConnected(newCandidateID))
+    }
+
     func testStartingPresentationDoesNotChangeThemeAssignment() async {
         let runtime = FakeWorkspaceRuntime(
             workspace: Workspace(

@@ -706,8 +706,54 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         }
         return WorkspaceTargetSnapshot(
             workspace: workspace,
-            targets: targets
+            targets: targets,
+            replacementSuggestions: connectionReplacementSuggestions(
+                workspace: workspace
+            )
         )
+    }
+
+    /// Suggests related newly discovered instances as Connection Replacements
+    /// for connected instances missing from discovery. Pure derivation: the
+    /// missing instance stays connected with its own opt-in, baseline, and
+    /// recovery state, and no candidate is selected or connected automatically.
+    private func connectionReplacementSuggestions(
+        workspace: Workspace
+    ) -> [ConnectionReplacementSuggestion] {
+        var suggestions: [ConnectionReplacementSuggestion] = []
+        for oldInstance in workspace.connectedTargetInstances where candidates[oldInstance.id] == nil {
+            let related = candidates.values
+                .filter { candidate in
+                    candidate.instance.adapterID == oldInstance.adapterID
+                        && !workspace.isConnected(candidate.instance.id)
+                        && !workspace.isOptedIn(candidate.instance.id)
+                }
+                .map {
+                    ReplacementCandidate(
+                        id: $0.instance.id,
+                        displayName: $0.instance.displayName
+                    )
+                }
+                .sorted {
+                    if $0.displayName != $1.displayName { return $0.displayName < $1.displayName }
+                    return $0.id.rawValue < $1.id.rawValue
+                }
+            guard !related.isEmpty else { continue }
+            let baselineCapturedAt: Date? = {
+                guard let persistence = store.persistenceStore else { return nil }
+                return try? persistence.journalLoadConnectionBaseline(
+                    targetInstanceID: oldInstance.id
+                )?.capturedAt
+            }()
+            suggestions.append(
+                ConnectionReplacementSuggestion(
+                    oldInstance: oldInstance,
+                    newCandidates: related,
+                    oldBaselineCapturedAt: baselineCapturedAt
+                )
+            )
+        }
+        return suggestions
     }
 
     private func macOSTarget(
