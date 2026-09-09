@@ -23,12 +23,16 @@ protocol WorkspaceRuntime: AnyObject {
     func prepareSetupPlan(retrySourceOperationID: UUID?) async throws -> SetupPlan
     func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation
     func cancelRemainingSetup(operationID: UUID) async throws
+    func cancelRemainingApply(operationID: UUID) async throws
     func executeSetupPlan(
         _ plan: SetupPlan,
         onProgress: (@Sendable (SetupProgress) -> Void)?
     ) async throws -> WorkspaceSetupResult
     func prepareApplyPlan() async throws -> ApplyPlan
-    func apply(planID: UUID) async throws -> DurableApplyReport
+    func apply(
+        planID: UUID,
+        onProgress: (@Sendable (ApplyProgress) -> Void)?
+    ) async throws -> DurableApplyReport
     func undoLast() async throws -> UndoReport
     func undoAvailability() async throws -> UndoAvailability
 
@@ -55,4 +59,10 @@ struct WorkspaceConnectionResult: Equatable {
 struct WorkspaceSetupResult: Equatable {
     let snapshot: WorkspaceTargetSnapshot
     let report: SetupReport
+}
+
+extension WorkspaceRuntime {
+    func apply(planID: UUID) async throws -> DurableApplyReport {
+        try await apply(planID: planID, onProgress: nil)
+    }
 }

@@ -220,12 +220,7 @@ extension PersistenceStore {
         try withWrite { database in
             try database.execute(
                 sql: """
-                    INSERT OR REPLACE INTO operation_records (
-                        operation_id, target_instance_id, ordinal,
-                        adapter_id, adapter_version, capability_id, phase,
-                        intended_change_digest, stale_state_token,
-                        plan_digest, receipt_json, detail
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO operation_records (\n                        operation_id, target_instance_id, ordinal,\n                        adapter_id, adapter_version, capability_id, phase,\n                        intended_change_digest, stale_state_token,\n                        plan_digest, receipt_json, detail\n                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     record.operationID.uuidString,
@@ -308,9 +303,10 @@ extension PersistenceStore {
                     SELECT o.id, o.kind, o.state, o.workspace_id, o.variant_id, o.parent_operation_id, o.cancellation_requested, o.created_at
                     FROM operations o
                     WHERE o.kind = 'apply'
-                      AND o.state IN ('applied', 'reconciled')
+                      AND o.state IN ('applied', 'reconciled', 'cancelled')
                       AND o.workspace_id = ?
-                      AND EXISTS (\n                        SELECT 1 FROM operation_records r
+                      AND EXISTS (
+                        SELECT 1 FROM operation_records r
                         WHERE r.operation_id = o.id AND r.phase = 'applied'
                       )
                     ORDER BY o.created_at DESC, o.id DESC
@@ -455,7 +451,7 @@ extension PersistenceStore {
         try loadContent(reference)
     }
 
-    /// Load content bytes when only the digest is known. Byte count is looked up from `content_references`.
+    /// Load content bytes when only the digest is known. Byte count is looked up from `content_references` .
     public func journalLoadContent(digest: String) throws -> Data {
         try withRead { database in
             guard

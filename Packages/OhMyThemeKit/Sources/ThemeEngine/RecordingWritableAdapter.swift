@@ -39,6 +39,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
     private var beforeConnectionPreparationHook: (@Sendable (ConnectedTargetInstance) async throws -> Void)? = nil
     private var beforeDeferredBaselineCaptureHook: (@Sendable (ConnectionPlan) async throws -> Void)? = nil
     private var beforeConnectHook: (@Sendable (ConnectionPlan) async throws -> Void)? = nil
+    private var beforeApplyHook: (@Sendable (AdapterPlan) async throws -> Void)? = nil
     private let configuredReach: ActivationReach
     private let configuredSideEffects: [String]
     private let configuredPermissions: [String]
@@ -82,6 +83,10 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
 
     public func setBeforeConnectHook(_ hook: (@Sendable (ConnectionPlan) async throws -> Void)?) {
         self.beforeConnectHook = hook
+    }
+
+    public func setBeforeApplyHook(_ hook: (@Sendable (AdapterPlan) async throws -> Void)?) {
+        self.beforeApplyHook = hook
     }
 
     public func setInterruption(_ point: InterruptionPoint, enabled: Bool) {
@@ -139,6 +144,9 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
 
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
         try trigger(.beforeApplyWrite)
+        if let beforeApplyHook {
+            try await beforeApplyHook(plan)
+        }
         // Envelope compatibility check (idempotent guard).
         guard plan.payload.adapterID == id,
             plan.payload.adapterVersion == version,

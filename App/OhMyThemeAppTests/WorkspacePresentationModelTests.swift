@@ -1497,4 +1497,313 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNotNil(result, "Documented reload/nextPrompt reach must not block routine Apply")
         XCTAssertEqual(runtime.applyCalls.count, 1)
     }
+
+    // MARK: - Issue #38 Apply Cancellation Tests
+
+    func testApplyProgressObservationAndDistinguishingSteps() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let target1ID = TargetInstanceID(rawValue: "ghostty.app")
+        let target2ID = TargetInstanceID(rawValue: "starship.prompt")
+        let instances = [
+            ConnectedTargetInstance(id: target1ID, displayName: "Ghostty", adapterID: "ghostty"),
+            ConnectedTargetInstance(id: target2ID, displayName: "Starship", adapterID: "starship")
+        ]
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: instances,
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let step1 = ApplyProgress.TargetStep(
+            targetInstanceID: target1ID,
+            displayName: "Ghostty",
+            adapterID: "ghostty",
+            status: .completed(detail: "Theme applied.")
+        )
+        let step2 = ApplyProgress.TargetStep(
+            targetInstanceID: target2ID,
+            displayName: "Starship",
+            adapterID: "starship",
+            status: .applying,
+            currentAction: "Updating starship prompt..."
+        )
+        let progress = ApplyProgress(
+            operationID: UUID(),
+            steps: [step1, step2],
+            currentTargetID: target2ID
+        )
+
+        model.setApplyProgressForTesting(progress)
+
+        XCTAssertEqual(model.applyProgress?.currentTargetID, target2ID)
+        XCTAssertEqual(model.applyProgress?.activeStepName, "Starship")
+        XCTAssertEqual(model.applyProgress?.completedCount, 1)
+        XCTAssertEqual(model.applyProgress?.totalCount, 2)
+        XCTAssertFalse(model.applyProgress?.isComplete ?? true)
+
+        let observedStep1 = model.applyProgress?.steps.first(where: { $0.targetInstanceID == target1ID })
+        let observedStep2 = model.applyProgress?.steps.first(where: { $0.targetInstanceID == target2ID })
+        XCTAssertTrue(observedStep1?.status.isCompleted ?? false)
+        XCTAssertFalse(observedStep1?.status.isActive ?? true)
+        XCTAssertFalse(observedStep1?.status.isSkipped ?? true)
+
+        XCTAssertFalse(observedStep2?.status.isCompleted ?? true)
+        XCTAssertTrue(observedStep2?.status.isActive ?? false)
+        XCTAssertFalse(observedStep2?.status.isSkipped ?? true)
+
+        // Now test a skipped step
+        let step2Skipped = ApplyProgress.TargetStep(
+            targetInstanceID: target2ID,
+            displayName: "Starship",
+            adapterID: "starship",
+            status: .skipped(detail: "Cancelled by user.")
+        )
+        let skippedProgress = ApplyProgress(
+            operationID: progress.operationID,
+            steps: [step1, step2Skipped],
+            currentTargetID: nil
+        )
+        model.setApplyProgressForTesting(skippedProgress)
+
+        let observedSkippedStep2 = model.applyProgress?.steps.first(where: { $0.targetInstanceID == target2ID })
+        XCTAssertTrue(observedSkippedStep2?.status.isSkipped ?? false)
+        XCTAssertFalse(observedSkippedStep2?.status.isActive ?? true)
+        XCTAssertFalse(observedSkippedStep2?.status.isCompleted ?? true)
+    }
+
+    func testCancelRemainingApplySendsOperationIDToRuntime() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let targetID = TargetInstanceID(rawValue: "ghostty.app")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: targetID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let operationID = UUID()
+        let progress = ApplyProgress(
+            operationID: operationID,
+            steps: [
+                ApplyProgress.TargetStep(
+                    targetInstanceID: targetID,
+                    displayName: "Ghostty",
+                    adapterID: "ghostty",
+                    status: .applying
+                )
+            ],
+            currentTargetID: targetID
+        )
+
+        model.setIsApplyingThemeForTesting(true)
+        model.setApplyProgressForTesting(progress)
+
+        await model.cancelRemainingApply()
+
+        XCTAssertEqual(runtime.cancelRemainingApplyOperationIDs, [operationID])
+        XCTAssertFalse(model.isCancellingRemainingApply)
+    }
+
+    func testApplyCancellationBeforeMutationHandledGracefully() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let targetID = TargetInstanceID(rawValue: "ghostty.app")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: targetID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.applyError = DurableOperationError.operationCancelled
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [targetID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: [
+                AdapterPlan(
+                    targetInstanceID: targetID,
+                    adapterID: "ghostty",
+                    adapterVersion: "1.0.0",
+                    capabilityID: "theme",
+                    payload: AdapterPayloadEnvelope(adapterID: "ghostty", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+                    intendedChangeDigest: "digest",
+                    expectedSideEffects: [],
+                    requiredPermissions: [],
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    activationReach: .reloadRequired,
+                    setupNeeds: [],
+                    conflicts: []
+                )
+            ]
+        )
+
+        try await model.prepareSelectedTheme()
+        XCTAssertNotNil(model.applyPlan)
+
+        let report = try await model.applyPreparedPlan()
+        XCTAssertNil(report)
+        XCTAssertFalse(model.isApplyingTheme)
+        XCTAssertFalse(model.isBusy)
+        XCTAssertNil(model.applyProgress)
+        XCTAssertEqual(model.operationError, "Theme application was cancelled.")
+    }
+
+    func testApplyCancellationAfterFirstTargetPresentsCompletedAndSkippedTargets() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let target1ID = TargetInstanceID(rawValue: "ghostty.app")
+        let target2ID = TargetInstanceID(rawValue: "starship.prompt")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: target1ID, displayName: "Ghostty", adapterID: "ghostty"),
+                ConnectedTargetInstance(id: target2ID, displayName: "Starship", adapterID: "starship")
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+
+        let opID = UUID()
+        let cancelledReport = DurableApplyReport(
+            operationID: opID,
+            variantID: "oh-my-theme/aurora",
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: target1ID,
+                    adapterID: "ghostty",
+                    capabilityID: "theme",
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    configurationState: .updated,
+                    runningInstanceReach: .reloadRequired,
+                    detail: "Theme applied to Ghostty.",
+                    rollbackState: .undoAvailable
+                ),
+                TargetCapabilityOutcome(
+                    targetInstanceID: target2ID,
+                    adapterID: "starship",
+                    capabilityID: "theme",
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    configurationState: .unchanged,
+                    runningInstanceReach: .unavailable,
+                    detail: "Skipped after Cancel Remaining.",
+                    rollbackState: .notNeeded
+                )
+            ]
+        )
+        runtime.applyResult = cancelledReport
+
+        let model = WorkspacePresentationModel(runtime: runtime)
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: opID,
+            workspaceID: workspace.id,
+            targetInstanceIDs: [target1ID, target2ID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: []
+        )
+
+        try await model.prepareSelectedTheme()
+        let report = try await model.applyPreparedPlan()
+
+        XCTAssertNotNil(report)
+        XCTAssertEqual(report?.outcomes.count, 2)
+        XCTAssertEqual(model.report?.title, "Theme applied with remaining work")
+
+        let ghosttyOutcome = model.report?.groups.first(where: { $0.id == target1ID })?.outcomes.first
+        let starshipOutcome = model.report?.groups.first(where: { $0.id == target2ID })?.outcomes.first
+        XCTAssertEqual(ghosttyOutcome?.configuration, "Updated")
+        XCTAssertEqual(starshipOutcome?.configuration, "Skipped")
+    }
+
+    func testApplyDesiredThemeCancellationHandledGracefully() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let targetID = TargetInstanceID(rawValue: "ghostty.app")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: targetID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let ghosttyPlan = AdapterPlan(
+            targetInstanceID: targetID,
+            adapterID: "ghostty",
+            adapterVersion: "1.0.0",
+            capabilityID: "theme",
+            payload: AdapterPayloadEnvelope(adapterID: "ghostty", adapterVersion: "1.0.0", payloadVersion: "1.0.0", payload: Data()),
+            intendedChangeDigest: "digest",
+            expectedSideEffects: [],
+            requiredPermissions: [],
+            sourceType: .upstream,
+            sourceRevision: "1",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: []
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.applyError = DurableOperationError.operationCancelled
+        runtime.prepareApplyPlanResult = ApplyPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [targetID],
+            requiredThemeAssignment: workspace.themeAssignment,
+            variantID: "oh-my-theme/aurora",
+            sourceType: .upstream,
+            sourceRevision: "1",
+            attribution: "Fake",
+            activationReach: .reloadRequired,
+            setupNeeds: [],
+            conflicts: [],
+            unavailableCapabilities: [],
+            unavailableTargetInstanceIDs: [],
+            preparationFailures: [],
+            userActions: [],
+            targetPlans: [ghosttyPlan]
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        let report = try await model.applyDesiredTheme()
+        XCTAssertNil(report)
+        XCTAssertFalse(model.isApplyingTheme)
+        XCTAssertFalse(model.isBusy)
+        XCTAssertNil(model.applyProgress)
+        XCTAssertEqual(model.operationError, "Theme application was cancelled.")
+    }
 }

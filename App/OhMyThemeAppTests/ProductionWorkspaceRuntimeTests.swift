@@ -1148,4 +1148,34 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("externally modified"))
     }
+
+    func testProductionWorkspaceRuntimeCancelRemainingApply() async throws {
+        let adapter = RecordingWritableAdapter(id: "recording")
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+
+        _ = try await runtime.start()
+        runtime.selectFixedThemeVariant("catppuccin/mocha")
+
+        let candidateID = TargetInstanceID(rawValue: "recording.default")
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+        let reviewPlan = try await runtime.reviewConnection(optionID: candidateID)
+        _ = try await runtime.connect(optionID: candidateID, reviewedPlan: reviewPlan)
+
+        let plan = try await runtime.prepareApplyPlan()
+
+        // Calling cancelRemainingApply sets the cancellation flag for the operation ID
+        try await runtime.cancelRemainingApply(operationID: plan.id)
+
+        // When applying, because it was cancelled immediately before mutation, it aborts
+        do {
+            _ = try await runtime.apply(planID: plan.id)
+            XCTFail("Expected operationCancelled error")
+        } catch let error as DurableOperationError {
+            guard case .operationCancelled = error else {
+                XCTFail("Expected operationCancelled, got \(error)")
+                return
+            }
+        }
+    }
+
 }

@@ -1664,7 +1664,11 @@ extension ThemeEngine {
 
     // MARK: Apply (durable)
 
-    public func applyDurable(planID: UUID, workspace: Workspace) async throws -> DurableApplyReport {
+    public func applyDurable(
+        planID: UUID,
+        workspace: Workspace,
+        onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
+    ) async throws -> DurableApplyReport {
         guard let persistence = self.persistenceStore else {
             throw DurableOperationError.persistenceRequired
         }
@@ -1694,12 +1698,35 @@ extension ThemeEngine {
         }
 
         let operation = try persistence.journalStartOperation(
+            id: planID,
             kind: .apply,
             workspaceID: workspace.id,
             variantID: plan.variantID
         )
         try await beginOperationTracking(operation)
         defer { try? closeOperationTracking(operation.id) }
+
+        var targetDisplayNames: [TargetInstanceID: String] = [:]
+        for instance in workspace.connectedTargetInstances {
+            targetDisplayNames[instance.id] = instance.displayName
+        }
+        var initialSteps: [ApplyProgress.TargetStep] = []
+        for targetPlan in plan.targetPlans {
+            let name = targetDisplayNames[targetPlan.targetInstanceID] ?? targetPlan.targetInstanceID.rawValue
+            initialSteps.append(
+                ApplyProgress.TargetStep(
+                    targetInstanceID: targetPlan.targetInstanceID,
+                    displayName: name,
+                    adapterID: targetPlan.adapterID,
+                    status: .waiting
+                )
+            )
+        }
+        var currentProgress = ApplyProgress(
+            operationID: operation.id,
+            steps: initialSteps
+        )
+        onProgress?(currentProgress)
 
         // Durably persist all Adapter Plans before any external mutation.
         var planReferences: [TargetInstanceID: ContentReference] = [:]
@@ -1728,12 +1755,61 @@ extension ThemeEngine {
             )
         }
 
-        try await checkAndConsumeCancellation(operation.id)
+        let isPreCancelled = consumeApplyCancellation(planID)
+            || consumeApplyCancellation(operation.id)
+            || ((try? persistence.journalIsCancellationRequested(operationID: operation.id)) ?? false)
+
+        if isPreCancelled {
+            for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
+                let detail = "Skipped after Cancel Remaining."
+                try persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operation.id,
+                        targetInstanceID: targetPlan.targetInstanceID,
+                        ordinal: ordinal,
+                        adapterID: targetPlan.adapterID,
+                        adapterVersion: targetPlan.adapterVersion,
+                        capabilityID: targetPlan.capabilityID,
+                        phase: .skipped,
+                        intendedChangeDigest: targetPlan.intendedChangeDigest,
+                        staleStateToken: targetPlan.staleStateToken,
+                        planDigest: planReferences[targetPlan.targetInstanceID]?.digest,
+                        receiptJSON: nil,
+                        detail: detail
+                    )
+                )
+                if ordinal < currentProgress.steps.count {
+                    currentProgress.steps[ordinal].status = .skipped(detail: detail)
+                }
+            }
+            try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
+            currentProgress.currentTargetID = nil
+            onProgress?(currentProgress)
+            throw DurableOperationError.operationCancelled
+        }
 
         // Iterate in the deterministic order of plan.targetPlans.
         var outcomes: [TargetCapabilityOutcome] = []
         var anyMutated = false
+        var cancellationRequested = false
         for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
+            if consumeApplyCancellation(operation.id) {
+                cancellationRequested = true
+                break
+            }
+
+            let targetID = targetPlan.targetInstanceID
+            currentProgress.currentTargetID = targetID
+            if ordinal < currentProgress.steps.count {
+                currentProgress.steps[ordinal].status = .applying
+                currentProgress.steps[ordinal].currentAction = "Applying theme..."
+            }
+            onProgress?(currentProgress)
+
+            if !anyMutated {
+                await markMutationBegun(operation.id)
+            }
+
             let outcome = try await self.runApplyStep(
                 plan: targetPlan,
                 ordinal: ordinal,
@@ -1746,6 +1822,63 @@ extension ThemeEngine {
             if outcome.configurationState == .updated {
                 anyMutated = true
             }
+
+            if ordinal < currentProgress.steps.count {
+                switch outcome.configurationState {
+                case .updated, .unchanged:
+                    currentProgress.steps[ordinal].status = .completed(detail: outcome.detail)
+                case .permissionRequired:
+                    currentProgress.steps[ordinal].status = .permissionRequired(detail: outcome.detail ?? "Permission required")
+                case .conflicted:
+                    currentProgress.steps[ordinal].status = .conflict(detail: outcome.detail ?? "Conflict")
+                case .failed, .unavailable:
+                    currentProgress.steps[ordinal].status = .failed(detail: outcome.detail ?? "Failed")
+                }
+                currentProgress.steps[ordinal].currentAction = nil
+            }
+            onProgress?(currentProgress)
+        }
+
+        if cancellationRequested {
+            let completedIDs = Set(outcomes.map(\.targetInstanceID))
+            for (ordinal, targetPlan) in plan.targetPlans.enumerated() where !completedIDs.contains(targetPlan.targetInstanceID) {
+                let detail = "Skipped after Cancel Remaining."
+                try persistence.journalSaveRecord(
+                    JournaledRecord(
+                        operationID: operation.id,
+                        targetInstanceID: targetPlan.targetInstanceID,
+                        ordinal: ordinal,
+                        adapterID: targetPlan.adapterID,
+                        adapterVersion: targetPlan.adapterVersion,
+                        capabilityID: targetPlan.capabilityID,
+                        phase: .skipped,
+                        intendedChangeDigest: targetPlan.intendedChangeDigest,
+                        staleStateToken: targetPlan.staleStateToken,
+                        planDigest: planReferences[targetPlan.targetInstanceID]?.digest,
+                        receiptJSON: nil,
+                        detail: detail
+                    )
+                )
+                outcomes.append(
+                    TargetCapabilityOutcome(
+                        targetInstanceID: targetPlan.targetInstanceID,
+                        adapterID: targetPlan.adapterID,
+                        capabilityID: targetPlan.capabilityID,
+                        sourceType: plan.sourceType,
+                        sourceRevision: plan.sourceRevision,
+                        configurationState: .unchanged,
+                        runningInstanceReach: .unavailable,
+                        detail: detail
+                    )
+                )
+                if ordinal < currentProgress.steps.count {
+                    currentProgress.steps[ordinal].status = .skipped(detail: detail)
+                    currentProgress.steps[ordinal].currentAction = nil
+                }
+            }
+            try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
+            currentProgress.currentTargetID = nil
+            onProgress?(currentProgress)
         }
 
         for id in plan.unavailableTargetInstanceIDs {
@@ -1777,9 +1910,13 @@ extension ThemeEngine {
             )
         }
 
-        let records = try persistence.journalLoadRecords(operationID: operation.id)
-        if !records.contains(where: { $0.phase == .applying }) {
-            try persistence.journalTransitionState(operationID: operation.id, to: .applied)
+        if !cancellationRequested {
+            let records = try persistence.journalLoadRecords(operationID: operation.id)
+            if !records.contains(where: { $0.phase == .applying }) {
+                try persistence.journalTransitionState(operationID: operation.id, to: .applied)
+            }
+            currentProgress.currentTargetID = nil
+            onProgress?(currentProgress)
         }
         let outcomeOrder = Dictionary(
             uniqueKeysWithValues: plan.targetInstanceIDs.enumerated().map { ($0.element, $0.offset) }
@@ -2401,6 +2538,32 @@ extension ThemeEngine {
     }
 
     // MARK: Cancellation
+
+    /// Requests that a running Apply Transaction stop before its next target boundary.
+    /// The current adapter call always completes and any untouched targets are recorded as skipped.
+    public func cancelRemainingApply(operationID: UUID) async throws -> Bool {
+        guard let persistence = self.persistenceStore else {
+            throw DurableOperationError.persistenceRequired
+        }
+        if plansInFlight[operationID] != nil {
+            recordCancellationRequest(operationID)
+            try? persistence.journalRecordCancellationRequest(operationID: operationID)
+            return true
+        }
+        guard currentOperationID == operationID,
+            let operation = try persistence.journalLoadOperation(id: operationID),
+            operation.kind == .apply,
+            (operation.state == .prepared || operation.state == .applying)
+        else {
+            throw DurableOperationError.cancellationRefused
+        }
+        recordCancellationRequest(operationID)
+        try persistence.journalRecordCancellationRequest(operationID: operationID)
+        if operation.state == .prepared {
+            try persistence.journalTransitionState(operationID: operationID, to: .cancelled)
+        }
+        return true
+    }
 
     /// Requests that a running Setup Transaction stop before its next target boundary.
     /// The current adapter call always completes and any untouched targets are recorded as skipped.
@@ -3332,6 +3495,13 @@ extension ThemeEngine {
             self.pendingCancellations.remove(operationID)
             throw DurableOperationError.operationCancelled
         }
+    }
+
+    fileprivate func consumeApplyCancellation(_ operationID: UUID) -> Bool {
+        let isPersistedCancellation =
+            (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
+        let isInMemory = pendingCancellations.contains(operationID)
+        return isInMemory || isPersistedCancellation
     }
 
     fileprivate func consumeSetupCancellation(_ operationID: UUID) -> Bool {

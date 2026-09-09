@@ -52,6 +52,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     private(set) var prepareSetupPlanRetrySources: [UUID?] = []
     private(set) var validateSetupPlanCalls = 0
     private(set) var cancelRemainingSetupOperationIDs: [UUID] = []
+    private(set) var cancelRemainingApplyOperationIDs: [UUID] = []
+    var cancelRemainingApplyHandler: ((UUID) async throws -> Void)?
+    var onApplyExecution: ((UUID, (@Sendable (ApplyProgress) -> Void)?) async throws -> DurableApplyReport?)?
     private(set) var prepareCalls = 0
     private(set) var applyCalls: [UUID] = []
     private(set) var undoCalls = 0
@@ -235,6 +238,13 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         cancelRemainingSetupOperationIDs.append(operationID)
     }
 
+    func cancelRemainingApply(operationID: UUID) async throws {
+        cancelRemainingApplyOperationIDs.append(operationID)
+        if let cancelRemainingApplyHandler {
+            try await cancelRemainingApplyHandler(operationID)
+        }
+    }
+
     func executeSetupPlan(
         _ plan: SetupPlan,
         onProgress: (@Sendable (SetupProgress) -> Void)? = nil
@@ -346,16 +356,33 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         )
     }
 
-    func apply(planID: UUID) async throws -> DurableApplyReport {
+    func apply(
+        planID: UUID,
+        onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
+    ) async throws -> DurableApplyReport {
         applyCalls.append(planID)
         if let applyError {
             throw applyError
+        }
+        if let onApplyExecution, let customReport = try await onApplyExecution(planID, onProgress) {
+            return customReport
         }
         if let applyResult {
             return applyResult
         }
         let plan = prepareApplyPlanResult?.id == planID ? prepareApplyPlanResult : nil
         let orderedInstances = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances)
+        if let onProgress {
+            let initialSteps = orderedInstances.map {
+                ApplyProgress.TargetStep(
+                    targetInstanceID: $0.id,
+                    displayName: $0.displayName,
+                    adapterID: $0.adapterID,
+                    status: .waiting
+                )
+            }
+            onProgress(ApplyProgress(operationID: planID, steps: initialSteps))
+        }
         let outcomes = orderedInstances.map { instance in
             if let plan, let targetPlan = plan.targetPlans.first(where: { $0.targetInstanceID == instance.id }) {
                 if !targetPlan.conflicts.isEmpty {

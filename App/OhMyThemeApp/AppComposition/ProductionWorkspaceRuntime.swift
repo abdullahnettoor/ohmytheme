@@ -371,6 +371,10 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         try await requiredThemeEngine().cancelRemainingSetup(operationID: operationID)
     }
 
+    func cancelRemainingApply(operationID: UUID) async throws {
+        try await requiredThemeEngine().cancelRemainingApply(operationID: operationID)
+    }
+
     func executeSetupPlan(
         _ plan: SetupPlan,
         onProgress: (@Sendable (SetupProgress) -> Void)?
@@ -429,8 +433,15 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         try await requiredThemeEngine().prepare(workspace: workspace)
     }
 
-    func apply(planID: UUID) async throws -> DurableApplyReport {
-        try await requiredThemeEngine().applyDurable(planID: planID, workspace: workspace)
+    func apply(
+        planID: UUID,
+        onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
+    ) async throws -> DurableApplyReport {
+        try await requiredThemeEngine().applyDurable(
+            planID: planID,
+            workspace: workspace,
+            onProgress: onProgress
+        )
     }
 
     func undoLast() async throws -> UndoReport {

@@ -179,6 +179,8 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var isExecutingSetup = false
     @Published private(set) var isCancellingRemainingSetup = false
     @Published private(set) var isApplyingTheme = false
+    @Published private(set) var applyProgress: ApplyProgress?
+    @Published private(set) var isCancellingRemainingApply = false
     @Published private(set) var latestSetupReport: SetupReport?
 
     @Published private(set) var report: PresentedReport?
@@ -411,6 +413,20 @@ final class WorkspacePresentationModel: ObservableObject {
         await prepareSetupPlan(retrySourceOperationID: latestSetupReport.operationID)
     }
 
+    func cancelRemainingApply() async {
+        guard isApplyingTheme,
+            !isCancellingRemainingApply,
+            let operationID = applyProgress?.operationID ?? applyPlan?.id
+        else { return }
+        isCancellingRemainingApply = true
+        defer { isCancellingRemainingApply = false }
+        do {
+            try await runtime.cancelRemainingApply(operationID: operationID)
+        } catch {
+            operationError = Self.describe(error)
+        }
+    }
+
     func cancelRemainingSetup() async {
         guard isExecutingSetup,
             !isCancellingRemainingSetup,
@@ -490,13 +506,38 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     @discardableResult
-    func apply(planID: UUID) async throws -> DurableApplyReport {
-        let applied = try await runtime.apply(planID: planID)
-        applyPlan = nil
-        report = present(outcomes: applied.outcomes, kind: .apply)
-        await refreshUndoAvailability()
+    func apply(planID: UUID) async throws -> DurableApplyReport? {
+        guard !isBusy, !isApplyingTheme, !isExecutingSetup else { return nil }
+        isBusy = true
+        isApplyingTheme = true
         operationError = nil
-        return applied
+        defer {
+            isBusy = false
+            isApplyingTheme = false
+            isCancellingRemainingApply = false
+            applyProgress = nil
+        }
+        do {
+            let applied = try await runtime.apply(planID: planID) { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.applyProgress = progress
+                }
+            }
+            applyPlan = nil
+            applyProgress = nil
+            report = present(outcomes: applied.outcomes, kind: .apply)
+            await refreshUndoAvailability()
+            operationError = nil
+            return applied
+        } catch {
+            applyProgress = nil
+            if case DurableOperationError.operationCancelled = error {
+                operationError = "Theme application was cancelled."
+                return nil
+            }
+            operationError = Self.describe(error)
+            throw error
+        }
     }
 
     @discardableResult
@@ -508,12 +549,19 @@ final class WorkspacePresentationModel: ObservableObject {
         defer {
             isBusy = false
             isApplyingTheme = false
+            isCancellingRemainingApply = false
+            applyProgress = nil
         }
         do {
             let prepared = try await runtime.prepareApplyPlan()
             if prepared.isClean(acknowledgedUnavailableTargets: acknowledgedUnavailableTargetInstanceIDs) {
                 applyPlan = nil
-                let applied = try await runtime.apply(planID: prepared.id)
+                let applied = try await runtime.apply(planID: prepared.id) { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        self?.applyProgress = progress
+                    }
+                }
+                self.applyProgress = nil
                 report = present(outcomes: applied.outcomes, kind: .apply)
                 await refreshUndoAvailability()
                 return applied
@@ -522,6 +570,11 @@ final class WorkspacePresentationModel: ObservableObject {
                 return nil
             }
         } catch {
+            self.applyProgress = nil
+            if case DurableOperationError.operationCancelled = error {
+                operationError = "Theme application was cancelled."
+                return nil
+            }
             operationError = Self.describe(error)
             throw error
         }
@@ -539,15 +592,27 @@ final class WorkspacePresentationModel: ObservableObject {
         defer {
             isBusy = false
             isApplyingTheme = false
+            isCancellingRemainingApply = false
+            applyProgress = nil
         }
         do {
             acknowledgedUnavailableTargetInstanceIDs.formUnion(applyPlan.unavailableTargetInstanceIDs)
-            let applied = try await runtime.apply(planID: applyPlan.id)
+            let applied = try await runtime.apply(planID: applyPlan.id) { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.applyProgress = progress
+                }
+            }
             self.applyPlan = nil
+            self.applyProgress = nil
             report = present(outcomes: applied.outcomes, kind: .apply)
             await refreshUndoAvailability()
             return applied
         } catch {
+            self.applyProgress = nil
+            if case DurableOperationError.operationCancelled = error {
+                operationError = "Theme application was cancelled."
+                return nil
+            }
             operationError = Self.describe(error)
             throw error
         }
@@ -821,6 +886,14 @@ final class WorkspacePresentationModel: ObservableObject {
 
     func setIsExecutingSetupForTesting(_ executing: Bool) {
         self.isExecutingSetup = executing
+    }
+
+    func setIsApplyingThemeForTesting(_ applying: Bool) {
+        self.isApplyingTheme = applying
+    }
+
+    func setApplyProgressForTesting(_ progress: ApplyProgress?) {
+        self.applyProgress = progress
     }
     #endif
 

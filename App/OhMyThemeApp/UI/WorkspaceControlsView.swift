@@ -28,6 +28,9 @@ struct WorkspaceControlsView: View {
                     }
                     themeSection
 
+                    if let progress = model.applyProgress, model.applyPlan == nil {
+                        applyProgressBanner(progress: progress)
+                    }
                     if let plan = model.applyPlan {
                         applyPlanSection(plan)
                     }
@@ -409,21 +412,27 @@ struct WorkspaceControlsView: View {
                 }
             }
 
-            let hasReview = plan.hasReviewConditions(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs)
-            Button {
-                Task {
-                    _ = try? await model.applyPreparedPlan()
-                }
-            } label: {
-                Label(hasReview ? "Apply to ready Targets" : "Apply Theme", systemImage: "paintbrush.fill")
-                    .frame(maxWidth: .infinity)
+            if let progress = model.applyProgress {
+                applyProgressBanner(progress: progress)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(
-                model.isBusy
-                    || plan.readyTargetPlans.isEmpty
-            )
-            .accessibilityIdentifier("apply-plan")
+
+            if !model.isApplyingTheme {
+                let hasReview = plan.hasReviewConditions(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs)
+                Button {
+                    Task {
+                        _ = try? await model.applyPreparedPlan()
+                    }
+                } label: {
+                    Label(hasReview ? "Apply to ready Targets" : "Apply Theme", systemImage: "paintbrush.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    model.isBusy
+                        || plan.readyTargetPlans.isEmpty
+                )
+                .accessibilityIdentifier("apply-plan")
+            }
         }
         .padding(14)
         .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
@@ -598,6 +607,129 @@ struct WorkspaceControlsView: View {
         case .unavailable: "Unavailable"
         }
     }
+    private func applyProgressBanner(progress: ApplyProgress) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(progress.isComplete ? "Apply Complete" : (progress.activeStepName.map { "Applying to \($0)..." } ?? "Applying Theme..."))
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("apply-progress-title")
+                Spacer()
+                Text("\(progress.completedCount) of \(progress.totalCount)")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("apply-progress-count")
+            }
+
+            ProgressView(value: progress.fractionCompleted)
+                .accessibilityIdentifier("apply-progress-bar")
+
+            VStack(spacing: 6) {
+                ForEach(progress.steps) { step in
+                    HStack(spacing: 8) {
+                        Text(step.displayName)
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        applyStepBadge(status: step.status)
+                    }
+                    .accessibilityIdentifier("apply-step-\(step.targetInstanceID.rawValue)")
+                }
+            }
+            .padding(.top, 4)
+
+            if model.isApplyingTheme {
+                Button(role: .cancel) {
+                    Task {
+                        await model.cancelRemainingApply()
+                    }
+                } label: {
+                    HStack {
+                        if model.isCancellingRemainingApply {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Cancelling Remaining...")
+                        } else {
+                            Label("Cancel Remaining", systemImage: "xmark.circle")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.isCancellingRemainingApply)
+                .accessibilityIdentifier("cancel-remaining-apply-button")
+                .padding(.top, 4)
+            }
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("apply-progress-banner")
+    }
+
+    @ViewBuilder
+    private func applyStepBadge(status: ApplyProgress.StepStatus) -> some View {
+        switch status {
+        case .waiting:
+            Label("Waiting", systemImage: "clock")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+                .accessibilityIdentifier("apply-status-waiting")
+        case .applying:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Applying")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .accessibilityIdentifier("apply-status-applying")
+        case .completed:
+            Label("Completed", systemImage: "checkmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.green)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.1), in: Capsule())
+                .accessibilityIdentifier("apply-status-completed")
+        case .skipped:
+            Label("Skipped", systemImage: "forward.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.12), in: Capsule())
+                .accessibilityIdentifier("apply-status-skipped")
+        case .failed:
+            Label("Failed", systemImage: "xmark.circle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.red)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.red.opacity(0.1), in: Capsule())
+                .accessibilityIdentifier("apply-status-failed")
+        case .conflict:
+            Label("Conflict", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange.opacity(0.12), in: Capsule())
+                .accessibilityIdentifier("apply-status-conflict")
+        case .permissionRequired:
+            Label("Permission Required", systemImage: "lock.fill")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange.opacity(0.12), in: Capsule())
+                .accessibilityIdentifier("apply-status-permission")
+        }
+    }
+
 }
 
 #Preview {
@@ -609,4 +741,5 @@ struct WorkspaceControlsView: View {
             )
         )
     )
+
 }
