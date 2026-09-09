@@ -908,7 +908,7 @@ final class WorkspacePresentationModelTests: XCTestCase {
                     configurationState: .updated,
                     runningInstanceReach: .currentInstances,
                     detail: "Connected via retry."
-                )
+                ),
             ]
         )
         runtime.executeSetupPlanResult = WorkspaceSetupResult(
@@ -1097,7 +1097,7 @@ final class WorkspacePresentationModelTests: XCTestCase {
                 id: TargetInstanceID(rawValue: "ghostty.app"),
                 displayName: "Ghostty",
                 adapterID: "ghostty"
-            )
+            ),
         ]
         let workspace = Workspace(
             id: .myMac,
@@ -1236,4 +1236,3 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNil(model.report)
     }
 }
-

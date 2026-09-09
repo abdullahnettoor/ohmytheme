@@ -68,7 +68,8 @@ public struct SetupReport: Codable, Equatable, Sendable {
         operationID = try container.decode(UUID.self, forKey: .operationID)
         retrySourceOperationID = try container.decodeIfPresent(UUID.self, forKey: .retrySourceOperationID)
         outcomes = try container.decode([TargetCapabilityOutcome].self, forKey: .outcomes)
-        combinedOutcomes = try container.decodeIfPresent([TargetCapabilityOutcome].self, forKey: .combinedOutcomes) ?? outcomes
+        combinedOutcomes =
+            try container.decodeIfPresent([TargetCapabilityOutcome].self, forKey: .combinedOutcomes) ?? outcomes
     }
 
     public func outcomeKind(for outcome: TargetCapabilityOutcome) -> OutcomeKind {
@@ -143,7 +144,8 @@ public struct SetupReport: Codable, Equatable, Sendable {
     public var unresolvedOutcomes: [TargetCapabilityOutcome] {
         combinedOutcomes.filter {
             let k = outcomeKind(for: $0)
-            return k == .failed || k == .needsPermission || k == .conflict || k == .unavailable || k == .skipped || k == .recoveryRequired
+            return k == .failed || k == .needsPermission || k == .conflict || k == .unavailable || k == .skipped
+                || k == .recoveryRequired
         }
     }
 }
@@ -193,7 +195,22 @@ extension ThemeEngine {
         instances: [ConnectedTargetInstance],
         retrySourceOperationID: UUID? = nil
     ) async throws -> SetupPlan {
-        let unconfigured = instances.filter { !workspace.isConnected($0.id) }
+        let retryableTargetIDs: Set<TargetInstanceID>?
+        if let retrySourceOperationID {
+            guard let persistence = persistenceStore else {
+                throw DurableOperationError.persistenceRequired
+            }
+            retryableTargetIDs = try retryableSetupTargetIDs(
+                from: retrySourceOperationID,
+                persistence: persistence
+            )
+        } else {
+            retryableTargetIDs = nil
+        }
+        let unconfigured = instances.filter {
+            !workspace.isConnected($0.id)
+                && (retryableTargetIDs?.contains($0.id) ?? true)
+        }
         let orderedInstances = WorkspaceTargetOrder.ordered(unconfigured)
         var targetPlans: [ConnectionPlan] = []
         var preparationFailures: [TargetSetupPreparationFailure] = []
@@ -391,9 +408,24 @@ extension ThemeEngine {
     ) async -> SetupPlanPreconditionValidation {
         let currentUnresolvedOptIns = Set(workspace.targetOptIns.filter { !workspace.isConnected($0) })
         let planTargets = Set(plan.targetInstanceIDs)
-        if currentUnresolvedOptIns != planTargets {
+        let expectedPlanTargets: Set<TargetInstanceID>
+        if let retrySourceOperationID = plan.retrySourceOperationID {
+            guard let persistence = persistenceStore else {
+                return .invalidated(reason: "Persistent retry history is unavailable.")
+            }
+            do {
+                expectedPlanTargets = currentUnresolvedOptIns.intersection(
+                    try retryableSetupTargetIDs(from: retrySourceOperationID, persistence: persistence)
+                )
+            } catch {
+                return .invalidated(reason: "Retry history is unavailable: \(error.localizedDescription)")
+            }
+        } else {
+            expectedPlanTargets = currentUnresolvedOptIns
+        }
+        if expectedPlanTargets != planTargets {
             return .invalidated(
-                reason: "Target Opt-ins changed since the plan was prepared."
+                reason: "Target Opt-ins or retry eligibility changed since the plan was prepared."
             )
         }
 
@@ -539,82 +571,67 @@ extension ThemeEngine {
 
         let currentUnresolvedOptIns = Set(workspace.targetOptIns.filter { !workspace.isConnected($0) })
         let planTargets = Set(plan.targetInstanceIDs)
-        guard currentUnresolvedOptIns == planTargets else {
+        let expectedPlanTargets: Set<TargetInstanceID>
+        if let retrySourceOperationID = plan.retrySourceOperationID {
+            expectedPlanTargets = currentUnresolvedOptIns.intersection(
+                try retryableSetupTargetIDs(from: retrySourceOperationID, persistence: persistence)
+            )
+        } else {
+            expectedPlanTargets = currentUnresolvedOptIns
+        }
+        guard expectedPlanTargets == planTargets else {
             throw ThemeEngineError.planMembershipChanged(plan.id)
         }
 
         let isPreCancelled = pendingCancellations.contains(plan.id)
         setupPlansInFlight.removeValue(forKey: plan.id)
 
-        let operation = try persistence.journalStartOperation(
-            id: plan.id,
-            kind: .setup,
-            workspaceID: workspace.id,
-            variantID: nil,
-            parentOperationID: plan.retrySourceOperationID,
-            cancellationRequested: isPreCancelled
-        )
-        try await beginOperationTracking(operation)
-        trackingStarted = true
-        defer { try? closeOperationTracking(operation.id) }
-
         var instanceMap: [TargetInstanceID: ConnectedTargetInstance] = [:]
         for instance in instances {
             instanceMap[instance.id] = instance
         }
-        for instance in workspace.connectedTargetInstances {
-            if instanceMap[instance.id] == nil {
-                instanceMap[instance.id] = instance
-            }
+        for instance in workspace.connectedTargetInstances where instanceMap[instance.id] == nil {
+            instanceMap[instance.id] = instance
         }
 
         var planReferences: [TargetInstanceID: ContentReference] = [:]
         var baselineWasPreviouslyStored: [TargetInstanceID: Bool] = [:]
-
         let originalPlansByID = Dictionary(uniqueKeysWithValues: plan.targetPlans.map { ($0.targetInstanceID, $0) })
         let failuresByID = Dictionary(uniqueKeysWithValues: plan.preparationFailures.map { ($0.targetInstanceID, $0) })
+        var initialRecords: [JournaledRecord] = []
 
-        // Persist every reviewed Connection Plan before the first external mutation.
-        // Deferred baselines are added to this target's journal record immediately
-        // before it executes, after the progress UI discloses the permission request.
+        // Store every reviewed plan before creating the Setup Transaction. The
+        // transaction and all per-target records are then committed together, so
+        // reconciliation can classify every target from its first checkpoint.
         for (ordinal, targetID) in plan.targetInstanceIDs.enumerated() {
             if let targetPlan = originalPlansByID[targetID] {
                 let reference = try persistence.journalStorePlanPayload(
                     JSONEncoder().encode(targetPlan),
-                    ownerID: "setup.\(operation.id.uuidString).\(targetID.rawValue)"
+                    ownerID: "setup.\(plan.id.uuidString).\(targetID.rawValue)"
                 )
                 planReferences[targetID] = reference
                 baselineWasPreviouslyStored[targetID] =
-                    try persistence.journalLoadConnectionBaseline(
-                        targetInstanceID: targetID
-                    ) != nil
-
-                let preparedRecord = JournaledRecord(
-                    operationID: operation.id,
-                    targetInstanceID: targetID,
-                    ordinal: ordinal,
-                    adapterID: targetPlan.adapterID,
-                    adapterVersion: targetPlan.adapterVersion,
-                    capabilityID: "connection",
-                    phase: .prepared,
-                    intendedChangeDigest: targetPlan.intendedChangeDigest,
-                    staleStateToken: targetPlan.staleStateToken,
-                    planDigest: reference.digest,
-                    receiptJSON: nil,
-                    detail: nil
-                )
-                if targetPlan.baselineCaptureTiming == .immediatelyBeforeExecution {
-                    try persistence.saveConnectionPreparation(record: preparedRecord)
-                } else {
-                    try persistence.saveConnectionPreparation(
-                        record: preparedRecord,
-                        baseline: targetPlan.capturedPreChangeState
-                    )
-                }
-            } else if let failure = failuresByID[targetID] {
-                try persistence.journalSaveRecord(
+                    try persistence.journalLoadConnectionBaseline(targetInstanceID: targetID) != nil
+                initialRecords.append(
                     JournaledRecord(
-                        operationID: operation.id,
+                        operationID: plan.id,
+                        targetInstanceID: targetID,
+                        ordinal: ordinal,
+                        adapterID: targetPlan.adapterID,
+                        adapterVersion: targetPlan.adapterVersion,
+                        capabilityID: "connection",
+                        phase: .prepared,
+                        intendedChangeDigest: targetPlan.intendedChangeDigest,
+                        staleStateToken: targetPlan.staleStateToken,
+                        planDigest: reference.digest,
+                        receiptJSON: nil,
+                        detail: nil
+                    )
+                )
+            } else if let failure = failuresByID[targetID] {
+                initialRecords.append(
+                    JournaledRecord(
+                        operationID: plan.id,
                         targetInstanceID: targetID,
                         ordinal: ordinal,
                         adapterID: failure.adapterID,
@@ -630,6 +647,17 @@ extension ThemeEngine {
                 )
             }
         }
+
+        let operation = try persistence.journalStartSetupOperation(
+            id: plan.id,
+            workspaceID: workspace.id,
+            parentOperationID: plan.retrySourceOperationID,
+            cancellationRequested: isPreCancelled,
+            records: initialRecords
+        )
+        try await beginOperationTracking(operation)
+        trackingStarted = true
+        defer { try? closeOperationTracking(operation.id) }
 
         var steps: [SetupProgress.TargetStep] = []
         for targetID in plan.targetInstanceIDs {
@@ -690,6 +718,20 @@ extension ThemeEngine {
             }
             try persistence.journalTransitionState(operationID: operation.id, to: .cancelled)
             throw error
+        }
+
+        // Capture immediate baselines only after the transaction is durable and
+        // cancellation has been checked. Deferred baselines remain absent until
+        // their permission disclosure immediately before execution.
+        let initialRecordsByTarget = Dictionary(
+            uniqueKeysWithValues: initialRecords.map { ($0.targetInstanceID, $0) }
+        )
+        for targetPlan in plan.targetPlans where targetPlan.baselineCaptureTiming != .immediatelyBeforeExecution {
+            guard let record = initialRecordsByTarget[targetPlan.targetInstanceID] else { continue }
+            try persistence.saveConnectionPreparation(
+                record: record,
+                baseline: targetPlan.capturedPreChangeState
+            )
         }
 
         try persistence.journalTransitionState(operationID: operation.id, to: .applying)
@@ -904,11 +946,24 @@ extension ThemeEngine {
                 )
             }
 
+            if consumeSetupCancellation(operation.id) {
+                try removeNewConnectionBaseline(for: executionPlan, persistence: persistence)
+                cancellationRequested = true
+                break setupLoop
+            }
+
             if executionPlan.requiresApproval, let approvingAdapter = adapter as? any ReviewedConnectionApproving {
                 executionPlan = try await approvingAdapter.approveReviewedConnection(executionPlan)
             } else if executionPlan.requiresApproval {
                 executionPlan = executionPlan.approvingReviewedSetup()
             }
+
+            if consumeSetupCancellation(operation.id) {
+                try removeNewConnectionBaseline(for: executionPlan, persistence: persistence)
+                cancellationRequested = true
+                break setupLoop
+            }
+
             let executionPlanReference = try persistence.journalStorePlanPayload(
                 JSONEncoder().encode(executionPlan),
                 ownerID: "setup.\(operation.id.uuidString).\(targetID.rawValue)"
@@ -1149,6 +1204,45 @@ extension ThemeEngine {
             retrySourceOperationID: plan.retrySourceOperationID,
             outcomes: outcomes,
             combinedOutcomes: combinedOutcomes
+        )
+    }
+
+    private func retryableSetupTargetIDs(
+        from sourceOperationID: UUID,
+        persistence: PersistenceStore
+    ) throws -> Set<TargetInstanceID> {
+        var operationChain: [UUID] = []
+        var nextID: UUID? = sourceOperationID
+        var visited: Set<UUID> = []
+
+        while let currentID = nextID, !visited.contains(currentID) {
+            guard let operation = try persistence.journalLoadOperation(id: currentID) else {
+                throw DurableOperationError.operationNotFound(currentID)
+            }
+            guard operation.kind == .setup else {
+                return []
+            }
+            visited.insert(currentID)
+            operationChain.append(currentID)
+            nextID = operation.parentOperationID
+        }
+
+        var latestRecords: [TargetInstanceID: JournaledRecord] = [:]
+        for operationID in operationChain.reversed() {
+            for record in try persistence.journalLoadRecords(operationID: operationID) {
+                latestRecords[record.targetInstanceID] = record
+            }
+        }
+
+        return Set(
+            latestRecords.values.compactMap { record in
+                switch record.phase {
+                case .failed, .skipped, .conflicted, .reconciledBefore:
+                    return record.targetInstanceID
+                case .prepared, .applying, .applied, .rolledBack, .reconciledIntended, .reconciledConflict:
+                    return nil
+                }
+            }
         )
     }
 
@@ -3199,7 +3293,8 @@ extension ThemeEngine {
     }
 
     fileprivate func checkAndConsumeCancellation(_ operationID: UUID) async throws {
-        let isPersistedCancellation = (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
+        let isPersistedCancellation =
+            (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
         if self.pendingCancellations.contains(operationID) || isPersistedCancellation {
             self.pendingCancellations.remove(operationID)
             throw DurableOperationError.operationCancelled
@@ -3207,7 +3302,8 @@ extension ThemeEngine {
     }
 
     fileprivate func consumeSetupCancellation(_ operationID: UUID) -> Bool {
-        let isPersistedCancellation = (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
+        let isPersistedCancellation =
+            (try? persistenceStore?.journalIsCancellationRequested(operationID: operationID)) ?? false
         let removedFromMemory = pendingCancellations.remove(operationID) != nil
         return removedFromMemory || isPersistedCancellation
     }

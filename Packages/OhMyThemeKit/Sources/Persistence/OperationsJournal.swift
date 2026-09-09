@@ -170,6 +170,52 @@ extension PersistenceStore {
         return operation
     }
 
+    /// Starts a Setup Transaction together with every reviewed target record.
+    ///
+    /// Recording these in one database transaction means an interrupted setup is
+    /// always recoverable per Target Instance from its first durable checkpoint.
+    public func journalStartSetupOperation(
+        id: UUID,
+        workspaceID: WorkspaceID,
+        parentOperationID: UUID? = nil,
+        cancellationRequested: Bool = false,
+        records: [JournaledRecord]
+    ) throws -> JournaledOperation {
+        let operation = JournaledOperation(
+            id: id,
+            kind: .setup,
+            state: .prepared,
+            workspaceID: workspaceID,
+            variantID: nil,
+            parentOperationID: parentOperationID,
+            cancellationRequested: cancellationRequested,
+            createdAt: Date()
+        )
+        try withWrite { database in
+            try database.execute(
+                sql: """
+                    INSERT INTO operations (id, kind, state, workspace_id, variant_id, parent_operation_id, cancellation_requested, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    operation.id.uuidString,
+                    operation.kind.rawValue,
+                    operation.state.rawValue,
+                    operation.workspaceID.rawValue,
+                    operation.variantID,
+                    operation.parentOperationID?.uuidString,
+                    operation.cancellationRequested ? 1 : 0,
+                    operation.createdAt.timeIntervalSince1970,
+                ]
+            )
+            for record in records {
+                try Self.save(record, in: database)
+            }
+        }
+        didCommit(.operationStarted)
+        return operation
+    }
+
     public func journalSaveRecord(_ record: JournaledRecord) throws {
         try withWrite { database in
             try database.execute(

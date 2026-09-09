@@ -317,7 +317,7 @@ struct DurabilityCrashHarness {
 
         for (name, state, member, baseline) in [
             ("target 1", state1, member1, baseline1),
-            ("target 2", state2, member2, baseline2)
+            ("target 2", state2, member2, baseline2),
         ] {
             if state.configuration != userOwnedConfiguration {
                 failures.append("\(name) configuration changed from user-owned bytes")
@@ -347,9 +347,13 @@ struct DurabilityCrashHarness {
                 continue
             }
             if reloaded.state != .reconciled && reloaded.state != .cancelled {
-                failures.append("interrupted setup operation did not become reconciled or cancelled (state: \(reloaded.state))")
+                failures.append(
+                    "interrupted setup operation did not become reconciled or cancelled (state: \(reloaded.state))")
             }
             let records = try store.journalLoadRecords(operationID: operation.id)
+            if records.count != 2 {
+                failures.append("setup operation did not retain a record for every selected target")
+            }
             if records.contains(where: { $0.phase == .prepared || $0.phase == .applying }) {
                 failures.append("setup operation retains a nonterminal record")
             }
@@ -370,7 +374,9 @@ struct DurabilityCrashHarness {
                     instances: unconfigured
                 )
                 for outcome in report.outcomes {
-                    if outcome.configurationState != ConfigurationState.updated && outcome.configurationState != ConfigurationState.unchanged {
+                    if outcome.configurationState != ConfigurationState.updated
+                        && outcome.configurationState != ConfigurationState.unchanged
+                    {
                         failures.append("re-running setup produced failure outcome: \(outcome.configurationState)")
                     }
                 }

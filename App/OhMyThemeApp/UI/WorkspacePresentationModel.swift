@@ -261,7 +261,7 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     var canRetryRemainingSetup: Bool {
-        latestSetupReport != nil && hasUnresolvedOptedInTargets && !isBusy
+        hasRetryableSetupTargets && !isBusy
     }
 
     var selectedThemeVariantID: String? { desiredThemePresentation.variantID }
@@ -404,7 +404,7 @@ final class WorkspacePresentationModel: ObservableObject {
 
     func retryRemainingSetup() async {
         guard !isBusy,
-            hasUnresolvedOptedInTargets,
+            hasRetryableSetupTargets,
             let latestSetupReport
         else { return }
         await prepareSetupPlan(retrySourceOperationID: latestSetupReport.operationID)
@@ -648,6 +648,16 @@ final class WorkspacePresentationModel: ObservableObject {
         self.workspace = workspace
         applicationTargets = targets
         applyPlan = nil
+    }
+
+    private var hasRetryableSetupTargets: Bool {
+        guard let latestSetupReport else { return false }
+        return latestSetupReport.combinedOutcomes.contains { outcome in
+            workspace.targetOptIns.contains(outcome.targetInstanceID)
+                && !workspace.isConnected(outcome.targetInstanceID)
+                && [.failed, .needsPermission, .conflict, .unavailable, .skipped]
+                    .contains(latestSetupReport.outcomeKind(for: outcome))
+        }
     }
 
     private func present(outcome: TargetCapabilityOutcome, kind: ReportKind) -> PresentedOutcome {

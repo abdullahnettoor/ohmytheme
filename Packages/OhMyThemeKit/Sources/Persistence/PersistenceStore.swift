@@ -774,7 +774,7 @@ public final class PersistenceStore: @unchecked Sendable {
         )
     }
 
-    private static func save(_ record: JournaledRecord, in database: Database) throws {
+    static func save(_ record: JournaledRecord, in database: Database) throws {
         try database.execute(
             sql: """
                 INSERT OR REPLACE INTO operation_records (\n                    operation_id, target_instance_id, ordinal,

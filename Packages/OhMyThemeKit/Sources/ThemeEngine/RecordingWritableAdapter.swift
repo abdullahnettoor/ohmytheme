@@ -37,6 +37,7 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
     private var interruptions: Set<InterruptionPoint> = []
     private var connectedInstances: Set<TargetInstanceID> = []
     private var beforeConnectionPreparationHook: (@Sendable (ConnectedTargetInstance) async throws -> Void)? = nil
+    private var beforeDeferredBaselineCaptureHook: (@Sendable (ConnectionPlan) async throws -> Void)? = nil
     private var beforeConnectHook: (@Sendable (ConnectionPlan) async throws -> Void)? = nil
     private let configuredReach: ActivationReach
     private let configuredSideEffects: [String]
@@ -71,6 +72,12 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
         _ hook: (@Sendable (ConnectedTargetInstance) async throws -> Void)?
     ) {
         self.beforeConnectionPreparationHook = hook
+    }
+
+    public func setBeforeDeferredBaselineCaptureHook(
+        _ hook: (@Sendable (ConnectionPlan) async throws -> Void)?
+    ) {
+        self.beforeDeferredBaselineCaptureHook = hook
     }
 
     public func setBeforeConnectHook(_ hook: (@Sendable (ConnectionPlan) async throws -> Void)?) {
@@ -194,6 +201,9 @@ public actor RecordingWritableAdapter: WritableThemeAdapter, DeferredConnectionB
     public func captureConnectionBaseline(
         for reviewedPlan: ConnectionPlan
     ) async throws -> ConnectionBaselineCapture {
+        if let beforeDeferredBaselineCaptureHook {
+            try await beforeDeferredBaselineCaptureHook(reviewedPlan)
+        }
         guard !deniesDeferredBaselineCapture else {
             throw RecordingDeferredBaselineError.permissionDenied
         }

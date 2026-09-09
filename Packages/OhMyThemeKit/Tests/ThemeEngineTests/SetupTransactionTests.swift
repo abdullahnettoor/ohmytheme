@@ -560,6 +560,62 @@ struct SetupTransactionTests {
         #expect(try fixture.store.journalLoadOperation(id: operationID)?.state == .cancelled)
     }
 
+    @Test("Cancel Remaining stops a target awaiting deferred baseline capture before mutation")
+    func cancellationDuringDeferredBaselineCaptureDoesNotConnectTarget() async throws {
+        let fixture = try Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let targetID = TargetInstanceID(rawValue: "macos.appearance")
+        let target = ConnectedTargetInstance(
+            id: targetID,
+            displayName: "System Appearance",
+            adapterID: "macos.appearance"
+        )
+        let adapter = RecordingWritableAdapter(
+            id: "macos.appearance",
+            requiredPermissions: ["Allow Automation"],
+            baselineCaptureTiming: .immediatelyBeforeExecution
+        )
+        let gate = SetupGate()
+        await adapter.setBeforeDeferredBaselineCaptureHook { _ in
+            await gate.wait()
+        }
+        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: fixture.store)
+        let workspace = Workspace(
+            id: WorkspaceID(rawValue: "test-ws"),
+            displayName: "Test Workspace",
+            connectedTargetInstances: [],
+            targetOptIns: [targetID],
+            themeAssignment: nil
+        )
+        let plan = try await engine.prepareSetup(workspace: workspace, instances: [target])
+        let progress = ProgressCollector()
+        let execution = Task {
+            try await engine.executeSetup(
+                plan: plan,
+                workspace: workspace,
+                instances: [target],
+                onProgress: { progress.add($0) }
+            )
+        }
+
+        while !(await gate.arrived()) {
+            await Task.yield()
+        }
+        guard let operationID = progress.updates.last?.operationID else {
+            Issue.record("Expected setup progress before deferred baseline capture.")
+            return
+        }
+        #expect(try await engine.cancelRemainingSetup(operationID: operationID))
+        await gate.open()
+
+        let report = try await execution.value
+        #expect(report.kind(for: targetID) == .skipped)
+        #expect(!(await adapter.isConnected(targetID)))
+        #expect(try fixture.store.journalLoadConnectionBaseline(targetInstanceID: targetID) == nil)
+        #expect(try fixture.store.journalLoadOperation(id: operationID)?.state == .cancelled)
+    }
+
     @Test("Retry Setup Transactions retain their durable source operation")
     func retrySetupTransactionLinksToThePriorOperation() async throws {
         let fixture = try Self.makeFixture()
@@ -568,6 +624,9 @@ struct SetupTransactionTests {
         let targetID = TargetInstanceID(rawValue: "starship.default")
         let target = ConnectedTargetInstance(id: targetID, displayName: "Starship", adapterID: "starship")
         let adapter = RecordingWritableAdapter(id: "starship")
+        await adapter.setBeforeConnectHook { _ in
+            throw RecordingConnectionFailedError()
+        }
         let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter], persistence: fixture.store)
         let workspace = Workspace(
             id: WorkspaceID(rawValue: "test-ws"),
@@ -583,6 +642,7 @@ struct SetupTransactionTests {
             instances: [target]
         )
 
+        await adapter.setBeforeConnectHook(nil)
         let retryPlan = try await engine.prepareSetup(
             workspace: workspace,
             instances: [target],
@@ -608,15 +668,23 @@ struct SetupTransactionTests {
 
         let target1ID = TargetInstanceID(rawValue: "macos.appearance")
         let target2ID = TargetInstanceID(rawValue: "starship.default")
-        let target1 = ConnectedTargetInstance(id: target1ID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let target3ID = TargetInstanceID(rawValue: "ghostty.default")
+        let target1 = ConnectedTargetInstance(
+            id: target1ID, displayName: "System Appearance", adapterID: "macos.appearance")
         let target2 = ConnectedTargetInstance(id: target2ID, displayName: "Starship", adapterID: "starship")
+        let target3 = ConnectedTargetInstance(id: target3ID, displayName: "Ghostty", adapterID: "ghostty")
 
         let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
         let adapter2 = RecordingWritableAdapter(id: "starship")
-        let engine = ThemeEngine(packs: [Fixtures.pack], adapters: [adapter1, adapter2], persistence: fixture.store)
+        let adapter3 = RecordingWritableAdapter(id: "ghostty")
+        let engine = ThemeEngine(
+            packs: [Fixtures.pack],
+            adapters: [adapter1, adapter2, adapter3],
+            persistence: fixture.store
+        )
 
         // Workspace where target1 is already connected successfully
-        let workspace = Workspace(
+        var workspace = Workspace(
             id: WorkspaceID(rawValue: "test-ws"),
             displayName: "Test Workspace",
             connectedTargetInstances: [target1],
@@ -624,14 +692,33 @@ struct SetupTransactionTests {
             themeAssignment: nil
         )
 
-        // Prepare retry remaining passing both candidate instances
-        let retryPlan = try await engine.prepareSetup(
+        await adapter2.setBeforeConnectHook { _ in
+            throw RecordingConnectionFailedError()
+        }
+        let sourcePlan = try await engine.prepareSetup(workspace: workspace, instances: [target2])
+        let sourceReport = try await engine.executeSetup(
+            plan: sourcePlan,
             workspace: workspace,
-            instances: [target1, target2],
-            retrySourceOperationID: UUID()
+            instances: [target2]
+        )
+        await adapter2.setBeforeConnectHook(nil)
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: [target1],
+            targetOptIns: [target1ID, target2ID, target3ID],
+            themeAssignment: nil
         )
 
-        // Excludes target1 because target1 is already connected
+        // A newly opted-in target is a new setup flow, not part of this retry.
+        let retryPlan = try await engine.prepareSetup(
+            workspace: workspace,
+            instances: [target1, target2, target3],
+            retrySourceOperationID: sourceReport.operationID
+        )
+
+        // Excludes target1 because it is connected and target3 because it was
+        // not unresolved in the source Setup Transaction.
         #expect(retryPlan.targetInstanceIDs == [target2ID])
         #expect(retryPlan.targetPlans.map(\.targetInstanceID) == [target2ID])
     }
@@ -643,7 +730,8 @@ struct SetupTransactionTests {
 
         let target1ID = TargetInstanceID(rawValue: "macos.appearance")
         let target2ID = TargetInstanceID(rawValue: "starship.default")
-        let target1 = ConnectedTargetInstance(id: target1ID, displayName: "System Appearance", adapterID: "macos.appearance")
+        let target1 = ConnectedTargetInstance(
+            id: target1ID, displayName: "System Appearance", adapterID: "macos.appearance")
         let target2 = ConnectedTargetInstance(id: target2ID, displayName: "Starship", adapterID: "starship")
 
         let adapter1 = RecordingWritableAdapter(id: "macos.appearance")
@@ -709,7 +797,7 @@ struct SetupTransactionTests {
         )
 
         #expect(retryReport.retrySourceOperationID == firstReport.operationID)
-        #expect(retryReport.outcomes.count == 1) // only target2 executed in this transaction
+        #expect(retryReport.outcomes.count == 1)  // only target2 executed in this transaction
         #expect(retryReport.outcomes[0].targetInstanceID == target2ID)
         #expect(retryReport.kind(for: target2ID) == .connected)
 
@@ -747,10 +835,23 @@ struct SetupTransactionTests {
             themeAssignment: nil
         )
 
+        await adapter.setBeforeConnectHook { _ in
+            throw RecordingConnectionFailedError()
+        }
+        let sourcePlan = try await engine.prepareSetup(
+            workspace: initialWorkspace,
+            instances: [target]
+        )
+        let sourceReport = try await engine.executeSetup(
+            plan: sourcePlan,
+            workspace: initialWorkspace,
+            instances: [target]
+        )
+        await adapter.setBeforeConnectHook(nil)
         let plan = try await engine.prepareSetup(
             workspace: initialWorkspace,
             instances: [target],
-            retrySourceOperationID: UUID()
+            retrySourceOperationID: sourceReport.operationID
         )
 
         // Material change: user opts out or target opt-ins change
@@ -758,7 +859,7 @@ struct SetupTransactionTests {
             id: initialWorkspace.id,
             displayName: initialWorkspace.displayName,
             connectedTargetInstances: [],
-            targetOptIns: [], // opted out
+            targetOptIns: [],  // opted out
             themeAssignment: nil
         )
 
@@ -857,6 +958,7 @@ struct SetupTransactionTests {
         #expect(!records.isEmpty)
         #expect(records.allSatisfy { $0.phase == .skipped })
         #expect(try fixture.store.journalLoadOperation(id: plan.id)?.state == .cancelled)
+        #expect(try fixture.store.journalLoadConnectionBaseline(targetInstanceID: firstID) == nil)
         #expect(await firstAdapter.isConnected(firstID) == false)
     }
 
