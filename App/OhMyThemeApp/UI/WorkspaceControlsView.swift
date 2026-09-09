@@ -406,55 +406,16 @@ struct WorkspaceControlsView: View {
                             color: .secondary
                         )
                     }
-                    ForEach(targetPlan.requiredPermissions, id: \.self) { permission in
-                        messageRow(
-                            title: "Permission needed",
-                            detail: permission,
-                            systemImage: "lock.open",
-                            color: .orange
-                        )
-                    }
-                }
-                ForEach(plan.setupNeeds, id: \.title) { action in
-                    messageRow(
-                        title: action.title,
-                        detail: action.detail,
-                        systemImage: "wrench.and.screwdriver",
-                        color: .orange
-                    )
-                }
-                ForEach(plan.preparationFailures, id: \.targetInstanceID) { failure in
-                    messageRow(
-                        title: "Could not prepare a Target",
-                        detail: failure.detail,
-                        systemImage: "xmark.circle.fill",
-                        color: .red
-                    )
-                }
-                ForEach(plan.unavailableTargetInstanceIDs, id: \.self) { _ in
-                    messageRow(
-                        title: "Target unavailable",
-                        detail: "No compatible adapter prepared this Target Instance.",
-                        systemImage: "minus.circle",
-                        color: .secondary
-                    )
-                }
-                ForEach(plan.conflicts, id: \.self) { conflict in
-                    messageRow(
-                        title: "Conflict",
-                        detail: conflict,
-                        systemImage: "exclamationmark.triangle.fill",
-                        color: .orange
-                    )
                 }
             }
 
+            let hasReview = plan.hasReviewConditions(acknowledgedUnavailableTargets: model.acknowledgedUnavailableTargetInstanceIDs)
             Button {
                 Task {
                     _ = try? await model.applyPreparedPlan()
                 }
             } label: {
-                Label("Apply to ready Targets", systemImage: "paintbrush.fill")
+                Label(hasReview ? "Apply to ready Targets" : "Apply Theme", systemImage: "paintbrush.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)

@@ -1867,7 +1867,6 @@ extension ThemeEngine {
         }
 
 
-
         // Write-boundary revalidation — a changed precondition becomes a conflict.
         if let writable = adapter as? any WritableThemeAdapter {
             do {

@@ -434,6 +434,7 @@ extension ApplyPlan {
             )
         }
 
+
         // 2. Preparation Failures (including ownership changes, permissions, ambiguous targets)
         for failure in preparationFailures {
             let lower = failure.detail.lowercased()
@@ -465,8 +466,10 @@ extension ApplyPlan {
         // 3. Setup Needs
         for plan in targetPlans where !plan.setupNeeds.isEmpty {
             for need in plan.setupNeeds {
-                let lower = (need.title + " " + need.detail).lowercased()
-                let category: PreflightReviewReason.Category = lower.contains("permission") ? .permission : .setupNeeded
+                let isPerm = need.kind == .permission
+                    || need.title.localizedCaseInsensitiveContains("permission")
+                    || need.detail.localizedCaseInsensitiveContains("permission")
+                let category: PreflightReviewReason.Category = isPerm ? .permission : .setupNeeded
                 reasons.append(
                     PreflightReviewReason(
                         targetInstanceID: plan.targetInstanceID,
