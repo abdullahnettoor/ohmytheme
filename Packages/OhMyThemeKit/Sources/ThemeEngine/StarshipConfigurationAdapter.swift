@@ -618,6 +618,31 @@ public actor StarshipConfigurationAdapter: RecoverableApplyAdapter, ReviewedConn
         )
     }
 
+    public func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?) {
+        do {
+            let discoveredURL = try managedFiles.existingURLs(in: locator.candidates).last
+            let requestedURL = (configuredConfigurationURL ?? discoveredURL ?? locator.defaultURL).standardizedFileURL
+            let before = try managedFiles.inspect(at: requestedURL)
+            if case .managedByNix = before.ownership {
+                return (.needsAttention, "Starship configuration is managed by Nix.")
+            }
+            guard before.snapshot.exists, let bytes = before.snapshot.bytes else {
+                return (.pending, "Starship configuration not yet written.")
+            }
+            let finalIntended = try StarshipPaletteTransformer.applyTheme(to: bytes, variant: theme.variant)
+            if bytes == finalIntended {
+                return (.applied, "Starship configuration matches desired theme.")
+            } else {
+                return (.pending, "Starship configuration will update on Apply.")
+            }
+        } catch {
+            return (.needsAttention, error.localizedDescription)
+        }
+    }
+
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
         let state = try themeState(from: plan)
         guard plan.payload.payload == state.filePlan.intendedBytes else {

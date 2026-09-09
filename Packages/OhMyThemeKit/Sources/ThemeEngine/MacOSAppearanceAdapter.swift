@@ -370,6 +370,26 @@ public actor MacOSAppearanceAdapter: RecoverableApplyAdapter, DeferredConnection
         )
     }
 
+    public func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?) {
+        do {
+            try validate(instance)
+            let current = try readAppearance(permissionFailure: .permissionRevoked)
+            let intendedDarkMode = (theme.variant.appearance == .dark)
+            if current.darkMode == intendedDarkMode {
+                return (.applied, "System appearance matches desired theme.")
+            } else {
+                return (.pending, "Appearance will change on Apply.")
+            }
+        } catch let error as MacOSAppearanceAdapterError {
+            return (.needsAttention, error.capabilityOutcomeDetail)
+        } catch {
+            return (.needsAttention, error.localizedDescription)
+        }
+    }
+
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
         try await revalidateApply(plan: plan)
         let payload = try applyPayload(from: plan)

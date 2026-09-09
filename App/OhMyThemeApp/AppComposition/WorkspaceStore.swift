@@ -46,6 +46,11 @@ final class WorkspaceStore {
         (try? persistence?.loadWorkspace().targetInstances) ?? []
     }
 
+    func loadTargetVerificationOutcomes() -> [TargetVerificationOutcome] {
+        guard let persistence else { return [] }
+        return (try? persistence.loadTargetVerificationOutcomes(workspaceID: workspace.id)) ?? []
+    }
+
     func selectFixedVariant(_ variantID: String) {
         let current = workspace
         let updated = Workspace(

@@ -99,6 +99,18 @@ final class AppPresenceController: ObservableObject {
         if runtime?.persistenceError != nil {
             return "My Mac: Recovery storage unavailable"
         }
+        if runtime?.unresolvedRecovery != nil {
+            return "My Mac: Needs attention (recovery required)"
+        }
+        if let status = runtime?.workspaceThemeStatus {
+            if status.needsAttentionCount > 0 {
+                return "My Mac: Needs attention (\(status.needsAttentionCount))"
+            }
+            if status.pendingCount > 0 {
+                return "My Mac: \(status.pendingCount) pending"
+            }
+            return "My Mac: Healthy"
+        }
         return "My Mac: Healthy"
     }
 

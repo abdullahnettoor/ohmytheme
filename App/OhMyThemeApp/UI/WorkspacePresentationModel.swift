@@ -182,6 +182,7 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var applyProgress: ApplyProgress?
     @Published private(set) var isCancellingRemainingApply = false
     @Published private(set) var latestSetupReport: SetupReport?
+    @Published private(set) var latestApplyReport: DurableApplyReport?
 
     @Published private(set) var report: PresentedReport?
     @Published private(set) var canUndoLastThemeChange = false
@@ -265,6 +266,52 @@ final class WorkspacePresentationModel: ObservableObject {
 
     var canRetryRemainingSetup: Bool {
         hasRetryableSetupTargets && !isBusy
+    }
+
+    var workspaceThemeStatus: WorkspaceThemeStatus? {
+        runtime.workspaceThemeStatus
+    }
+
+    var unresolvedRecovery: String? {
+        runtime.unresolvedRecovery
+    }
+
+    var appliedTargetsCount: Int {
+        workspaceThemeStatus?.appliedCount ?? 0
+    }
+
+    var pendingTargetsCount: Int {
+        workspaceThemeStatus?.pendingCount ?? 0
+    }
+
+    var needsAttentionTargetsCount: Int {
+        workspaceThemeStatus?.needsAttentionCount ?? 0
+    }
+
+    var isFullyApplied: Bool {
+        workspaceThemeStatus?.isFullyApplied ?? false
+    }
+
+    var activeOperationSummary: String? {
+        if isCancellingRemainingApply {
+            return "Cancelling theme application…"
+        }
+        if isApplyingTheme {
+            return "Applying Theme…"
+        }
+        if isCancellingRemainingSetup {
+            return "Cancelling setup…"
+        }
+        if isExecutingSetup {
+            return "Connecting Targets…"
+        }
+        if isPreparingSetupPlan {
+            return "Preparing Setup Plan…"
+        }
+        if isBusy {
+            return "Working…"
+        }
+        return nil
     }
 
     var selectedThemeVariantID: String? { desiredThemePresentation.variantID }
@@ -371,8 +418,8 @@ final class WorkspacePresentationModel: ObservableObject {
     }
 
     func prepareSetupPlan(retrySourceOperationID: UUID? = nil) async {
+        guard isPreparingSetupPlan == false else { return }
         isPreparingSetupPlan = true
-        operationError = nil
         defer { isPreparingSetupPlan = false }
         do {
             setupPlan = try await runtime.prepareSetupPlan(retrySourceOperationID: retrySourceOperationID)
@@ -475,8 +522,9 @@ final class WorkspacePresentationModel: ObservableObject {
             } else if case DurableOperationError.operationCancelled = error {
                 operationError = "Setup was cancelled."
                 return nil
+            } else {
+                operationError = Self.describe(error)
             }
-            operationError = Self.describe(error)
             throw error
         }
     }
@@ -525,6 +573,7 @@ final class WorkspacePresentationModel: ObservableObject {
             }
             applyPlan = nil
             applyProgress = nil
+            latestApplyReport = applied
             report = present(outcomes: applied.outcomes, kind: .apply)
             await refreshUndoAvailability()
             operationError = nil
@@ -562,6 +611,7 @@ final class WorkspacePresentationModel: ObservableObject {
                     }
                 }
                 self.applyProgress = nil
+                self.latestApplyReport = applied
                 report = present(outcomes: applied.outcomes, kind: .apply)
                 await refreshUndoAvailability()
                 return applied
@@ -604,6 +654,7 @@ final class WorkspacePresentationModel: ObservableObject {
             }
             self.applyPlan = nil
             self.applyProgress = nil
+            self.latestApplyReport = applied
             report = present(outcomes: applied.outcomes, kind: .apply)
             await refreshUndoAvailability()
             return applied
@@ -888,8 +939,16 @@ final class WorkspacePresentationModel: ObservableObject {
         self.isExecutingSetup = executing
     }
 
+    func setIsCancellingRemainingSetupForTesting(_ cancelling: Bool) {
+        self.isCancellingRemainingSetup = cancelling
+    }
+
     func setIsApplyingThemeForTesting(_ applying: Bool) {
         self.isApplyingTheme = applying
+    }
+
+    func setIsCancellingRemainingApplyForTesting(_ cancelling: Bool) {
+        self.isCancellingRemainingApply = cancelling
     }
 
     func setApplyProgressForTesting(_ progress: ApplyProgress?) {

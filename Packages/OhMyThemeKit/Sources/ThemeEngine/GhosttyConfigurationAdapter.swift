@@ -873,6 +873,49 @@ public actor GhosttyConfigurationAdapter: RecoverableApplyAdapter, ReviewedConne
         )
     }
 
+    public func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?) {
+        do {
+            let report = try await discover()
+            guard report.supportedInstallation != nil else {
+                return (.needsAttention, "Ghostty installation not found.")
+            }
+            let requestedURL = (configuredConfigurationURL ?? report.resolvedConfigurationURL ?? locator.defaultURL)
+                .standardizedFileURL
+            let parent = try managedFiles.inspect(at: requestedURL)
+            if case .managedByNix = parent.ownership {
+                return (.needsAttention, "Ghostty configuration is managed by Nix.")
+            }
+            let artifactURL = configuredManagedArtifactURL
+                ?? parent.resolvedURL.deletingLastPathComponent()
+                .appendingPathComponent("oh-my-theme", isDirectory: true)
+                .appendingPathComponent("config.ghostty")
+            let artifact = try managedFiles.inspect(at: artifactURL)
+            guard artifact.snapshot.exists else {
+                return (.pending, "Ghostty configuration artifact not yet written.")
+            }
+            if case .managedByNix = artifact.ownership {
+                return (.needsAttention, "Ghostty configuration artifact is managed by Nix.")
+            }
+            if case .linkedUserOwned = artifact.ownership {
+                return (.needsAttention, "Ghostty configuration artifact is linked to an external file.")
+            }
+            let generatedArtifact = try theme.upstreamArtifact ?? generatedGhosttyArtifact(for: theme.variant)
+            let intendedArtifact = theme.upstreamArtifact == nil
+                ? applyLineEnding(generatedArtifact, matching: artifact.snapshot.lineEnding)
+                : generatedArtifact
+            if artifact.snapshot.bytes == intendedArtifact {
+                return (.applied, "Ghostty configuration matches desired theme.")
+            } else {
+                return (.pending, "Ghostty configuration will update on Apply.")
+            }
+        } catch {
+            return (.needsAttention, error.localizedDescription)
+        }
+    }
+
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
         let state = try themeState(from: plan)
         guard plan.payload.payload == state.artifactPlan.intendedBytes else {

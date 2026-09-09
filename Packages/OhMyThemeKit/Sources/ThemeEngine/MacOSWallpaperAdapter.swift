@@ -445,6 +445,28 @@ public actor MacOSWallpaperAdapter: RecoverableApplyAdapter {
         )
     }
 
+    public func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?) {
+        do {
+            let displayID = try Self.decodedDisplayID(from: instance)
+            guard let wallpaper = theme.variant.wallpaper else {
+                return (.applied, "Theme variant does not specify a wallpaper.")
+            }
+            let assetURL = try assetResolver.resolvedAssetURL(for: wallpaper)
+            let display = try requireConnectedDisplay(displayID)
+            let currentSnapshot = try snapshotOrThrow(for: display)
+            if currentSnapshot.imageURL == assetURL {
+                return (.applied, "Display wallpaper matches desired theme.")
+            } else {
+                return (.pending, "Wallpaper will update on Apply.")
+            }
+        } catch {
+            return (.needsAttention, error.localizedDescription)
+        }
+    }
+
     public func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
         try await revalidateApply(plan: plan)
         let payload: MacOSWallpaperApplyPayload = try decodePayload(plan.payload.payload)

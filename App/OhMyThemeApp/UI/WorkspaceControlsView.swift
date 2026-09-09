@@ -22,6 +22,7 @@ struct WorkspaceControlsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     header
+                    workspaceStatusSection
                     targetSection
                     if !model.workspace.connectedTargetInstances.isEmpty {
                         connectionManagementSection
@@ -106,6 +107,185 @@ struct WorkspaceControlsView: View {
                     .accessibilityLabel("Working")
             }
         }
+    }
+
+    private var workspaceStatusSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeading(
+                "Workspace Status",
+                detail: "Verified state across connected Targets compared with desired Theme Assignment."
+            )
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verificationStatusTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .accessibilityIdentifier("workspace-status-title")
+                        if let timestamp = model.workspaceThemeStatus?.timestamp {
+                            Text("Verified \(timestamp.formatted(date: .omitted, time: .standard))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("workspace-status-timestamp")
+                        } else {
+                            Text("Verification pending")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("workspace-status-timestamp")
+                        }
+                    }
+
+                    Spacer()
+
+                    statusBadge
+                }
+
+                HStack(spacing: 12) {
+                    countChip(
+                        count: model.appliedTargetsCount,
+                        label: "Applied",
+                        systemImage: "checkmark.circle.fill",
+                        color: .green
+                    )
+                    countChip(
+                        count: model.pendingTargetsCount,
+                        label: "Pending",
+                        systemImage: "clock.arrow.circlepath",
+                        color: .orange
+                    )
+                    countChip(
+                        count: model.needsAttentionTargetsCount,
+                        label: "Needs Attention",
+                        systemImage: "exclamationmark.triangle.fill",
+                        color: .red
+                    )
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("workspace-status-counts")
+
+                if let activeOp = model.activeOperationSummary {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(activeOp)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.primary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("workspace-active-operation")
+                }
+
+                if let recovery = model.unresolvedRecovery {
+                    messageRow(
+                        title: "Recovery Requires Attention",
+                        detail: recovery,
+                        systemImage: "exclamationmark.shield.fill",
+                        color: .orange
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    if let latestSetup = model.latestSetupReport {
+                        HStack(spacing: 6) {
+                            Image(systemName: "wrench.and.screwdriver")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Text("Latest Setup: \(latestSetup.outcomes.count) Target(s) configured")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityIdentifier("latest-setup-summary")
+                    }
+
+                    if let latestApply = model.latestApplyReport {
+                        HStack(spacing: 6) {
+                            Image(systemName: "paintbrush")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Text("Latest Apply: \(latestApply.outcomes.count) Target(s) processed")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .accessibilityIdentifier("latest-apply-summary")
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(model.canUndoLastThemeChange ? "Undo available for last Theme change" : "Undo unavailable")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityIdentifier("undo-availability-summary")
+                }
+                .padding(.top, 2)
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityIdentifier("workspace-theme-status-section")
+        }
+    }
+
+    private var verificationStatusTitle: String {
+        guard let status = model.workspaceThemeStatus, !status.targetOutcomes.isEmpty else {
+            return "No connected targets verified"
+        }
+        if status.needsAttentionCount > 0 {
+            return "\(status.needsAttentionCount) Target\(status.needsAttentionCount == 1 ? "" : "s") need attention"
+        }
+        if status.isFullyApplied {
+            return "Theme fully applied"
+        }
+        if status.appliedCount > 0 {
+            return "Partially applied (\(status.appliedCount) of \(status.totalTargetCount))"
+        }
+        return "Theme pending apply"
+    }
+
+    private var statusBadge: some View {
+        let text: String
+        let color: Color
+        if let status = model.workspaceThemeStatus, !status.targetOutcomes.isEmpty {
+            if status.needsAttentionCount > 0 {
+                text = "Needs Attention"
+                color = .red
+            } else if status.isFullyApplied {
+                text = "Applied"
+                color = .green
+            } else if status.appliedCount > 0 {
+                text = "Partially Applied"
+                color = .orange
+            } else {
+                text = "Pending"
+                color = .secondary
+            }
+        } else {
+            text = "Unverified"
+            color = .secondary
+        }
+        return Text(text)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.12), in: Capsule())
+            .foregroundStyle(color)
+            .accessibilityIdentifier("workspace-status-badge")
+    }
+
+    private func countChip(count: Int, label: String, systemImage: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .font(.caption2)
+                .foregroundStyle(color)
+            Text("\(count) \(label)")
+                .font(.caption.weight(.medium))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var targetSection: some View {

@@ -59,6 +59,9 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     var workspace: Workspace { store.workspace }
 
+    private(set) var workspaceThemeStatus: WorkspaceThemeStatus?
+    private(set) var unresolvedRecovery: String?
+
     var persistenceError: String? {
         [store.persistenceError, fatalStartupFailure]
             .compactMap { $0 }
@@ -137,6 +140,15 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             sourcePolicy: .preferUpstream,
             persistence: store.persistenceStore
         )
+
+        let cachedOutcomes = store.loadTargetVerificationOutcomes()
+        if !cachedOutcomes.isEmpty || store.workspace.themeAssignment != nil {
+            workspaceThemeStatus = WorkspaceThemeStatus(
+                timestamp: cachedOutcomes.map(\.verifiedAt).max() ?? Date(),
+                desiredThemeAssignment: store.workspace.themeAssignment,
+                targetOutcomes: cachedOutcomes
+            )
+        }
     }
 
     deinit {
@@ -147,11 +159,31 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         store.selectFixedVariant(variantID)
     }
 
+    @discardableResult
+    func verifyThemeStatus() async throws -> WorkspaceThemeStatus {
+        guard let themeEngine else {
+            let status = WorkspaceThemeStatus(
+                desiredThemeAssignment: workspace.themeAssignment,
+                targetOutcomes: []
+            )
+            self.workspaceThemeStatus = status
+            return status
+        }
+        let status = try await themeEngine.verifyStatus(workspace: workspace)
+        self.workspaceThemeStatus = status
+        return status
+    }
+
     func start() async throws -> WorkspaceTargetSnapshot {
         let themeEngine = try requiredThemeEngine()
         let discovery = await discoverAndRememberTargets()
         await registerAdapterForPersistedVSCodeTarget(from: discovery.vscode)
-        try await themeEngine.reconcileInterruptedOperations()
+        do {
+            try await themeEngine.reconcileInterruptedOperations()
+        } catch {
+            unresolvedRecovery = "Interrupted operation recovery requires attention: \(error.localizedDescription)"
+        }
+        _ = try? await verifyThemeStatus()
         return makeSnapshot(discovery: discovery)
     }
 
@@ -159,6 +191,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         _ = try requiredThemeEngine()
         let discovery = await discoverAndRememberTargets()
         await registerAdapterForPersistedVSCodeTarget(from: discovery.vscode)
+        _ = try? await verifyThemeStatus()
         return makeSnapshot(discovery: discovery)
     }
 
@@ -201,6 +234,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             reviewedPlan: reviewedPlan
         )
         discovery = await discoverAndRememberTargets()
+        _ = try? await verifyThemeStatus()
         return WorkspaceConnectionResult(
             snapshot: makeSnapshot(discovery: discovery),
             report: report
@@ -216,6 +250,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         }
         let report = try await themeEngine.disconnect(instance: instance, workspace: workspace)
         let discovery = await discoverAndRememberTargets()
+        _ = try? await verifyThemeStatus()
         return WorkspaceConnectionResult(
             snapshot: makeSnapshot(discovery: discovery),
             report: report
@@ -251,6 +286,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             throw ProductionWorkspaceRuntimeError.targetNoLongerAvailable(instanceID)
         }
         store.setTargetOptIn(instance: instance, isOptedIn: isOptedIn)
+        _ = try? await verifyThemeStatus()
         return makeSnapshot(discovery: discovery)
     }
 
@@ -263,6 +299,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         let updatedOptIns = workspace.targetOptIns.union(recommendedIDs)
         let recommendedInstances = recommendedIDs.compactMap { candidates[$0]?.instance }
         store.setTargetOptIns(updatedOptIns, discoveredInstances: recommendedInstances)
+        _ = try? await verifyThemeStatus()
         return makeSnapshot(discovery: discovery)
     }
 
@@ -278,6 +315,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         let updatedOptIns = workspace.targetOptIns.union(recommendedIDs)
         let recommendedInstances = recommendedIDs.compactMap { candidates[$0]?.instance }
         store.setTargetOptIns(updatedOptIns, discoveredInstances: recommendedInstances)
+        _ = try? await verifyThemeStatus()
         return makeSnapshot(discovery: discovery)
     }
 
@@ -423,6 +461,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
             onProgress: onProgress
         )
         let refreshedDiscovery = await discoverAndRememberTargets()
+        _ = try? await verifyThemeStatus()
         return WorkspaceSetupResult(
             snapshot: makeSnapshot(discovery: refreshedDiscovery),
             report: report
@@ -430,22 +469,28 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
     }
 
     func prepareApplyPlan() async throws -> ApplyPlan {
-        try await requiredThemeEngine().prepare(workspace: workspace)
+        _ = try? await verifyThemeStatus()
+        return try await requiredThemeEngine().prepare(workspace: workspace)
     }
 
     func apply(
         planID: UUID,
         onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
     ) async throws -> DurableApplyReport {
-        try await requiredThemeEngine().applyDurable(
+        _ = try? await verifyThemeStatus()
+        let report = try await requiredThemeEngine().applyDurable(
             planID: planID,
             workspace: workspace,
             onProgress: onProgress
         )
+        _ = try? await verifyThemeStatus()
+        return report
     }
 
     func undoLast() async throws -> UndoReport {
-        try await requiredThemeEngine().undoLast(workspace: workspace)
+        let report = try await requiredThemeEngine().undoLast(workspace: workspace)
+        _ = try? await verifyThemeStatus()
+        return report
     }
 
     func undoAvailability() async throws -> UndoAvailability {

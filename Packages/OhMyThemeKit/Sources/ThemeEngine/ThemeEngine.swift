@@ -572,6 +572,31 @@ public protocol ThemeAdapter: Sendable {
     ) async throws -> AdapterPlan
 
     func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt
+
+    func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?)
+}
+
+extension ThemeAdapter {
+    public func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?) {
+        do {
+            let plan = try await prepareApply(instance: instance, theme: theme)
+            if !plan.conflicts.isEmpty {
+                return (.needsAttention, plan.conflicts.joined(separator: "; "))
+            }
+            if !plan.setupNeeds.isEmpty {
+                return (.needsAttention, plan.setupNeeds.map(\.detail).joined(separator: "; "))
+            }
+            return (.pending, nil)
+        } catch {
+            return (.needsAttention, error.localizedDescription)
+        }
+    }
 }
 
 public enum ThemeEngineError: Error, Equatable, Sendable {
@@ -634,6 +659,124 @@ public actor ThemeEngine {
 
     internal func storePlanInFlight(_ plan: ApplyPlan) {
         plansInFlight[plan.id] = plan
+    }
+
+    public func verifyStatus(
+        workspace: Workspace,
+        persisting: Bool = true
+    ) async throws -> WorkspaceThemeStatus {
+        let now = Date()
+        guard let assignment = workspace.themeAssignment else {
+            let status = WorkspaceThemeStatus(
+                timestamp: now,
+                desiredThemeAssignment: nil,
+                targetOutcomes: []
+            )
+            if persisting, let persistence = persistenceForOperations {
+                try? persistence.saveTargetVerificationOutcomes([], workspaceID: workspace.id)
+            }
+            return status
+        }
+
+        let themeVariantID: String
+        switch assignment {
+        case .fixed(let variantID):
+            themeVariantID = variantID
+        case .appearancePair(let pair):
+            themeVariantID = pair.darkVariantID
+        }
+
+        guard let packAndVariant = findVariant(themeVariantID) else {
+            let outcomes = workspace.connectedTargetInstances.map { instance in
+                TargetVerificationOutcome(
+                    targetInstanceID: instance.id,
+                    status: .needsAttention,
+                    detail: "Theme variant \(themeVariantID) not found in theme catalog.",
+                    verifiedVariantID: nil,
+                    verifiedAt: now
+                )
+            }
+            let status = WorkspaceThemeStatus(
+                timestamp: now,
+                desiredThemeAssignment: assignment,
+                targetOutcomes: outcomes
+            )
+            if persisting, let persistence = persistenceForOperations {
+                try? persistence.saveTargetVerificationOutcomes(outcomes, workspaceID: workspace.id)
+            }
+            return status
+        }
+
+        let (pack, variant) = packAndVariant
+        let orderedInstances = WorkspaceTargetOrder.ordered(workspace.connectedTargetInstances)
+        var outcomes: [TargetVerificationOutcome] = []
+
+        for instance in orderedInstances {
+            guard let adapter = adaptersByID[instance.adapterID] else {
+                outcomes.append(TargetVerificationOutcome(
+                    targetInstanceID: instance.id,
+                    status: .needsAttention,
+                    detail: "Adapter \(instance.adapterID) unavailable.",
+                    verifiedVariantID: nil,
+                    verifiedAt: now
+                ))
+                continue
+            }
+
+            guard let targetSource = resolveSource(for: pack, variant: variant, adapterID: instance.adapterID) else {
+                outcomes.append(TargetVerificationOutcome(
+                    targetInstanceID: instance.id,
+                    status: .needsAttention,
+                    detail: "Theme source unavailable for adapter \(instance.adapterID).",
+                    verifiedVariantID: nil,
+                    verifiedAt: now
+                ))
+                continue
+            }
+
+            let preparedTheme = PreparedTheme(
+                variantID: variant.qualifiedID,
+                variant: variant,
+                sourceType: targetSource.type,
+                sourceRevision: pack.source.revision,
+                attribution: pack.source.attribution,
+                themeSchemaVersion: pack.schemaVersion,
+                contentDigest: variant.contentDigest,
+                compilerVersion: "theme-compiler-1",
+                upstreamArtifact: targetSource.artifact
+            )
+
+            do {
+                let (status, detail) = try await adapter.verify(instance: instance, theme: preparedTheme)
+                outcomes.append(TargetVerificationOutcome(
+                    targetInstanceID: instance.id,
+                    status: status,
+                    detail: detail,
+                    verifiedVariantID: status == .applied ? variant.qualifiedID : nil,
+                    verifiedAt: now
+                ))
+            } catch {
+                outcomes.append(TargetVerificationOutcome(
+                    targetInstanceID: instance.id,
+                    status: .needsAttention,
+                    detail: error.localizedDescription,
+                    verifiedVariantID: nil,
+                    verifiedAt: now
+                ))
+            }
+        }
+
+        let status = WorkspaceThemeStatus(
+            timestamp: now,
+            desiredThemeAssignment: assignment,
+            targetOutcomes: outcomes
+        )
+
+        if persisting, let persistence = persistenceForOperations {
+            try? persistence.saveTargetVerificationOutcomes(outcomes, workspaceID: workspace.id)
+        }
+
+        return status
     }
 
     public func prepare(workspace: Workspace) async throws -> ApplyPlan {

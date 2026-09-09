@@ -9,9 +9,12 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var themePacks: [ThemePack]
     var persistenceError: String?
     var canApplyThemes: Bool
+    var workspaceThemeStatus: WorkspaceThemeStatus?
+    var unresolvedRecovery: String?
 
     var startResult: WorkspaceTargetSnapshot?
     var startError: (any Error)?
+
     var refreshTargetsResult: WorkspaceTargetSnapshot?
     var refreshTargetsError: (any Error)?
 
@@ -26,7 +29,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     var setupPlanToReturn: SetupPlan?
     var setupPlanError: (any Error)?
+
     var setupPlanValidationResult: SetupPlanPreconditionValidation = .valid
+
     var executeSetupPlanResult: WorkspaceSetupResult?
     var executeSetupPlanError: (any Error)?
     private(set) var executeSetupPlanCalls: [SetupPlan] = []
@@ -41,6 +46,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var undoLastError: (any Error)?
 
     var undoAvailabilityResult: UndoAvailability
+
+    var verifyThemeStatusResult: WorkspaceThemeStatus?
+    private(set) var verifyThemeStatusCalls = 0
 
     private(set) var selectVariantCalls: [String] = []
     private(set) var startCalls = 0
@@ -68,13 +76,48 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         themePacks: [ThemePack] = [],
         persistenceError: String? = nil,
         canApplyThemes: Bool = true,
-        undoAvailabilityResult: UndoAvailability = .unavailable
+        undoAvailabilityResult: UndoAvailability = .unavailable,
+        workspaceThemeStatus: WorkspaceThemeStatus? = nil,
+        unresolvedRecovery: String? = nil
     ) {
         self.workspace = workspace
         self.themePacks = themePacks
         self.persistenceError = persistenceError
         self.canApplyThemes = canApplyThemes
         self.undoAvailabilityResult = undoAvailabilityResult
+        self.workspaceThemeStatus = workspaceThemeStatus
+        self.unresolvedRecovery = unresolvedRecovery
+    }
+
+    @discardableResult
+    func verifyThemeStatus() async throws -> WorkspaceThemeStatus {
+        verifyThemeStatusCalls += 1
+        if let verifyThemeStatusResult {
+            workspaceThemeStatus = verifyThemeStatusResult
+            return verifyThemeStatusResult
+        }
+        let variantID: String?
+        if case .fixed(let v) = workspace.themeAssignment {
+            variantID = v
+        } else {
+            variantID = nil
+        }
+        let outcomes: [TargetVerificationOutcome] = workspace.connectedTargetInstances.map { instance in
+            TargetVerificationOutcome(
+                targetInstanceID: instance.id,
+                status: .applied,
+                detail: nil,
+                verifiedVariantID: variantID,
+                verifiedAt: Date()
+            )
+        }
+        let status = WorkspaceThemeStatus(
+            timestamp: Date(),
+            desiredThemeAssignment: workspace.themeAssignment,
+            targetOutcomes: outcomes
+        )
+        workspaceThemeStatus = status
+        return status
     }
 
     func selectFixedThemeVariant(_ variantID: String) {
@@ -86,6 +129,9 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: workspace.targetOptIns,
             themeAssignment: .fixed(variantID: variantID)
         )
+        Task { [weak self] in
+            _ = try? await self?.verifyThemeStatus()
+        }
     }
 
     func start() async throws -> WorkspaceTargetSnapshot {
@@ -93,6 +139,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         if let startError {
             throw startError
         }
+        _ = try? await verifyThemeStatus()
         if let startResult {
             return startResult
         }
@@ -107,6 +154,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         if let refreshTargetsError {
             throw refreshTargetsError
         }
+        _ = try? await verifyThemeStatus()
         if let refreshTargetsResult {
             workspace = refreshTargetsResult.workspace
             return refreshTargetsResult
@@ -159,6 +207,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: workspace.targetOptIns.union([optionID]),
             themeAssignment: workspace.themeAssignment
         )
+        _ = try? await verifyThemeStatus()
         return WorkspaceConnectionResult(
             snapshot: WorkspaceTargetSnapshot(
                 workspace: workspace,
@@ -193,6 +242,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: newOptIns,
             themeAssignment: workspace.themeAssignment
         )
+        _ = try? await verifyThemeStatus()
         return WorkspaceConnectionResult(
             snapshot: WorkspaceTargetSnapshot(
                 workspace: workspace,
@@ -287,6 +337,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: workspace.targetOptIns.union(plan.targetInstanceIDs),
             themeAssignment: workspace.themeAssignment
         )
+        _ = try? await verifyThemeStatus()
         return WorkspaceSetupResult(
             snapshot: WorkspaceTargetSnapshot(
                 workspace: workspace,
@@ -301,6 +352,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     func prepareApplyPlan() async throws -> ApplyPlan {
         prepareCalls += 1
+        _ = try? await verifyThemeStatus()
         if let prepareApplyPlanError {
             throw prepareApplyPlanError
         }
@@ -365,9 +417,11 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             throw applyError
         }
         if let onApplyExecution, let customReport = try await onApplyExecution(planID, onProgress) {
+            _ = try? await verifyThemeStatus()
             return customReport
         }
         if let applyResult {
+            _ = try? await verifyThemeStatus()
             return applyResult
         }
         let plan = prepareApplyPlanResult?.id == planID ? prepareApplyPlanResult : nil
@@ -456,6 +510,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         } else {
             variantID = "fake/variant"
         }
+        _ = try? await verifyThemeStatus()
         return DurableApplyReport(
             operationID: opID,
             variantID: variantID,
@@ -469,6 +524,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             throw undoLastError
         }
         if let undoLastResult {
+            _ = try? await verifyThemeStatus()
             return undoLastResult
         }
         let outcomes = workspace.connectedTargetInstances.map { instance in
@@ -485,6 +541,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             )
         }
         undoAvailabilityResult = .unavailable
+        _ = try? await verifyThemeStatus()
         return UndoReport(
             operationID: UUID(),
             sourceOperationID: UUID(),
@@ -515,6 +572,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: optIns,
             themeAssignment: workspace.themeAssignment
         )
+        _ = try? await verifyThemeStatus()
         return WorkspaceTargetSnapshot(
             workspace: workspace,
             targets: defaultTargets(for: workspace)
@@ -533,6 +591,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: optIns,
             themeAssignment: workspace.themeAssignment
         )
+        _ = try? await verifyThemeStatus()
         return WorkspaceTargetSnapshot(
             workspace: workspace,
             targets: defaultTargets(for: workspace)
@@ -554,6 +613,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targetOptIns: optIns,
             themeAssignment: workspace.themeAssignment
         )
+        _ = try? await verifyThemeStatus()
         return WorkspaceTargetSnapshot(
             workspace: workspace,
             targets: defaultTargets(for: workspace)

@@ -8,7 +8,10 @@ protocol WorkspaceRuntime: AnyObject {
     var themePacks: [ThemePack] { get }
     var persistenceError: String? { get }
     var canApplyThemes: Bool { get }
+    var workspaceThemeStatus: WorkspaceThemeStatus? { get }
+    var unresolvedRecovery: String? { get }
 
+    func verifyThemeStatus() async throws -> WorkspaceThemeStatus
     func selectFixedThemeVariant(_ variantID: String)
     func start() async throws -> WorkspaceTargetSnapshot
     func refreshTargets() async throws -> WorkspaceTargetSnapshot

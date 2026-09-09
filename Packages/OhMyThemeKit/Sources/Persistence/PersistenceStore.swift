@@ -196,6 +196,21 @@ public final class PersistenceStore: @unchecked Sendable {
                 }
             }
         }
+        migrator.registerMigration("add-target-verification-outcomes") { database in
+            guard try database.tableExists("workspaces") else { return }
+            if try !database.tableExists("target_verification_outcomes") {
+                try database.create(table: "target_verification_outcomes") { table in
+                    table.column("workspace_id", .text).notNull()
+                        .references("workspaces", onDelete: .cascade)
+                    table.column("target_instance_id", .text).notNull()
+                    table.column("status", .text).notNull()
+                    table.column("detail", .text)
+                    table.column("verified_variant_id", .text)
+                    table.column("verified_at", .double).notNull()
+                    table.primaryKey(["workspace_id", "target_instance_id"])
+                }
+            }
+        }
         try migrator.migrate(database)
     }
 
@@ -239,6 +254,7 @@ public final class PersistenceStore: @unchecked Sendable {
                 table.column("captured_at", .double).notNull()
             }
         }
+
     }
 
     func withWrite<T>(_ block: (Database) throws -> T) throws -> T {
@@ -758,6 +774,76 @@ public final class PersistenceStore: @unchecked Sendable {
 
     public func loadContent(_ reference: ContentReference) throws -> Data {
         try contentStore.get(reference)
+    }
+
+    public func saveTargetVerificationOutcomes(
+        _ outcomes: [TargetVerificationOutcome],
+        workspaceID: WorkspaceID
+    ) throws {
+        try database.write { database in
+            guard try database.tableExists("target_verification_outcomes") else { return }
+            try database.execute(
+                sql: "DELETE FROM target_verification_outcomes WHERE workspace_id = ?",
+                arguments: [workspaceID.rawValue]
+            )
+            let statement = try database.makeStatement(
+                sql: """
+                    INSERT INTO target_verification_outcomes (
+                        workspace_id, target_instance_id, status, detail, verified_variant_id, verified_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workspace_id, target_instance_id) DO UPDATE SET
+                        status = excluded.status,
+                        detail = excluded.detail,
+                        verified_variant_id = excluded.verified_variant_id,
+                        verified_at = excluded.verified_at
+                """
+            )
+            for outcome in outcomes {
+                try statement.execute(arguments: [
+                    workspaceID.rawValue,
+                    outcome.targetInstanceID.rawValue,
+                    outcome.status.rawValue,
+                    outcome.detail,
+                    outcome.verifiedVariantID,
+                    outcome.verifiedAt.timeIntervalSince1970
+                ])
+            }
+        }
+    }
+
+    public func loadTargetVerificationOutcomes(
+        workspaceID: WorkspaceID
+    ) throws -> [TargetVerificationOutcome] {
+        try database.read { database in
+            guard try database.tableExists("target_verification_outcomes") else { return [] }
+            let rows = try Row.fetchAll(
+                database,
+                sql: """
+                    SELECT target_instance_id, status, detail, verified_variant_id, verified_at
+                    FROM target_verification_outcomes
+                    WHERE workspace_id = ?
+                    ORDER BY target_instance_id ASC
+                """,
+                arguments: [workspaceID.rawValue]
+            )
+            return rows.compactMap { row in
+                guard
+                    let targetIDString: String = row["target_instance_id"],
+                    let statusString: String = row["status"],
+                    let status = TargetVerificationStatus(rawValue: statusString),
+                    let verifiedAtDouble: Double = row["verified_at"]
+                else {
+                    return nil
+                }
+                return TargetVerificationOutcome(
+                    targetInstanceID: TargetInstanceID(rawValue: targetIDString),
+                    status: status,
+                    detail: row["detail"],
+                    verifiedVariantID: row["verified_variant_id"],
+                    verifiedAt: Date(timeIntervalSince1970: verifiedAtDouble)
+                )
+            }
+        }
     }
 
     func didCommit(_ checkpoint: DurableJournalCheckpoint) {

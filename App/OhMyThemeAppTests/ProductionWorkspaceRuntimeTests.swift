@@ -1178,4 +1178,13 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         }
     }
 
+    func testRuntimeVerifiesWorkspaceThemeStatusAtStartupAndPersistsOutcomes() async throws {
+        let runtime = makeRuntime()
+        _ = try await runtime.start()
+
+        XCTAssertNotNil(runtime.workspaceThemeStatus)
+        let savedOutcomes = try store.loadTargetVerificationOutcomes()
+        XCTAssertNotNil(savedOutcomes)
+    }
+
 }

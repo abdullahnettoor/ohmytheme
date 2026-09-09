@@ -575,6 +575,125 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertEqual(runtime.workspace.connectedTargetInstances.first?.id, target.id)
     }
 
+    func testOverviewReflectsVerifiedWorkspaceThemeStatusAndCounts() {
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "ghostty.test"),
+                    displayName: "Ghostty",
+                    adapterID: "ghostty"
+                ),
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "starship.test"),
+                    displayName: "Starship",
+                    adapterID: "starship"
+                ),
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "macos.appearance"),
+                    displayName: "macOS Appearance",
+                    adapterID: "macos.appearance"
+                )
+            ]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let now = Date()
+        let outcomes = [
+            TargetVerificationOutcome(
+                targetInstanceID: TargetInstanceID(rawValue: "ghostty.test"),
+                status: .applied,
+                verifiedVariantID: "catppuccin/mocha",
+                verifiedAt: now
+            ),
+            TargetVerificationOutcome(
+                targetInstanceID: TargetInstanceID(rawValue: "starship.test"),
+                status: .pending,
+                verifiedAt: now
+            ),
+            TargetVerificationOutcome(
+                targetInstanceID: TargetInstanceID(rawValue: "macos.appearance"),
+                status: .needsAttention,
+                detail: "System Events permission denied",
+                verifiedAt: now
+            )
+        ]
+        runtime.workspaceThemeStatus = WorkspaceThemeStatus(
+            timestamp: now,
+            desiredThemeAssignment: .fixed(variantID: "catppuccin/mocha"),
+            targetOutcomes: outcomes
+        )
+
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertEqual(model.appliedTargetsCount, 1)
+        XCTAssertEqual(model.pendingTargetsCount, 1)
+        XCTAssertEqual(model.needsAttentionTargetsCount, 1)
+        XCTAssertFalse(model.isFullyApplied)
+        XCTAssertNotNil(model.workspaceThemeStatus)
+    }
+
+    func testOverviewShowsFullyAppliedOnlyWhenAllTargetsApplied() {
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "ghostty.test"),
+                    displayName: "Ghostty",
+                    adapterID: "ghostty"
+                )
+            ]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        let now = Date()
+        let outcomes = [
+            TargetVerificationOutcome(
+                targetInstanceID: TargetInstanceID(rawValue: "ghostty.test"),
+                status: .applied,
+                verifiedVariantID: "catppuccin/mocha",
+                verifiedAt: now
+            )
+        ]
+        runtime.workspaceThemeStatus = WorkspaceThemeStatus(
+            timestamp: now,
+            desiredThemeAssignment: .fixed(variantID: "catppuccin/mocha"),
+            targetOutcomes: outcomes
+        )
+
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertEqual(model.appliedTargetsCount, 1)
+        XCTAssertEqual(model.pendingTargetsCount, 0)
+        XCTAssertEqual(model.needsAttentionTargetsCount, 0)
+        XCTAssertTrue(model.isFullyApplied)
+    }
+
+    func testOverviewPresentsActiveOperationSummaryAndUnresolvedRecovery() {
+        let workspace = Workspace.myMac
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        runtime.unresolvedRecovery = "Interrupted transaction needs recovery"
+
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertEqual(model.unresolvedRecovery, "Interrupted transaction needs recovery")
+        XCTAssertNil(model.activeOperationSummary)
+
+        model.setIsApplyingThemeForTesting(true)
+        XCTAssertEqual(model.activeOperationSummary, "Applying Theme…")
+
+        model.setIsCancellingRemainingApplyForTesting(true)
+        XCTAssertEqual(model.activeOperationSummary, "Cancelling theme application…")
+
+        model.setIsApplyingThemeForTesting(false)
+        model.setIsCancellingRemainingApplyForTesting(false)
+        model.setIsExecutingSetupForTesting(true)
+        XCTAssertEqual(model.activeOperationSummary, "Connecting Targets…")
+
+        model.setIsCancellingRemainingSetupForTesting(true)
+        XCTAssertEqual(model.activeOperationSummary, "Cancelling setup…")
+    }
+
     func testOverviewDescribesDesiredSelectionWithoutClaimingAppliedState() throws {
         let packs = try BundledThemeCatalog().load()
         let workspace = Workspace(

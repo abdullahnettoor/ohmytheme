@@ -24,12 +24,13 @@ final class AppPresenceTests: XCTestCase {
     private func makeController(
         launchStatus: LaunchAtLoginStatus = .disabled,
         storedMenuBarVisible: Bool? = nil,
-        persistenceError: String? = nil
+        persistenceError: String? = nil,
+        runtime customRuntime: FakeWorkspaceRuntime? = nil
     ) -> AppPresenceController {
         if let storedMenuBarVisible {
             defaults.set(storedMenuBarVisible, forKey: AppPresenceDefaultsKeys.isMenuBarVisible)
         }
-        let rt = FakeWorkspaceRuntime(
+        let rt = customRuntime ?? FakeWorkspaceRuntime(
             workspace: .myMac,
             persistenceError: persistenceError
         )
@@ -313,6 +314,39 @@ final class AppPresenceTests: XCTestCase {
     func testWorkspaceHealthReportsStorageUnavailableWhenErrorPresent() {
         let controller = makeController(persistenceError: "disk full")
         XCTAssertEqual(controller.workspaceHealth, "My Mac: Recovery storage unavailable")
+    }
+
+    func testWorkspaceHealthReportsNeedsAttentionWhenTargetsNeedAttention() {
+        let fakeRuntime = FakeWorkspaceRuntime(workspace: .myMac)
+        let outcome = TargetVerificationOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            status: .needsAttention,
+            detail: "Permission denied",
+            verifiedAt: Date()
+        )
+        fakeRuntime.workspaceThemeStatus = WorkspaceThemeStatus(
+            timestamp: Date(),
+            desiredThemeAssignment: .fixed(variantID: "catppuccin/mocha"),
+            targetOutcomes: [outcome]
+        )
+        let controller = makeController(runtime: fakeRuntime)
+        XCTAssertEqual(controller.workspaceHealth, "My Mac: Needs attention (1)")
+    }
+
+    func testWorkspaceHealthReportsPendingWhenTargetsArePending() {
+        let fakeRuntime = FakeWorkspaceRuntime(workspace: .myMac)
+        let outcome = TargetVerificationOutcome(
+            targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+            status: .pending,
+            verifiedAt: Date()
+        )
+        fakeRuntime.workspaceThemeStatus = WorkspaceThemeStatus(
+            timestamp: Date(),
+            desiredThemeAssignment: .fixed(variantID: "catppuccin/mocha"),
+            targetOutcomes: [outcome]
+        )
+        let controller = makeController(runtime: fakeRuntime)
+        XCTAssertEqual(controller.workspaceHealth, "My Mac: 1 pending")
     }
 
     func testQuittingAppTerminatesPlatform() {

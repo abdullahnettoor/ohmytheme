@@ -109,6 +109,55 @@ struct PersistenceStoreTests {
         #expect(updated.workspace.isOptedIn(target3))
     }
 
+    @Test("Target verification outcomes round trip and survive workspace reload")
+    func targetVerificationOutcomesRoundTrip() throws {
+        let fixture = try Fixture()
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",            connectedTargetInstances: [
+                ConnectedTargetInstance(
+                    id: TargetInstanceID(rawValue: "ghostty.default"),
+                    displayName: "Ghostty",
+                    adapterID: "ghostty"
+                )
+            ],
+            targetOptIns: [TargetInstanceID(rawValue: "ghostty.default")],
+            themeAssignment: .fixed(variantID: "nord.dark")
+        )
+        try fixture.store.saveWorkspace(workspace)
+
+        let outcomes = [
+            TargetVerificationOutcome(
+                targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+                status: .applied,
+                detail: "Clean",
+                verifiedVariantID: "nord.dark",
+                verifiedAt: Date(timeIntervalSince1970: 1_700_000_500)
+            )
+        ]
+
+        try fixture.store.saveTargetVerificationOutcomes(outcomes, workspaceID: workspace.id)
+        let loaded = try fixture.store.loadTargetVerificationOutcomes(workspaceID: workspace.id)
+
+        #expect(loaded.count == 1)
+        #expect(loaded[0].targetInstanceID == TargetInstanceID(rawValue: "ghostty.default"))
+        #expect(loaded[0].status == .applied)
+        #expect(loaded[0].detail == "Clean")
+        #expect(loaded[0].verifiedVariantID == "nord.dark")
+        #expect(loaded[0].verifiedAt == Date(timeIntervalSince1970: 1_700_000_500))
+
+        let updatedWorkspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName,
+            connectedTargetInstances: workspace.connectedTargetInstances,
+            targetOptIns: workspace.targetOptIns,
+            themeAssignment: .fixed(variantID: "catppuccin.mocha")
+        )
+        try fixture.store.saveWorkspace(updatedWorkspace)
+        let reloadedOutcomes = try fixture.store.loadTargetVerificationOutcomes(workspaceID: workspace.id)
+        #expect(reloadedOutcomes == loaded)
+    }
+
     @Test("Migration treats existing connected target instances as opted in")
     func migrationTreatsConnectedAsOptedIn() throws {
         let directoryURL = FileManager.default.temporaryDirectory

@@ -231,6 +231,91 @@ struct ThemeEngineTests {
         )
     }
 
+
+    @Test("Status verification reports applied, pending, and needs-attention and separates assignment from outcomes")
+    func verifyStatusSeparatesAssignmentAndReportsCounts() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let persistence = try PersistenceStore(
+            databaseURL: directory.appendingPathComponent("state.sqlite"),
+            contentStoreURL: directory.appendingPathComponent("recovery", isDirectory: true)
+        )
+
+        let appliedTarget = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "target.applied"),
+            displayName: "Applied Target",
+            adapterID: "custom.applied"
+        )
+        let pendingTarget = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "target.pending"),
+            displayName: "Pending Target",
+            adapterID: "custom.pending"
+        )
+        let attentionTarget = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "target.attention"),
+            displayName: "Attention Target",
+            adapterID: "custom.attention"
+        )
+
+        let appliedAdapter = ConfigurableVerificationAdapter(id: "custom.applied", status: .applied, detail: "All set")
+        let pendingAdapter = ConfigurableVerificationAdapter(id: "custom.pending", status: .pending, detail: "Will apply")
+        let attentionAdapter = ConfigurableVerificationAdapter(id: "custom.attention", status: .needsAttention, detail: "Needs permission")
+
+        let engine = ThemeEngine(
+            packs: [testPack],
+            adapters: [appliedAdapter, pendingAdapter, attentionAdapter],
+            persistence: persistence
+        )
+
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [appliedTarget, pendingTarget, attentionTarget],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+        try persistence.saveWorkspace(workspace)
+
+        let status = try await engine.verifyStatus(workspace: workspace)
+
+        #expect(status.appliedCount == 1)
+        #expect(status.pendingCount == 1)
+        #expect(status.needsAttentionCount == 1)
+        #expect(status.totalTargetCount == 3)
+        #expect(status.isFullyApplied == false)
+        #expect(status.desiredThemeAssignment == .fixed(variantID: "test-pack/dark"))
+
+        let appliedOutcome = status.targetOutcomes.first(where: { $0.targetInstanceID == appliedTarget.id })
+        #expect(appliedOutcome?.status == .applied)
+        #expect(appliedOutcome?.verifiedVariantID == "test-pack/dark")
+        #expect(appliedOutcome?.detail == "All set")
+
+        let pendingOutcome = status.targetOutcomes.first(where: { $0.targetInstanceID == pendingTarget.id })
+        #expect(pendingOutcome?.status == .pending)
+        #expect(pendingOutcome?.verifiedVariantID == nil)
+
+        let attentionOutcome = status.targetOutcomes.first(where: { $0.targetInstanceID == attentionTarget.id })
+        #expect(attentionOutcome?.status == .needsAttention)
+        #expect(attentionOutcome?.detail == "Needs permission")
+
+        let persistedOutcomes = try persistence.loadTargetVerificationOutcomes(workspaceID: workspace.id)
+        #expect(persistedOutcomes.count == 3)
+        #expect(persistedOutcomes.first(where: { $0.targetInstanceID == appliedTarget.id })?.status == .applied)
+
+        let fullyAppliedWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [appliedTarget],
+            themeAssignment: .fixed(variantID: "test-pack/dark")
+        )
+        let fullyAppliedStatus = try await engine.verifyStatus(workspace: fullyAppliedWorkspace)
+        #expect(fullyAppliedStatus.isFullyApplied == true)
+        #expect(fullyAppliedStatus.appliedCount == 1)
+        #expect(fullyAppliedStatus.pendingCount == 0)
+        #expect(fullyAppliedStatus.needsAttentionCount == 0)
+    }
+
 }
 
 private let testPack = ThemePack(
@@ -258,3 +343,51 @@ private let testPack = ThemePack(
         )
     ]
 )
+
+
+private actor ConfigurableVerificationAdapter: ThemeAdapter {
+    let id: String
+    let version = "1"
+    let payloadVersion = "1"
+    let status: TargetVerificationStatus
+    let detail: String?
+
+    init(id: String, status: TargetVerificationStatus, detail: String?) {
+        self.id = id
+        self.status = status
+        self.detail = detail
+    }
+
+    func prepareApply(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> AdapterPlan {
+        AdapterPlan(
+            targetInstanceID: instance.id,
+            adapterID: id,
+            adapterVersion: version,
+            capabilityID: "test",
+            payload: AdapterPayloadEnvelope(
+                adapterID: id,
+                adapterVersion: version,
+                payloadVersion: payloadVersion,
+                payload: Data()
+            ),
+            intendedChangeDigest: "test",
+            sourceType: .generated,
+            sourceRevision: "rev",
+            activationReach: .currentInstances
+        )
+    }
+
+    func apply(_ plan: AdapterPlan) async throws -> AdapterReceipt {
+        AdapterReceipt(configurationState: .updated, runningInstanceReach: .currentInstances)
+    }
+
+    func verify(
+        instance: ConnectedTargetInstance,
+        theme: PreparedTheme
+    ) async throws -> (status: TargetVerificationStatus, detail: String?) {
+        (status, detail)
+    }
+}
