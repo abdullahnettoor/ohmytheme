@@ -200,6 +200,8 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var relinquishReport: RelinquishReport?
     @Published private(set) var isRelinquishingManagement = false
     @Published private(set) var replacementSuggestions: [ConnectionReplacementSuggestion] = []
+    @Published private(set) var resetReview: ResetReview?
+    @Published private(set) var isReviewingReset = false
     @Published private(set) var operationError: String?
     @Published private(set) var isBusy = false
     @Published private(set) var isReady = true
@@ -898,6 +900,66 @@ final class WorkspacePresentationModel: ObservableObject {
         await refreshUndoAvailability()
         operationError = nil
         return result.report
+    }
+
+    /// Reviews every Connected Target Instance for Reset without mutating.
+    /// Safe entries restore their Connection Baselines; conflicting entries
+    /// require explicit Management Relinquishment or remain unresolved.
+    func reviewReset() async throws {
+        guard !isReviewingReset else { return }
+        isReviewingReset = true
+        defer { isReviewingReset = false }
+        resetReview = try await runtime.reviewReset()
+        report = nil
+        operationError = nil
+    }
+
+    func dismissResetReview() {
+        resetReview = nil
+    }
+
+    /// Completes Reset after every Connected Target Instance resolves.
+    /// Clears Target Opt-ins, the desired Theme Assignment, onboarding state,
+    /// applicable recovery data, and presentation preferences. Throws while any
+    /// connected target remains, so quitting only follows agreement between
+    /// durable product state and external target state.
+    func finalizeReset() async throws {
+        let snapshot = try await runtime.finalizeReset()
+        acknowledgedUnavailableTargetInstanceIDs = []
+        UserDefaults.standard.removeObject(
+            forKey: Self.acknowledgedUnavailableTargetsDefaultsKey
+        )
+        latestSetupReport = nil
+        latestApplyReport = nil
+        report = nil
+        connectionReview = nil
+        approvalRequiredFor = nil
+        disconnectReview = nil
+        disconnectReviewTarget = nil
+        relinquishReport = nil
+        resetReview = nil
+        setupPlan = nil
+        setupPlanInvalidationReason = nil
+        replaceWorkspace(snapshot)
+        onboardingDisposition = runtime.onboardingDisposition
+        await refreshUndoAvailability()
+        operationError = nil
+    }
+
+    /// Completes Reset, restores presentation defaults, disables Launch at
+    /// Login, and quits. The app quits only after `finalizeReset` proves
+    /// durable and external state agree and presentation cleanup finishes;
+    /// otherwise the error stays visible for retry.
+    func finalizeResetAndQuit() async throws {
+        try await finalizeReset()
+        guard let presenceController else { return }
+        guard await presenceController.resetPresentationDefaultsForReset() else {
+            operationError =
+                presenceController.launchAtLoginError
+                ?? "Reset couldn't finish presentation cleanup. Try again."
+            return
+        }
+        presenceController.quitApp()
     }
 
     /// Clears a Target Opt-in through the safe path: unconnected opt-ins clear

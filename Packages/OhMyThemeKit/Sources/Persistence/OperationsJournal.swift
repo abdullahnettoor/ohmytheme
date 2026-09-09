@@ -159,6 +159,19 @@ extension PersistenceStore {
         }
     }
 
+    /// Removes cached latest Setup/Apply reports for Reset. Journaled operation
+    /// records and Connection Baselines are untouched; per-target recovery
+    /// state is resolved through Restore and Disconnect or Management
+    /// Relinquishment before this runs.
+    public func clearLatestOperationReports(workspaceID: WorkspaceID) throws {
+        try withWrite { database in
+            try database.execute(
+                sql: "DELETE FROM operation_reports WHERE workspace_id = ?",
+                arguments: [workspaceID.rawValue]
+            )
+        }
+    }
+
     public func journalStartOperation(
         id: UUID? = nil,
         kind: OperationKind,

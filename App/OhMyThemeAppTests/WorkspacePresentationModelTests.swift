@@ -1,4 +1,5 @@
 import Foundation
+import PlatformClients
 import ThemeEngine
 import ThemeModel
 import XCTest
@@ -653,6 +654,155 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertTrue(model.workspace.isOptedIn(oldInstance.id))
         XCTAssertTrue(model.workspace.isOptedIn(newCandidateID))
         XCTAssertFalse(model.workspace.isConnected(newCandidateID))
+    }
+
+    func testReviewResetSurfacesEntries() async throws {
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.reset"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [instance]
+            )
+        )
+        runtime.reviewResetResult = ResetReview(
+            entries: [
+                DisconnectReview(
+                    targetInstanceID: instance.id,
+                    adapterID: instance.adapterID,
+                    isSafeToRestore: true,
+                    restorationSummary: "Restore and stop managing.",
+                    expectedEffects: ["Restore original configuration."],
+                    residualPathsIfRelinquished: [],
+                    conflictDetail: nil,
+                    baselineDigest: "digest"
+                )
+            ]
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        try await model.reviewReset()
+
+        XCTAssertEqual(runtime.reviewResetCalls, 1)
+        XCTAssertEqual(model.resetReview?.entries.count, 1)
+        XCTAssertFalse(model.resetReview?.canComplete ?? true)
+        XCTAssertFalse(model.resetReview?.hasConflicts ?? true)
+    }
+
+    func testFinalizeResetClearsWorkspaceAndPreferences() async throws {
+        UserDefaults.standard.set(
+            ["recording.stale"],
+            forKey: "OhMyThemeAcknowledgedUnavailableTargets"
+        )
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [],
+                targetOptIns: [TargetInstanceID(rawValue: "recording.stale")],
+                themeAssignment: .fixed(variantID: "catppuccin/mocha")
+            )
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+        XCTAssertFalse(model.acknowledgedUnavailableTargetInstanceIDs.isEmpty)
+
+        try await model.finalizeReset()
+
+        XCTAssertEqual(runtime.finalizeResetCalls, 1)
+        XCTAssertTrue(model.workspace.connectedTargetInstances.isEmpty)
+        XCTAssertTrue(model.workspace.targetOptIns.isEmpty)
+        XCTAssertNil(model.workspace.themeAssignment)
+        XCTAssertTrue(model.acknowledgedUnavailableTargetInstanceIDs.isEmpty)
+        XCTAssertNil(UserDefaults.standard.stringArray(forKey: "OhMyThemeAcknowledgedUnavailableTargets"))
+        XCTAssertNil(model.resetReview)
+        XCTAssertEqual(model.onboardingDisposition, .inProgress)
+    }
+
+    func testFinalizeResetBlockedSurfacesErrorWithoutQuitting() async throws {
+        let instance = ConnectedTargetInstance(
+            id: TargetInstanceID(rawValue: "recording.reset"),
+            displayName: "Recording",
+            adapterID: "recording"
+        )
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(
+                id: .myMac,
+                displayName: "My Mac",
+                connectedTargetInstances: [instance]
+            )
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        do {
+            try await model.finalizeResetAndQuit()
+            XCTFail("Expected resetBlockedByConnectedTargets")
+        } catch ProductionWorkspaceRuntimeError.resetBlockedByConnectedTargets(let ids) {
+            XCTAssertEqual(ids, [instance.id])
+        }
+        XCTAssertEqual(runtime.finalizeResetCalls, 1)
+        XCTAssertTrue(model.workspace.isConnected(instance.id))
+    }
+
+    private enum ResetTestError: Error {
+        case loginDisableFailed
+    }
+
+    private func makePresenceController(
+        for model: WorkspacePresentationModel,
+        runtime: FakeWorkspaceRuntime,
+        loginStatus: LaunchAtLoginStatus = .disabled,
+        loginFailure: (any Error)? = nil
+    ) -> (AppPresenceController, FakeAppPresencePlatform) {
+        let platform = FakeAppPresencePlatform()
+        let login = FakeLaunchAtLoginPlatform(status: loginStatus)
+        login.failure = loginFailure
+        let controller = AppPresenceController(
+            platform: platform,
+            launchAtLoginPlatform: login,
+            notificationClient: FakeNotificationClient(),
+            defaults: FakeAppPresenceDefaults(),
+            runtime: runtime
+        )
+        model.presenceController = controller
+        return (controller, platform)
+    }
+
+    func testFinalizeResetAndQuitQuitsAfterAgreement() async throws {
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(id: .myMac, displayName: "My Mac")
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+        let (controller, platform) = makePresenceController(for: model, runtime: runtime)
+        _ = controller
+
+        try await model.finalizeResetAndQuit()
+
+        XCTAssertEqual(platform.terminateAppCallCount, 1)
+        XCTAssertNil(model.operationError)
+    }
+
+    func testFinalizeResetAndQuitStaysOpenWhenLoginDisableFails() async throws {
+        let runtime = FakeWorkspaceRuntime(
+            workspace: Workspace(id: .myMac, displayName: "My Mac")
+        )
+        let model = WorkspacePresentationModel(runtime: runtime)
+        let (controller, platform) = makePresenceController(
+            for: model,
+            runtime: runtime,
+            loginStatus: .enabled,
+            loginFailure: ResetTestError.loginDisableFailed
+        )
+        _ = controller
+
+        try await model.finalizeResetAndQuit()
+
+        XCTAssertEqual(platform.terminateAppCallCount, 0)
+        XCTAssertNotNil(model.operationError)
+        XCTAssertTrue(model.workspace.connectedTargetInstances.isEmpty)
     }
 
     func testStartingPresentationDoesNotChangeThemeAssignment() async {

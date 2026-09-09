@@ -42,6 +42,13 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     var replacementSuggestions: [ConnectionReplacementSuggestion] = []
 
+    var reviewResetResult: ResetReview?
+    var reviewResetError: (any Error)?
+    private(set) var reviewResetCalls = 0
+    var finalizeResetResult: WorkspaceTargetSnapshot?
+    var finalizeResetError: (any Error)?
+    private(set) var finalizeResetCalls = 0
+
     var setupPlanToReturn: SetupPlan?
     var setupPlanError: (any Error)?
 
@@ -693,6 +700,57 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             targets: defaultTargets(for: workspace),
             replacementSuggestions: replacementSuggestions
         )
+    }
+
+    func reviewReset() async throws -> ResetReview {
+        reviewResetCalls += 1
+        if let reviewResetError {
+            throw reviewResetError
+        }
+        if let reviewResetResult {
+            return reviewResetResult
+        }
+        return ResetReview(
+            entries: workspace.connectedTargetInstances.map { instance in
+                DisconnectReview(
+                    targetInstanceID: instance.id,
+                    adapterID: instance.adapterID,
+                    isSafeToRestore: true,
+                    restorationSummary:
+                        "Restore the captured Connection Baseline for \(instance.displayName) and stop managing it.",
+                    expectedEffects: ["Restore original configuration."],
+                    residualPathsIfRelinquished: [],
+                    conflictDetail: nil,
+                    baselineDigest: "fake-baseline"
+                )
+            }
+        )
+    }
+
+    func finalizeReset() async throws -> WorkspaceTargetSnapshot {
+        finalizeResetCalls += 1
+        if let finalizeResetError {
+            throw finalizeResetError
+        }
+        if let finalizeResetResult {
+            workspace = finalizeResetResult.workspace
+            return finalizeResetResult
+        }
+        guard workspace.connectedTargetInstances.isEmpty else {
+            throw ProductionWorkspaceRuntimeError.resetBlockedByConnectedTargets(
+                workspace.connectedTargetInstances.map(\.id)
+            )
+        }
+        workspace = Workspace(
+            id: workspace.id,
+            displayName: workspace.displayName
+        )
+        replacementSuggestions = []
+        onboardingDisposition = .inProgress
+        latestSetupReport = nil
+        latestApplyReport = nil
+        _ = try? await verifyThemeStatus()
+        return snapshot(for: workspace)
     }
 
     private func defaultTargets(for workspace: Workspace) -> [WorkspacePresentationModel.ApplicationTarget] {

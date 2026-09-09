@@ -639,6 +639,32 @@ final class AppPresenceTests: XCTestCase {
 
         XCTAssertEqual(platform.terminateAppCallCount, 1)
     }
+
+    func testResetRestoresPresentationDefaultsAndDisablesLogin() async {
+        defaults.set("NSStatusItem Visible com.example.hidden", forKey: "NSStatusItem Visible com.example.hidden")
+        let controller = makeController(launchStatus: .disabled, storedMenuBarVisible: false)
+        XCTAssertFalse(controller.isMenuBarVisible)
+
+        await controller.resetPresentationDefaultsForReset()
+
+        XCTAssertTrue(controller.isMenuBarVisible)
+        XCTAssertTrue(defaults.bool(forKey: AppPresenceDefaultsKeys.isMenuBarVisible))
+        XCTAssertEqual(launchAtLogin.requestedValues, [false])
+        XCTAssertEqual(launchAtLogin.status, .disabled)
+        XCTAssertTrue(controller.isLaunchAtLoginEligible)
+        XCTAssertTrue(defaults.removedKeys.contains("NSStatusItem Visible com.example.hidden"))
+    }
+
+    func testResetReportsFailureWhenLoginDisableFails() async {
+        launchAtLogin.failure = FakeLaunchAtLoginError.denied
+        let controller = makeController(launchStatus: .enabled)
+
+        let finished = await controller.resetPresentationDefaultsForReset()
+
+        XCTAssertFalse(finished)
+        XCTAssertNotNil(controller.launchAtLoginError)
+        XCTAssertEqual(platform.terminateAppCallCount, 0)
+    }
 }
 
 // MARK: - Test Doubles (Independent of AppKit internals)

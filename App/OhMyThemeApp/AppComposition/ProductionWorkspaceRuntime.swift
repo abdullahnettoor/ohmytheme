@@ -304,6 +304,49 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         )
     }
 
+    func reviewReset() async throws -> ResetReview {
+        let themeEngine = try requiredThemeEngine()
+        var entries: [DisconnectReview] = []
+        for instance in workspace.connectedTargetInstances {
+            entries.append(try await themeEngine.previewDisconnect(instance: instance, workspace: workspace))
+        }
+        return ResetReview(entries: entries)
+    }
+
+    func finalizeReset() async throws -> WorkspaceTargetSnapshot {
+        let themeEngine = try requiredThemeEngine()
+        let connectedIDs = workspace.connectedTargetInstances.map(\.id)
+        guard connectedIDs.isEmpty else {
+            throw ProductionWorkspaceRuntimeError.resetBlockedByConnectedTargets(connectedIDs)
+        }
+        guard let persistence = store.persistenceStore else {
+            throw ProductionWorkspaceRuntimeError.engineUnavailable("Recovery storage is unavailable.")
+        }
+        do {
+            try await themeEngine.reconcileInterruptedOperations()
+        } catch {
+            unresolvedRecovery = "Interrupted operation recovery requires attention: \(error.localizedDescription)"
+            throw error
+        }
+        unresolvedRecovery = nil
+        let workspaceID = workspace.id
+        let displayName = workspace.displayName
+        try persistence.saveWorkspace(
+            Workspace(id: workspaceID, displayName: displayName),
+            targetInstances: []
+        )
+        try persistence.clearOnboardingDisposition(workspaceID: workspaceID)
+        try persistence.clearLatestOperationReports(workspaceID: workspaceID)
+        try persistence.saveTargetVerificationOutcomes([], workspaceID: workspaceID)
+        latestSetupReport = nil
+        latestApplyReport = nil
+        workspaceThemeStatus = nil
+        onboardingDisposition = store.loadOnboardingDisposition()
+        let discovery = await discoverAndRememberTargets()
+        _ = try? await verifyThemeStatus()
+        return makeSnapshot(discovery: discovery)
+    }
+
     func setTargetOptIn(
         instanceID: TargetInstanceID,
         isOptedIn: Bool
@@ -1561,6 +1604,7 @@ enum ProductionWorkspaceRuntimeError: Error, Equatable {
     case engineUnavailable(String)
     case cannotOptOutConnectedTarget(TargetInstanceID)
     case setupPlanInvalidated(String)
+    case resetBlockedByConnectedTargets([TargetInstanceID])
 }
 
 private extension String {

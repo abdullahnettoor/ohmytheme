@@ -70,7 +70,7 @@ struct OhMyThemeApp: App {
         .windowResizability(.contentMinSize)
 
         Settings {
-            SettingsView(presenceController: presenceController)
+            SettingsView(presenceController: presenceController, model: workspaceModel)
         }
 
         MenuBarExtra(

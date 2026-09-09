@@ -34,6 +34,8 @@ protocol WorkspaceRuntime: AnyObject, ObservableObject {
     func relinquishManagement(
         targetInstanceID: TargetInstanceID
     ) async throws -> WorkspaceRelinquishResult
+    func reviewReset() async throws -> ResetReview
+    func finalizeReset() async throws -> WorkspaceTargetSnapshot
     func prepareSetupPlan(retrySourceOperationID: UUID?) async throws -> SetupPlan
     func validateSetupPlanPreconditions(_ plan: SetupPlan) async -> SetupPlanPreconditionValidation
     func cancelRemainingSetup(operationID: UUID) async throws
@@ -105,6 +107,21 @@ struct WorkspaceConnectionResult: Equatable {
 struct WorkspaceRelinquishResult: Equatable {
     let snapshot: WorkspaceTargetSnapshot
     let report: RelinquishReport
+}
+
+/// A reviewed Reset plan covering every Connected Target Instance. Safe
+/// entries restore their Connection Baselines; conflicting entries require
+/// explicit Management Relinquishment or remain unresolved and block Reset.
+/// Recovery records and restoration content are retained until each target
+/// reaches a safe terminal state.
+struct ResetReview: Equatable {
+    let entries: [DisconnectReview]
+
+    /// True when no Connected Target Instance remains to resolve.
+    var canComplete: Bool { entries.isEmpty }
+
+    /// True when at least one entry needs Management Relinquishment.
+    var hasConflicts: Bool { entries.contains { !$0.isSafeToRestore } }
 }
 
 struct WorkspaceSetupResult: Equatable {

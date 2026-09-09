@@ -892,6 +892,129 @@ final class ProductionWorkspaceRuntimeTests: XCTestCase {
         XCTAssertNotNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: display1))
     }
 
+    // MARK: - Reset (#44)
+
+    private func connectRecordingInstance(
+        _ adapter: RecordingWritableAdapter,
+        id: String,
+        runtime: ProductionWorkspaceRuntime
+    ) async throws -> TargetInstanceID {
+        let candidateID = TargetInstanceID(rawValue: "\(id).default")
+        _ = try await runtime.setTargetOptIn(instanceID: candidateID, isOptedIn: true)
+        let reviewPlan = try await runtime.reviewConnection(optionID: candidateID)
+        _ = try await runtime.connect(optionID: candidateID, reviewedPlan: reviewPlan)
+        return candidateID
+    }
+
+    func testReviewResetClassifiesSafeAndConflictingTargetsWithoutMutating() async throws {
+        let adapterA = RecordingWritableAdapter(id: "recording-a", initialWorld: Data("world-a".utf8))
+        let adapterB = RecordingWritableAdapter(id: "recording-b", initialWorld: Data("world-b".utf8))
+        let runtime = makeRuntime(additionalAdapters: [adapterA, adapterB])
+        _ = try await runtime.start()
+        let idA = try await connectRecordingInstance(adapterA, id: "recording-a", runtime: runtime)
+        let idB = try await connectRecordingInstance(adapterB, id: "recording-b", runtime: runtime)
+        await adapterB.mutateWorldExternally(Data("external-b".utf8))
+
+        let review = try await runtime.reviewReset()
+
+        XCTAssertEqual(Set(review.entries.map(\.targetInstanceID)), [idA, idB])
+        let entryA = try XCTUnwrap(review.entries.first { $0.targetInstanceID == idA })
+        let entryB = try XCTUnwrap(review.entries.first { $0.targetInstanceID == idB })
+        XCTAssertTrue(entryA.isSafeToRestore)
+        XCTAssertFalse(entryA.expectedEffects.isEmpty)
+        XCTAssertFalse(entryB.isSafeToRestore)
+        XCTAssertNotNil(entryB.conflictDetail)
+        XCTAssertFalse(entryB.residualPathsIfRelinquished.isEmpty)
+        XCTAssertTrue(review.hasConflicts)
+        XCTAssertFalse(review.canComplete)
+        XCTAssertTrue(runtime.workspace.isConnected(idA))
+        XCTAssertTrue(runtime.workspace.isConnected(idB))
+        let worldAAfter = await adapterA.currentWorldBytes()
+        let worldBAfter = await adapterB.currentWorldBytes()
+        XCTAssertEqual(worldBAfter, Data("external-b".utf8))
+        XCTAssertNotEqual(worldAAfter, Data("external-b".utf8))
+    }
+
+    func testFinalizeResetBlockedWhileTargetsConnected() async throws {
+        let adapter = RecordingWritableAdapter(id: "recording")
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = try await connectRecordingInstance(adapter, id: "recording", runtime: runtime)
+
+        do {
+            _ = try await runtime.finalizeReset()
+            XCTFail("Expected resetBlockedByConnectedTargets")
+        } catch ProductionWorkspaceRuntimeError.resetBlockedByConnectedTargets(let ids) {
+            XCTAssertEqual(ids, [candidateID])
+        }
+        XCTAssertTrue(runtime.workspace.isConnected(candidateID))
+        XCTAssertNotNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: candidateID))
+    }
+
+    func testFinalizeResetClearsProductStateAfterResolution() async throws {
+        let adapter = RecordingWritableAdapter(id: "recording")
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = try await connectRecordingInstance(adapter, id: "recording", runtime: runtime)
+        runtime.selectFixedThemeVariant("catppuccin/mocha")
+        try persistence.saveOnboardingDisposition(.completed, workspaceID: .myMac)
+        try persistence.saveTargetVerificationOutcomes(
+            [
+                TargetVerificationOutcome(
+                    targetInstanceID: candidateID,
+                    status: .applied,
+                    detail: nil,
+                    verifiedVariantID: "catppuccin/mocha",
+                    verifiedAt: Date()
+                )
+            ],
+            workspaceID: .myMac
+        )
+        try persistence.saveLatestOperationReport(Data("setup-report".utf8), kind: .setup, workspaceID: .myMac)
+        try persistence.saveLatestOperationReport(Data("apply-report".utf8), kind: .apply, workspaceID: .myMac)
+
+        let review = try await runtime.reviewReset()
+        XCTAssertTrue(review.entries.allSatisfy(\.isSafeToRestore))
+        _ = try await runtime.restoreAndDisconnect(targetInstanceID: candidateID)
+        let snapshot = try await runtime.finalizeReset()
+
+        XCTAssertTrue(snapshot.workspace.connectedTargetInstances.isEmpty)
+        XCTAssertTrue(snapshot.workspace.targetOptIns.isEmpty)
+        XCTAssertNil(snapshot.workspace.themeAssignment)
+        XCTAssertTrue(snapshot.replacementSuggestions.isEmpty)
+        XCTAssertEqual(runtime.onboardingDisposition, .inProgress)
+        XCTAssertNil(try persistence.loadOnboardingDisposition(workspaceID: .myMac))
+        XCTAssertTrue(try persistence.loadTargetVerificationOutcomes(workspaceID: .myMac).isEmpty)
+        XCTAssertNil(try persistence.loadLatestOperationReport(kind: .setup, workspaceID: .myMac))
+        XCTAssertNil(try persistence.loadLatestOperationReport(kind: .apply, workspaceID: .myMac))
+        XCTAssertNil(runtime.latestSetupReport)
+        XCTAssertNil(runtime.latestApplyReport)
+        XCTAssertNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: candidateID))
+    }
+
+    func testUnresolvedResetTargetsRetainRecoveryRecords() async throws {
+        let adapter = RecordingWritableAdapter(id: "recording", initialWorld: Data("world".utf8))
+        let runtime = makeRuntime(additionalAdapters: [adapter])
+        _ = try await runtime.start()
+        let candidateID = try await connectRecordingInstance(adapter, id: "recording", runtime: runtime)
+        await adapter.mutateWorldExternally(Data("external".utf8))
+
+        let review = try await runtime.reviewReset()
+        XCTAssertEqual(review.entries.count, 1)
+        XCTAssertFalse(review.entries.first?.isSafeToRestore ?? true)
+
+        let result = try await runtime.restoreAndDisconnect(targetInstanceID: candidateID)
+        XCTAssertEqual(result.report.outcomes.first?.configurationState, .conflicted)
+        XCTAssertNotNil(try persistence.journalLoadConnectionBaseline(targetInstanceID: candidateID))
+        XCTAssertTrue(runtime.workspace.isConnected(candidateID))
+        do {
+            _ = try await runtime.finalizeReset()
+            XCTFail("Expected resetBlockedByConnectedTargets")
+        } catch ProductionWorkspaceRuntimeError.resetBlockedByConnectedTargets(let ids) {
+            XCTAssertEqual(ids, [candidateID])
+        }
+    }
+
     func testExperimentalAdapterRemainsVisibleButIsNotRecommended() async throws {
         let adapterID = "experimental_shell"
         let adapter = RecordingWritableAdapter(id: adapterID)

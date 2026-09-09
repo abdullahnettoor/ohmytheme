@@ -917,6 +917,18 @@ public final class PersistenceStore: @unchecked Sendable {
         }
     }
 
+    /// Removes the persisted onboarding disposition for Reset so the next
+    /// launch derives a fresh disposition from empty product state.
+    public func clearOnboardingDisposition(workspaceID: WorkspaceID) throws {
+        try database.write { database in
+            guard try database.tableExists("onboarding_state") else { return }
+            try database.execute(
+                sql: "DELETE FROM onboarding_state WHERE workspace_id = ?",
+                arguments: [workspaceID.rawValue]
+            )
+        }
+    }
+
     public func loadOnboardingDisposition(
         workspaceID: WorkspaceID
     ) throws -> OnboardingDisposition? {

@@ -425,6 +425,33 @@ final class AppPresenceController: ObservableObject {
         )
     }
 
+    // MARK: - Reset
+    /// Restores presentation defaults ahead of a Reset quit: the menu bar item
+    /// returns, remembered hidden status-item preferences are cleared, and
+    /// Launch at Login is disabled. Returns whether presentation cleanup
+    /// finished; Reset must not quit while Launch at Login is still enabled.
+    @discardableResult
+    func resetPresentationDefaultsForReset() async -> Bool {
+        guard !isChangingAppPresencePreference else { return false }
+        isChangingAppPresencePreference = true
+        defer { isChangingAppPresencePreference = false }
+
+        isMenuBarVisible = true
+        defaults.set(true, forKey: AppPresenceDefaultsKeys.isMenuBarVisible)
+        MenuBarPresence.clearHiddenStatusItemPreferences(in: defaults)
+        menuBarVisibilityError = nil
+        do {
+            try await launchAtLoginPlatform.setEnabled(false)
+        } catch {
+            launchAtLoginError =
+                "macOS couldn't disable Launch at Login during Reset. \(error.localizedDescription)"
+            refreshLaunchAtLoginStatus()
+            return false
+        }
+        refreshLaunchAtLoginStatus()
+        return true
+    }
+
     // MARK: - App Termination
     func quitApp() {
         platform.terminateApp()
