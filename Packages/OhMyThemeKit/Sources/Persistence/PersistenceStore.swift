@@ -223,6 +223,38 @@ public final class PersistenceStore: @unchecked Sendable {
                 }
             }
         }
+        migrator.registerMigration("add-onboarding-disposition") { database in
+            guard try database.tableExists("workspaces") else { return }
+            if try !database.tableExists("onboarding_state") {
+                try database.create(table: "onboarding_state") { table in
+                    table.column("workspace_id", .text).notNull()
+                        .references("workspaces", onDelete: .cascade)
+                    table.column("disposition", .text).notNull()
+                    table.column("updated_at", .double).notNull()
+                    table.primaryKey(["workspace_id"])
+                }
+            }
+            if try database.tableExists("target_instances") {
+                try database.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO onboarding_state (workspace_id, disposition, updated_at)
+                        SELECT workspace_id, 'completed', strftime('%s', 'now')
+                        FROM target_instances
+                        WHERE is_connected = 1
+                        """
+                )
+            }
+            if try database.tableExists("operations") {
+                try database.execute(
+                    sql: """
+                        INSERT OR IGNORE INTO onboarding_state (workspace_id, disposition, updated_at)
+                        SELECT workspace_id, 'completed', strftime('%s', 'now')
+                        FROM operations
+                        WHERE (kind = 'apply' OR kind = 'setup') AND state = 'completed'
+                        """
+                )
+            }
+        }
         try migrator.migrate(database)
     }
 
@@ -855,6 +887,47 @@ public final class PersistenceStore: @unchecked Sendable {
                     verifiedAt: Date(timeIntervalSince1970: verifiedAtDouble)
                 )
             }
+        }
+    }
+
+    public func saveOnboardingDisposition(
+        _ disposition: OnboardingDisposition,
+        workspaceID: WorkspaceID
+    ) throws {
+        try database.write { database in
+            guard try database.tableExists("onboarding_state") else { return }
+            try database.execute(
+                sql: """
+                    INSERT INTO onboarding_state (workspace_id, disposition, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(workspace_id) DO UPDATE SET
+                        disposition = excluded.disposition,
+                        updated_at = excluded.updated_at
+                    """,
+                arguments: [
+                    workspaceID.rawValue,
+                    disposition.rawValue,
+                    Date().timeIntervalSince1970
+                ]
+            )
+        }
+    }
+
+    public func loadOnboardingDisposition(
+        workspaceID: WorkspaceID
+    ) throws -> OnboardingDisposition? {
+        try database.read { database in
+            guard try database.tableExists("onboarding_state") else { return nil }
+            let row = try Row.fetchOne(
+                database,
+                sql: """
+                    SELECT disposition FROM onboarding_state
+                    WHERE workspace_id = ?
+                    """,
+                arguments: [workspaceID.rawValue]
+            )
+            guard let rawDisposition: String = row?["disposition"] else { return nil }
+            return OnboardingDisposition(rawValue: rawDisposition)
         }
     }
 

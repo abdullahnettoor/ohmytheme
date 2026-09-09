@@ -22,6 +22,9 @@ struct WorkspaceControlsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     header
+                    if model.isOnboardingDeferred {
+                        resumeSetupBanner
+                    }
                     workspaceStatusSection
                     targetSection
                     if !model.workspace.connectedTargetInstances.isEmpty {
@@ -81,6 +84,36 @@ struct WorkspaceControlsView: View {
             Text(action.message)
         }
 
+    }
+
+    private var resumeSetupBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sparkles")
+                .font(.title2)
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Setup Incomplete")
+                    .font(.headline)
+                Text("Finish setting up your targets to begin coordinating themes across your apps.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Resume Setup") {
+                model.resumeOnboarding()
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("resume-setup-button")
+        }
+        .padding(14)
+        .background(Color.accentColor.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.accentColor.opacity(0.25), lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("resume-setup-banner")
     }
 
     private var header: some View {

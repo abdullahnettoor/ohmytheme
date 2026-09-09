@@ -471,6 +471,86 @@ struct PersistenceStoreTests {
         }
     }
 
+    @Test("Onboarding disposition round-trips through persistence")
+    func onboardingDispositionRoundTrips() throws {
+        let fixture = try Fixture()
+        let workspaceID = WorkspaceID.myMac
+        try fixture.store.saveWorkspace(Workspace(id: workspaceID, displayName: "My Mac"))
+
+        #expect(try fixture.store.loadOnboardingDisposition(workspaceID: workspaceID) == nil)
+
+        try fixture.store.saveOnboardingDisposition(.inProgress, workspaceID: workspaceID)
+        #expect(try fixture.store.loadOnboardingDisposition(workspaceID: workspaceID) == .inProgress)
+
+        try fixture.store.saveOnboardingDisposition(.deferred, workspaceID: workspaceID)
+        #expect(try fixture.store.loadOnboardingDisposition(workspaceID: workspaceID) == .deferred)
+
+        try fixture.store.saveOnboardingDisposition(.completed, workspaceID: workspaceID)
+        #expect(try fixture.store.loadOnboardingDisposition(workspaceID: workspaceID) == .completed)
+    }
+
+    @Test("Existing users with connected targets migrate to completed onboarding disposition")
+    func existingUsersWithConnectedTargetsMigrateToCompleted() throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("oh-my-theme-migration-\(UUID().uuidString)", isDirectory: true)
+        let databaseURL = directoryURL.appendingPathComponent("state.sqlite")
+        let contentURL = directoryURL.appendingPathComponent("recovery", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("initial") { database in
+            try database.create(table: "workspaces") { table in
+                table.column("id", .text).primaryKey()
+                table.column("display_name", .text).notNull()
+            }
+            try database.create(table: "theme_assignments") { table in
+                table.column("workspace_id", .text).primaryKey().references("workspaces", onDelete: .cascade)
+                table.column("kind", .text).notNull()
+                table.column("fixed_variant_id", .text)
+                table.column("light_variant_id", .text)
+                table.column("dark_variant_id", .text)
+            }
+            try database.create(table: "target_instances") { table in
+                table.column("id", .text).primaryKey()
+                table.column("workspace_id", .text).notNull().references("workspaces", onDelete: .cascade)
+                table.column("display_name", .text).notNull()
+                table.column("adapter_id", .text).notNull()
+                table.column("is_connected", .boolean).notNull()
+            }
+            try database.create(table: "content_references") { table in
+                table.column("digest", .text).primaryKey()
+                table.column("byte_count", .integer).notNull()
+                table.column("kind", .text).notNull()
+                table.column("owner_id", .text).notNull()
+            }
+            try database.create(table: "payload_envelopes") { table in
+                table.column("id", .text).primaryKey()
+                table.column("target_instance_id", .text).notNull()
+                table.column("adapter_id", .text).notNull()
+                table.column("adapter_version", .text).notNull()
+                table.column("payload_version", .text).notNull()
+                table.column("payload_digest", .text).notNull().references("content_references")
+                table.column("restoration_digest", .text).references("content_references")
+            }
+        }
+        let legacyDb = try DatabaseQueue(path: databaseURL.path)
+        try migrator.migrate(legacyDb)
+        try legacyDb.write { database in
+            try database.execute(
+                sql: "INSERT INTO workspaces (id, display_name) VALUES ('my-mac', 'My Mac')"
+            )
+            try database.execute(
+                sql: """
+                    INSERT INTO target_instances (id, workspace_id, display_name, adapter_id, is_connected)
+                    VALUES ('ghostty.main', 'my-mac', 'Ghostty', 'ghostty', 1)
+                    """
+            )
+        }
+
+        let store = try PersistenceStore(databaseURL: databaseURL, contentStoreURL: contentURL)
+        #expect(try store.loadOnboardingDisposition(workspaceID: .myMac) == .completed)
+    }
+
     private struct Fixture {
         let directoryURL: URL
         let databaseURL: URL

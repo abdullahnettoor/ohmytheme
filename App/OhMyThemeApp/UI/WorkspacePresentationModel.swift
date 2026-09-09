@@ -185,6 +185,10 @@ final class WorkspacePresentationModel: ObservableObject {
     @Published private(set) var isCancellingRemainingApply = false
     @Published private(set) var latestSetupReport: SetupReport?
     @Published private(set) var latestApplyReport: DurableApplyReport?
+    @Published var onboardingDisposition: OnboardingDisposition
+    @Published var currentOnboardingStepOverride: OnboardingStep?
+    @Published var hasAcknowledgedContract = false
+    @Published var hasAcknowledgedSetupResults = false
 
     @Published private(set) var report: PresentedReport?
     @Published private(set) var canUndoLastThemeChange = false
@@ -206,6 +210,10 @@ final class WorkspacePresentationModel: ObservableObject {
         )
         self.latestSetupReport = runtime.latestSetupReport
         self.latestApplyReport = runtime.latestApplyReport
+        self.onboardingDisposition = runtime.onboardingDisposition
+        self.currentOnboardingStepOverride = nil
+        self.hasAcknowledgedContract = false
+        self.hasAcknowledgedSetupResults = false
         self.isReady = true
     }
 
@@ -238,6 +246,126 @@ final class WorkspacePresentationModel: ObservableObject {
         }
     }
 
+    var isOnboardingActive: Bool {
+        onboardingDisposition == .inProgress
+    }
+
+    var isOnboardingDeferred: Bool {
+        onboardingDisposition == .deferred
+    }
+
+    var isOnboardingCompleted: Bool {
+        onboardingDisposition == .completed
+    }
+
+    var currentOnboardingStep: OnboardingStep {
+        currentOnboardingStepOverride ?? derivedOnboardingStep
+    }
+
+    var derivedOnboardingStep: OnboardingStep {
+        if onboardingDisposition == .completed {
+            return .overview
+        }
+        if onboardingDisposition == .deferred {
+            return .overview
+        }
+        if isExecutingSetup {
+            return .setupTransaction
+        }
+        if isApplyingTheme {
+            return .initialApply
+        }
+        if latestSetupReport != nil && !hasAcknowledgedSetupResults {
+            return .setupResults
+        }
+        if setupPlan != nil {
+            return .setupPlanReview
+        }
+        if !workspace.connectedTargetInstances.isEmpty {
+            if latestApplyReport != nil || (workspaceThemeStatus?.isFullyApplied == true && (workspaceThemeStatus?.appliedCount ?? 0) > 0) {
+                return .overview
+            }
+            return .initialApply
+        }
+        if workspace.themeAssignment != nil {
+            return .targetOptIns
+        }
+        if hasAcknowledgedContract {
+            return .desiredTheme
+        }
+        return .contract
+    }
+
+    var checkedApplicationsSummary: String {
+        "Oh My Theme checked for compatible installations of macOS Appearance, Wallpaper displays, Ghostty, Starship, and VS Code, but none are currently available to configure automatically."
+    }
+
+    func acknowledgeContract() {
+        hasAcknowledgedContract = true
+        currentOnboardingStepOverride = nil
+    }
+
+    func acknowledgeSetupResults() {
+        hasAcknowledgedSetupResults = true
+        setupPlan = nil
+        currentOnboardingStepOverride = nil
+    }
+
+    var canFinishOnboardingFromSetupResults: Bool {
+        !workspace.connectedTargetInstances.isEmpty
+    }
+
+    func deferOnboarding() {
+        onboardingDisposition = .deferred
+        currentOnboardingStepOverride = nil
+        Task {
+            do {
+                try await runtime.updateOnboardingDisposition(.deferred)
+            } catch {
+                operationError = "Failed to defer onboarding: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func resumeOnboarding() {
+        onboardingDisposition = .inProgress
+        currentOnboardingStepOverride = nil
+        hasAcknowledgedContract = true
+        Task {
+            do {
+                try await runtime.updateOnboardingDisposition(.inProgress)
+            } catch {
+                operationError = "Failed to resume onboarding: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func completeOnboarding() {
+        onboardingDisposition = .completed
+        currentOnboardingStepOverride = nil
+        Task {
+            do {
+                try await runtime.updateOnboardingDisposition(.completed)
+            } catch {
+                operationError = "Failed to complete onboarding: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    #if DEBUG
+    func setLatestSetupReportForTesting(_ report: SetupReport?) {
+        self.latestSetupReport = report
+    }
+    #endif
+
+    func goToOnboardingStep(_ step: OnboardingStep) {
+        currentOnboardingStepOverride = step
+    }
+
+    func resetOnboardingStepOverride() {
+        currentOnboardingStepOverride = nil
+    }
+
     var canApplyThemes: Bool {
         runtime.canApplyThemes && persistenceError == nil && isReady
             && !workspace.connectedTargetInstances.isEmpty
@@ -258,10 +386,8 @@ final class WorkspacePresentationModel: ObservableObject {
     var unresolvedOptedInCount: Int {
         let countFromInstances = applicationTargets.flatMap(\.instances).filter { $0.isOptedIn && !$0.isConnected }
             .count
-        if countFromInstances > 0 || !applicationTargets.flatMap(\.instances).isEmpty {
-            return countFromInstances
-        }
-        return workspace.targetOptIns.filter { !workspace.isConnected($0) }.count
+        let countFromWorkspace = workspace.targetOptIns.filter { !workspace.isConnected($0) }.count
+        return max(countFromInstances, countFromWorkspace)
     }
 
     var canReviewSetupPlan: Bool {
@@ -371,6 +497,7 @@ final class WorkspacePresentationModel: ObservableObject {
             replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
             latestSetupReport = runtime.latestSetupReport
             latestApplyReport = runtime.latestApplyReport
+            onboardingDisposition = runtime.onboardingDisposition
             await refreshUndoAvailability()
             isReady = true
         } catch {

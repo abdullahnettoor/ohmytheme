@@ -1945,4 +1945,240 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertNil(model.applyProgress)
         XCTAssertEqual(model.operationError, "Theme application was cancelled.")
     }
+
+    // MARK: - Resumable Onboarding Tests (Issue #40)
+
+    func testOnboardingOrderAndStateDerivation() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let workspace = Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [], targetOptIns: [])
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.onboardingDisposition = .inProgress
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // 1. Contract
+        XCTAssertEqual(model.onboardingDisposition, .inProgress)
+        XCTAssertTrue(model.isOnboardingActive)
+        XCTAssertEqual(model.currentOnboardingStep, .contract)
+
+        // 2. Desired Theme and Visual Preview
+        model.acknowledgeContract()
+        XCTAssertEqual(model.currentOnboardingStep, .desiredTheme)
+
+        // 3. Target Opt-ins
+        model.selectThemeVariant(packs[0].variants[0].id)
+        XCTAssertEqual(model.currentOnboardingStep, .targetOptIns)
+
+        // 4. Setup Plan Review
+        let targetID = TargetInstanceID(rawValue: "ghostty.default")
+        runtime.setupPlanToReturn = SetupPlan(
+            id: UUID(),
+            workspaceID: workspace.id,
+            targetInstanceIDs: [targetID],
+            targetPlans: [],
+            discoveryAndSelectionDigest: "digest"
+        )
+        _ = await model.prepareSetupPlan()
+        XCTAssertEqual(model.currentOnboardingStep, .setupPlanReview)
+
+        // 5. Setup Transaction
+        model.setIsExecutingSetupForTesting(true)
+        XCTAssertEqual(model.currentOnboardingStep, .setupTransaction)
+        model.setIsExecutingSetupForTesting(false)
+
+        // 6. Setup Results
+        let report = SetupReport(
+            operationID: UUID(),
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: targetID,
+                    adapterID: "ghostty",
+                    capabilityID: "connection",
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Connected Ghostty"
+                )
+            ]
+        )
+        model.setLatestSetupReportForTesting(report)
+        XCTAssertEqual(model.currentOnboardingStep, .setupResults)
+
+        // 7. Initial Apply
+        model.acknowledgeSetupResults()
+        let connectedWorkspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: targetID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            targetOptIns: [targetID],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        model.replaceWorkspace(connectedWorkspace, targets: [])
+        XCTAssertEqual(model.currentOnboardingStep, .initialApply)
+
+        // 8. Overview
+        model.completeOnboarding()
+        XCTAssertEqual(model.onboardingDisposition, .completed)
+        XCTAssertFalse(model.isOnboardingActive)
+        XCTAssertEqual(model.currentOnboardingStep, .overview)
+    }
+
+    func testOnboardingDispositionResumesFromDomainStateRatherThanPageNumber() {
+        let packs = try! BundledThemeCatalog().load()
+        let workspace = Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [], targetOptIns: [])
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.onboardingDisposition = .inProgress
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // Starts at contract because contract not acknowledged
+        XCTAssertEqual(model.currentOnboardingStep, .contract)
+
+        // If user already acknowledged contract in domain state, resumes at desired theme
+        model.acknowledgeContract()
+        XCTAssertEqual(model.currentOnboardingStep, .desiredTheme)
+
+        // If desired theme already assigned, resumes at target opt-ins
+        model.selectThemeVariant(packs[0].variants[0].id)
+        XCTAssertEqual(model.currentOnboardingStep, .targetOptIns)
+    }
+
+    func testSetUpLaterEntersEmptyOverviewWithResumeSetup() {
+        let packs = try! BundledThemeCatalog().load()
+        let workspace = Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [], targetOptIns: [])
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.onboardingDisposition = .inProgress
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // Defer onboarding via Set Up Later
+        model.deferOnboarding()
+        XCTAssertEqual(model.onboardingDisposition, .deferred)
+        XCTAssertFalse(model.isOnboardingActive)
+        XCTAssertTrue(model.isOnboardingDeferred)
+        XCTAssertEqual(model.currentOnboardingStep, .overview)
+
+        // Empty state overview message is shown
+        XCTAssertNotNil(model.emptyStateMessage)
+
+        // Theme browsing remains available
+        model.selectThemeVariant(packs[0].variants[0].id)
+        XCTAssertEqual(model.selectedThemeVariantID, packs[0].variants[0].id)
+
+        // Apply remains disabled without connected targets
+        XCTAssertFalse(model.canApplyThemes)
+
+        // Resume Setup button brings user back to onboarding at the derived domain step
+        model.resumeOnboarding()
+        XCTAssertEqual(model.onboardingDisposition, .inProgress)
+        XCTAssertTrue(model.isOnboardingActive)
+        XCTAssertEqual(model.currentOnboardingStep, .targetOptIns)
+    }
+
+    func testNoRecommendedTargetsExplainsCheckedAppsAndOffersRescanOrSetUpLater() {
+        let packs = try! BundledThemeCatalog().load()
+        let workspace = Workspace(id: .myMac, displayName: "My Mac", connectedTargetInstances: [], targetOptIns: [])
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.onboardingDisposition = .inProgress
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        model.acknowledgeContract()
+        model.selectThemeVariant(packs[0].variants[0].id)
+        XCTAssertEqual(model.currentOnboardingStep, .targetOptIns)
+
+        // No targets connected or opted in
+        XCTAssertEqual(model.unresolvedOptedInCount, 0)
+        XCTAssertFalse(model.canReviewSetupPlan)
+
+        // Explains checked apps
+        XCTAssertFalse(model.checkedApplicationsSummary.isEmpty)
+        XCTAssertTrue(model.checkedApplicationsSummary.contains("Ghostty") || model.checkedApplicationsSummary.contains("checked"))
+
+        // Set Up Later is available and not trapped
+        model.deferOnboarding()
+        XCTAssertEqual(model.onboardingDisposition, .deferred)
+        XCTAssertFalse(model.isOnboardingActive)
+    }
+
+    func testPartialSetupAllowsFinishingOnboardingWhileUnresolvedRemainAvailable() async throws {
+        let packs = try BundledThemeCatalog().load()
+        let successID = TargetInstanceID(rawValue: "ghostty.default")
+        let failID = TargetInstanceID(rawValue: "vscode.default")
+
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: successID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            targetOptIns: [successID, failID]
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.onboardingDisposition = .inProgress
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // Simulate partial setup report
+        let report = SetupReport(
+            operationID: UUID(),
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: successID,
+                    adapterID: "ghostty",
+                    capabilityID: "connection",
+                    sourceType: .upstream,
+                    sourceRevision: "1",
+                    configurationState: .updated,
+                    runningInstanceReach: .currentInstances,
+                    detail: "Connected Ghostty"
+                ),
+                TargetCapabilityOutcome(
+                    targetInstanceID: failID,
+                    adapterID: "vscode",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "1",
+                    configurationState: .failed,
+                    runningInstanceReach: .unavailable,
+                    detail: "VS Code timed out"
+                ),
+            ]
+        )
+        model.setLatestSetupReportForTesting(report)
+        XCTAssertEqual(model.currentOnboardingStep, .setupResults)
+
+        // Can finish onboarding because at least 1 target is connected
+        XCTAssertTrue(model.canFinishOnboardingFromSetupResults)
+
+        // Finish onboarding
+        model.completeOnboarding()
+        XCTAssertEqual(model.onboardingDisposition, .completed)
+        XCTAssertFalse(model.isOnboardingActive)
+
+        // Unresolved target (failID) remains opted-in and available for retry in Workspace
+        XCTAssertEqual(model.unresolvedOptedInCount, 1)
+        XCTAssertTrue(model.canReviewSetupPlan)
+    }
+
+    func testExistingUsersSkipFirstUseSetup() {
+        let targetID = TargetInstanceID(rawValue: "ghostty.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: targetID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            targetOptIns: [targetID],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let packs = try! BundledThemeCatalog().load()
+        let runtime = FakeWorkspaceRuntime(workspace: workspace, themePacks: packs)
+        runtime.onboardingDisposition = .completed
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        // Existing users retain their workspace and have completed disposition
+        XCTAssertEqual(model.onboardingDisposition, .completed)
+        XCTAssertFalse(model.isOnboardingActive)
+        XCTAssertFalse(model.isOnboardingDeferred)
+        XCTAssertEqual(model.currentOnboardingStep, .overview)
+    }
 }

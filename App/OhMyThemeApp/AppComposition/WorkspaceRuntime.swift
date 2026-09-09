@@ -9,6 +9,9 @@ protocol WorkspaceRuntime: AnyObject, ObservableObject {
     var themePacks: [ThemePack] { get }
     var persistenceError: String? { get }
     var canApplyThemes: Bool { get }
+    var onboardingDisposition: OnboardingDisposition { get }
+    func updateOnboardingDisposition(_ disposition: OnboardingDisposition) async throws
+
     var workspaceThemeStatus: WorkspaceThemeStatus? { get }
     var unresolvedRecovery: String? { get }
     var latestSetupReport: SetupReport? { get }

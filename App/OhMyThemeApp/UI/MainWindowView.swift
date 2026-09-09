@@ -26,35 +26,41 @@ struct MainWindowView: View {
     @State private var selectedSection: NavigationSection? = .overview
 
     var body: some View {
-        NavigationSplitView {
-            List(NavigationSection.allCases, selection: $selectedSection) { section in
-                NavigationLink(value: section) {
-                    Label(section.title, systemImage: section.systemImage)
+        Group {
+            if model.isOnboardingActive {
+                OnboardingView(model: model)
+            } else {
+                NavigationSplitView {
+                    List(NavigationSection.allCases, selection: $selectedSection) { section in
+                        NavigationLink(value: section) {
+                            Label(section.title, systemImage: section.systemImage)
+                        }
+                        .accessibilityIdentifier("nav-\(section.rawValue.lowercased())")
+                    }
+                    .navigationTitle("Oh My Theme")
+                    .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
+                } detail: {
+                    switch selectedSection ?? .overview {
+                    case .overview:
+                        OverviewView(model: model)
+                    case .themes:
+                        ThemesView(model: model)
+                    case .apps:
+                        AppsView(model: model)
+                    }
                 }
-                .accessibilityIdentifier("nav-\(section.rawValue.lowercased())")
-            }
-            .navigationTitle("Oh My Theme")
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
-        } detail: {
-            switch selectedSection ?? .overview {
-            case .overview:
-                OverviewView(model: model)
-            case .themes:
-                ThemesView(model: model)
-            case .apps:
-                AppsView(model: model)
+                .sheet(
+                    item: Binding(
+                        get: { model.setupPlan },
+                        set: { if $0 == nil { model.dismissSetupPlan() } }
+                    )
+                ) { plan in
+                    SetupPlanReviewView(model: model, plan: plan)
+                        .interactiveDismissDisabled(model.isExecutingSetup)
+                }
             }
         }
         .frame(minWidth: 700, idealWidth: 800, minHeight: 480, idealHeight: 560)
-        .sheet(
-            item: Binding(
-                get: { model.setupPlan },
-                set: { if $0 == nil { model.dismissSetupPlan() } }
-            )
-        ) { plan in
-            SetupPlanReviewView(model: model, plan: plan)
-                .interactiveDismissDisabled(model.isExecutingSetup)
-        }
         .onAppear {
             presenceController.mainWindowDidOpen()
         }

@@ -60,6 +60,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     var workspace: Workspace { store.workspace }
 
+    @Published private(set) var onboardingDisposition: OnboardingDisposition
     @Published private(set) var workspaceThemeStatus: WorkspaceThemeStatus?
     @Published private(set) var unresolvedRecovery: String?
     private(set) var latestSetupReport: SetupReport?
@@ -130,6 +131,7 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         socketServer = companionRuntime?.server
         vscodePlatform = companionRuntime?.platform
         vscodeArtifact = companionRuntime?.artifact
+        onboardingDisposition = store.loadOnboardingDisposition()
 
         guard !self.themePacks.isEmpty else {
             themeEngine = nil
@@ -166,6 +168,11 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     deinit {
         socketServer?.stop()
+    }
+
+    func updateOnboardingDisposition(_ disposition: OnboardingDisposition) async throws {
+        onboardingDisposition = disposition
+        store.saveOnboardingDisposition(disposition)
     }
 
     func selectFixedThemeVariant(_ variantID: String) {

@@ -10,6 +10,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var themePacks: [ThemePack]
     var persistenceError: String?
     var canApplyThemes: Bool
+    @Published var onboardingDisposition: OnboardingDisposition
     @Published var workspaceThemeStatus: WorkspaceThemeStatus?
     @Published var unresolvedRecovery: String?
     var latestSetupReport: SetupReport?
@@ -86,7 +87,8 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         canApplyThemes: Bool = true,
         undoAvailabilityResult: UndoAvailability = .unavailable,
         workspaceThemeStatus: WorkspaceThemeStatus? = nil,
-        unresolvedRecovery: String? = nil
+        unresolvedRecovery: String? = nil,
+        onboardingDisposition: OnboardingDisposition = .completed
     ) {
         self.workspace = workspace
         self.themePacks = themePacks
@@ -95,6 +97,13 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
         self.undoAvailabilityResult = undoAvailabilityResult
         self.workspaceThemeStatus = workspaceThemeStatus
         self.unresolvedRecovery = unresolvedRecovery
+        self.onboardingDisposition = onboardingDisposition
+    }
+
+    private(set) var updateOnboardingDispositionCalls: [OnboardingDisposition] = []
+    func updateOnboardingDisposition(_ disposition: OnboardingDisposition) async throws {
+        updateOnboardingDispositionCalls.append(disposition)
+        onboardingDisposition = disposition
     }
 
     @discardableResult

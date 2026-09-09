@@ -134,6 +134,35 @@ final class WorkspaceStore {
         }
     }
 
+    func loadOnboardingDisposition() -> OnboardingDisposition {
+        guard let persistence else { return .completed }
+        do {
+            if let disposition = try persistence.loadOnboardingDisposition(workspaceID: workspace.id) {
+                return disposition
+            }
+            if !workspace.connectedTargetInstances.isEmpty || workspace.themeAssignment != nil {
+                try? persistence.saveOnboardingDisposition(.completed, workspaceID: workspace.id)
+                return .completed
+            }
+            return .inProgress
+        } catch {
+            persistenceError = String(describing: error)
+            return .completed
+        }
+    }
+
+    func saveOnboardingDisposition(_ disposition: OnboardingDisposition) {
+        guard let persistence else {
+            persistenceError = persistenceError ?? "Workspace persistence is unavailable."
+            return
+        }
+        do {
+            try persistence.saveOnboardingDisposition(disposition, workspaceID: workspace.id)
+        } catch {
+            persistenceError = String(describing: error)
+        }
+    }
+
     private static func ensureWorkspaceExists(in store: PersistenceStore) throws {
         do {
             _ = try store.loadWorkspace()
