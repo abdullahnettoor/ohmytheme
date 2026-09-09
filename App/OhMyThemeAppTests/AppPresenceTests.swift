@@ -503,6 +503,30 @@ final class AppPresenceTests: XCTestCase {
         XCTAssertEqual(notificationClient.postedNotifications.count, 0)
     }
 
+    func testWorkFinishingWhileMenuBarVisiblePostsNoNotification() async {
+        notificationClient.permissionStatus = .authorized
+        let controller = makeController(storedMenuBarVisible: true)
+        controller.workDidStart()
+        let report = SetupReport(
+            operationID: UUID(),
+            outcomes: [
+                TargetCapabilityOutcome(
+                    targetInstanceID: TargetInstanceID(rawValue: "ghostty.default"),
+                    adapterID: "ghostty",
+                    capabilityID: "connection",
+                    sourceType: .unavailable,
+                    sourceRevision: "n/a",
+                    configurationState: .failed,
+                    runningInstanceReach: .unavailable
+                )
+            ]
+        )
+
+        await controller.workDidFinish(.setup(report))
+
+        XCTAssertEqual(notificationClient.postedNotifications.count, 0)
+    }
+
     func testHiddenSetupNeedsAttentionPostsNotificationAndActionNavigatesToResults() async {
         notificationClient.permissionStatus = .authorized
         let controller = makeController(storedMenuBarVisible: false)

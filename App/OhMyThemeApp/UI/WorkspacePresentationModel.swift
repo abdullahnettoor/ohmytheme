@@ -295,6 +295,9 @@ final class WorkspacePresentationModel: ObservableObject {
         if setupPlan != nil {
             return .setupPlanReview
         }
+        if hasUnresolvedOptedInTargets {
+            return .targetOptIns
+        }
         if !workspace.connectedTargetInstances.isEmpty {
             if latestApplyReport != nil || (workspaceThemeStatus?.isFullyApplied == true && (workspaceThemeStatus?.appliedCount ?? 0) > 0) {
                 return .overview

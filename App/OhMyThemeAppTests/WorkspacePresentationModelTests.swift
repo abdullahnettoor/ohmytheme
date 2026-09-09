@@ -2159,6 +2159,25 @@ final class WorkspacePresentationModelTests: XCTestCase {
         XCTAssertTrue(model.canReviewSetupPlan)
     }
 
+    func testOnboardingResumesAtTargetOptInsWhenConnectedTargetsHaveUnresolvedOptIns() {
+        let targetID = TargetInstanceID(rawValue: "ghostty.default")
+        let unresolvedID = TargetInstanceID(rawValue: "vscode.default")
+        let workspace = Workspace(
+            id: .myMac,
+            displayName: "My Mac",
+            connectedTargetInstances: [
+                ConnectedTargetInstance(id: targetID, displayName: "Ghostty", adapterID: "ghostty")
+            ],
+            targetOptIns: [targetID, unresolvedID],
+            themeAssignment: .fixed(variantID: "oh-my-theme/aurora")
+        )
+        let runtime = FakeWorkspaceRuntime(workspace: workspace)
+        runtime.onboardingDisposition = .inProgress
+        let model = WorkspacePresentationModel(runtime: runtime)
+
+        XCTAssertEqual(model.currentOnboardingStep, .targetOptIns)
+    }
+
     func testExistingUsersSkipFirstUseSetup() {
         let targetID = TargetInstanceID(rawValue: "ghostty.default")
         let workspace = Workspace(

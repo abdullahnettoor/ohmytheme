@@ -297,7 +297,7 @@ struct OnboardingTargetOptInsStepView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    if !model.hasRecommendedTargets && model.applicationTargets.allSatisfy({ $0.instances.isEmpty }) {
+                    if !model.hasRecommendedTargets {
                         noTargetsCard
                     } else {
                         HStack {
@@ -809,22 +809,22 @@ struct OnboardingInitialApplyStepView: View {
                         .padding()
                     }
 
-                    if model.latestApplyReport != nil {
+                    if let report = model.latestApplyReport {
                         HStack(spacing: 12) {
-                            Image(systemName: "checkmark.seal.fill")
+                            Image(systemName: reportNeedsAttention(report) ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
                                 .font(.title2)
-                                .foregroundStyle(.green)
+                                .foregroundStyle(reportNeedsAttention(report) ? .orange : .green)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Theme Applied Successfully!")
+                                Text(reportNeedsAttention(report) ? "Theme Apply Needs Attention" : "Theme Applied Successfully!")
                                     .font(.headline)
-                                Text("All connected targets have been updated to your desired theme.")
+                                Text(reportNeedsAttention(report) ? "Review the reported target issues before completing onboarding." : "All connected targets have been updated to your desired theme.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }
                         }
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.green.opacity(0.1))
+                        .background((reportNeedsAttention(report) ? Color.orange : Color.green).opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
                 }
@@ -834,17 +834,9 @@ struct OnboardingInitialApplyStepView: View {
             Divider()
 
             HStack {
-                if model.latestApplyReport == nil {
-                    Button("Finish without Applying") {
-                        model.completeOnboarding()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("onboarding-finish-no-apply-button")
-
+                if model.latestApplyReport.map(reportNeedsAttention) != false {
                     Spacer()
-
-                    Button("Apply Theme") {
+                    Button(model.latestApplyReport == nil ? "Apply Theme" : "Try Apply Again") {
                         Task {
                             if let plan = try? await model.prepareSelectedTheme() {
                                 _ = try? await model.apply(planID: plan.id)
@@ -868,6 +860,17 @@ struct OnboardingInitialApplyStepView: View {
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 16)
+        }
+    }
+
+    private func reportNeedsAttention(_ report: DurableApplyReport) -> Bool {
+        report.outcomes.contains { outcome in
+            switch outcome.configurationState {
+            case .permissionRequired, .conflicted, .failed:
+                return true
+            case .updated, .unchanged, .unavailable:
+                return outcome.rollbackState == .recoveryRequired
+            }
         }
     }
 }

@@ -320,7 +320,7 @@ final class AppPresenceController: ObservableObject {
     func workDidFinish(_ result: HiddenWorkResult) async {
         isWorkActive = false
 
-        guard !isMainWindowOpen else { return }
+        guard !isMainWindowOpen, !isMenuBarVisible else { return }
 
         let needsAttention: Bool
         let title: String

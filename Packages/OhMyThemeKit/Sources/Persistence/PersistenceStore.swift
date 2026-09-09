@@ -248,9 +248,13 @@ public final class PersistenceStore: @unchecked Sendable {
                 try database.execute(
                     sql: """
                         INSERT OR IGNORE INTO onboarding_state (workspace_id, disposition, updated_at)
-                        SELECT workspace_id, 'completed', strftime('%s', 'now')
-                        FROM operations
-                        WHERE (kind = 'apply' OR kind = 'setup') AND state = 'completed'
+                        SELECT o.workspace_id, 'completed', strftime('%s', 'now')
+                        FROM operations o
+                        WHERE (o.kind = 'apply' OR o.kind = 'setup')
+                          AND o.state = 'applied'
+                          AND EXISTS (
+                              SELECT 1 FROM workspaces w WHERE w.id = o.workspace_id
+                          )
                         """
                 )
             }
