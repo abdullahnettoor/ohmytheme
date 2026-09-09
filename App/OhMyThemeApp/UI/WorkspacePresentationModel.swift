@@ -168,10 +168,12 @@ final class WorkspacePresentationModel: ObservableObject {
         let explanation: String
     }
 
+    private static let acknowledgedUnavailableTargetsDefaultsKey = "OhMyThemeAcknowledgedUnavailableTargets"
+
     @Published private(set) var workspace: Workspace
     @Published private(set) var applicationTargets: [ApplicationTarget]
     @Published private(set) var applyPlan: ApplyPlan?
-    @Published private(set) var acknowledgedUnavailableTargetInstanceIDs: Set<TargetInstanceID> = []
+    @Published private(set) var acknowledgedUnavailableTargetInstanceIDs: Set<TargetInstanceID>
     @Published private(set) var setupPlan: SetupPlan?
     @Published private(set) var setupPlanInvalidationReason: String?
     @Published private(set) var isPreparingSetupPlan = false
@@ -198,6 +200,12 @@ final class WorkspacePresentationModel: ObservableObject {
         self.runtime = runtime
         self.workspace = runtime.workspace
         self.applicationTargets = Self.connectedApplicationTargets(in: runtime.workspace)
+        self.acknowledgedUnavailableTargetInstanceIDs = Set(
+            (UserDefaults.standard.stringArray(forKey: Self.acknowledgedUnavailableTargetsDefaultsKey) ?? [])
+                .map(TargetInstanceID.init(rawValue:))
+        )
+        self.latestSetupReport = runtime.latestSetupReport
+        self.latestApplyReport = runtime.latestApplyReport
         self.isReady = true
     }
 
@@ -361,6 +369,8 @@ final class WorkspacePresentationModel: ObservableObject {
         do {
             let snapshot = try await runtime.start()
             replaceWorkspace(snapshot.workspace, targets: snapshot.targets)
+            latestSetupReport = runtime.latestSetupReport
+            latestApplyReport = runtime.latestApplyReport
             await refreshUndoAvailability()
             isReady = true
         } catch {
@@ -647,7 +657,14 @@ final class WorkspacePresentationModel: ObservableObject {
         }
         do {
             acknowledgedUnavailableTargetInstanceIDs.formUnion(applyPlan.unavailableTargetInstanceIDs)
-            let applied = try await runtime.apply(planID: applyPlan.id) { [weak self] progress in
+            UserDefaults.standard.set(
+                acknowledgedUnavailableTargetInstanceIDs.map(\.rawValue),
+                forKey: Self.acknowledgedUnavailableTargetsDefaultsKey
+            )
+            let applied = try await runtime.apply(
+                planID: applyPlan.id,
+                targetInstanceIDs: Set(applyPlan.readyTargetInstanceIDs)
+            ) { [weak self] progress in
                 Task { @MainActor [weak self] in
                     self?.applyProgress = progress
                 }

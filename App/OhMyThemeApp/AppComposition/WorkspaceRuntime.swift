@@ -1,15 +1,19 @@
+import Combine
 import Foundation
 import ThemeEngine
 import ThemeModel
 
 @MainActor
-protocol WorkspaceRuntime: AnyObject {
+protocol WorkspaceRuntime: AnyObject, ObservableObject {
     var workspace: Workspace { get }
     var themePacks: [ThemePack] { get }
     var persistenceError: String? { get }
     var canApplyThemes: Bool { get }
     var workspaceThemeStatus: WorkspaceThemeStatus? { get }
     var unresolvedRecovery: String? { get }
+    var latestSetupReport: SetupReport? { get }
+    var latestApplyReport: DurableApplyReport? { get }
+    var workspaceStatusPublisher: AnyPublisher<Void, Never> { get }
 
     func verifyThemeStatus() async throws -> WorkspaceThemeStatus
     func selectFixedThemeVariant(_ variantID: String)
@@ -34,6 +38,7 @@ protocol WorkspaceRuntime: AnyObject {
     func prepareApplyPlan() async throws -> ApplyPlan
     func apply(
         planID: UUID,
+        targetInstanceIDs: Set<TargetInstanceID>?,
         onProgress: (@Sendable (ApplyProgress) -> Void)?
     ) async throws -> DurableApplyReport
     func undoLast() async throws -> UndoReport
@@ -66,6 +71,13 @@ struct WorkspaceSetupResult: Equatable {
 
 extension WorkspaceRuntime {
     func apply(planID: UUID) async throws -> DurableApplyReport {
-        try await apply(planID: planID, onProgress: nil)
+        try await apply(planID: planID, targetInstanceIDs: nil, onProgress: nil)
+    }
+
+    func apply(
+        planID: UUID,
+        onProgress: (@Sendable (ApplyProgress) -> Void)?
+    ) async throws -> DurableApplyReport {
+        try await apply(planID: planID, targetInstanceIDs: nil, onProgress: onProgress)
     }
 }

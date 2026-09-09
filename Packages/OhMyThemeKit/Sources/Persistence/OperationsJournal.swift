@@ -130,6 +130,35 @@ public struct StoredConnectionBaseline: Codable, Equatable, Sendable {
 }
 
 extension PersistenceStore {
+    public func saveLatestOperationReport(
+        _ report: Data,
+        kind: OperationKind,
+        workspaceID: WorkspaceID
+    ) throws {
+        try withWrite { database in
+            try database.execute(
+                sql: """
+                    INSERT OR REPLACE INTO operation_reports (workspace_id, kind, report_json)
+                    VALUES (?, ?, ?)
+                    """,
+                arguments: [workspaceID.rawValue, kind.rawValue, report]
+            )
+        }
+    }
+
+    public func loadLatestOperationReport(
+        kind: OperationKind,
+        workspaceID: WorkspaceID
+    ) throws -> Data? {
+        try withRead { database in
+            try Data.fetchOne(
+                database,
+                sql: "SELECT report_json FROM operation_reports WHERE workspace_id = ? AND kind = ?",
+                arguments: [workspaceID.rawValue, kind.rawValue]
+            )
+        }
+    }
+
     public func journalStartOperation(
         id: UUID? = nil,
         kind: OperationKind,

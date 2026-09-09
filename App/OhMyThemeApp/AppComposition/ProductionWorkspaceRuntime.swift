@@ -1,5 +1,6 @@
 import Adapters
 import AppKit
+import Combine
 import Foundation
 import PlatformClients
 import ThemeEngine
@@ -59,8 +60,14 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     var workspace: Workspace { store.workspace }
 
-    private(set) var workspaceThemeStatus: WorkspaceThemeStatus?
-    private(set) var unresolvedRecovery: String?
+    @Published private(set) var workspaceThemeStatus: WorkspaceThemeStatus?
+    @Published private(set) var unresolvedRecovery: String?
+    private(set) var latestSetupReport: SetupReport?
+    private(set) var latestApplyReport: DurableApplyReport?
+
+    var workspaceStatusPublisher: AnyPublisher<Void, Never> {
+        objectWillChange.map { _ in () }.eraseToAnyPublisher()
+    }
 
     var persistenceError: String? {
         [store.persistenceError, fatalStartupFailure]
@@ -149,6 +156,12 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
                 targetOutcomes: cachedOutcomes
             )
         }
+        latestSetupReport = try? store.persistenceStore.flatMap {
+            try $0.loadLatestOperationReport(kind: .setup, workspaceID: store.workspace.id)
+        }.map { try JSONDecoder().decode(SetupReport.self, from: $0) }
+        latestApplyReport = try? store.persistenceStore.flatMap {
+            try $0.loadLatestOperationReport(kind: .apply, workspaceID: store.workspace.id)
+        }.map { try JSONDecoder().decode(DurableApplyReport.self, from: $0) }
     }
 
     deinit {
@@ -157,6 +170,9 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     func selectFixedThemeVariant(_ variantID: String) {
         store.selectFixedVariant(variantID)
+        Task { [weak self] in
+            _ = try? await self?.verifyThemeStatus()
+        }
     }
 
     @discardableResult
@@ -462,6 +478,10 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
         )
         let refreshedDiscovery = await discoverAndRememberTargets()
         _ = try? await verifyThemeStatus()
+        latestSetupReport = report
+        try? store.persistenceStore?.saveLatestOperationReport(
+            JSONEncoder().encode(report), kind: .setup, workspaceID: workspace.id
+        )
         return WorkspaceSetupResult(
             snapshot: makeSnapshot(discovery: refreshedDiscovery),
             report: report
@@ -475,15 +495,21 @@ final class ProductionWorkspaceRuntime: WorkspaceRuntime {
 
     func apply(
         planID: UUID,
+        targetInstanceIDs: Set<TargetInstanceID>? = nil,
         onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
     ) async throws -> DurableApplyReport {
         _ = try? await verifyThemeStatus()
         let report = try await requiredThemeEngine().applyDurable(
             planID: planID,
             workspace: workspace,
+            targetInstanceIDs: targetInstanceIDs,
             onProgress: onProgress
         )
         _ = try? await verifyThemeStatus()
+        latestApplyReport = report
+        try? store.persistenceStore?.saveLatestOperationReport(
+            JSONEncoder().encode(report), kind: .apply, workspaceID: workspace.id
+        )
         return report
     }
 

@@ -211,6 +211,18 @@ public final class PersistenceStore: @unchecked Sendable {
                 }
             }
         }
+        migrator.registerMigration("add-latest-operation-reports") { database in
+            guard try database.tableExists("workspaces") else { return }
+            if try !database.tableExists("operation_reports") {
+                try database.create(table: "operation_reports") { table in
+                    table.column("workspace_id", .text).notNull()
+                        .references("workspaces", onDelete: .cascade)
+                    table.column("kind", .text).notNull()
+                    table.column("report_json", .blob).notNull()
+                    table.primaryKey(["workspace_id", "kind"])
+                }
+            }
+        }
         try migrator.migrate(database)
     }
 

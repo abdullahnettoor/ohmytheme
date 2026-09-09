@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import PlatformClients
 import SwiftUI
 import ThemeEngine
@@ -31,6 +32,7 @@ final class AppPresenceController: ObservableObject {
     private let launchAtLoginPlatform: LaunchAtLoginPlatform
     private let defaults: AppPresenceDefaults
     private let runtime: (any WorkspaceRuntime)?
+    private var runtimeStatusCancellable: AnyCancellable?
 
     @Published private(set) var isMainWindowOpen = false
     @Published private(set) var isMenuBarVisible: Bool
@@ -84,6 +86,10 @@ final class AppPresenceController: ObservableObject {
 
         if self.isMenuBarVisible {
             MenuBarPresence.clearHiddenStatusItemPreferences(in: defaults)
+        }
+
+        runtimeStatusCancellable = runtime?.workspaceStatusPublisher.sink { [weak self] in
+            self?.objectWillChange.send()
         }
     }
 

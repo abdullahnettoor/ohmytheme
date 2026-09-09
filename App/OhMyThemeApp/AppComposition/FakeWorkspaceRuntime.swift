@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import PlatformClients
 import ThemeEngine
 import ThemeModel
@@ -9,8 +10,14 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var themePacks: [ThemePack]
     var persistenceError: String?
     var canApplyThemes: Bool
-    var workspaceThemeStatus: WorkspaceThemeStatus?
-    var unresolvedRecovery: String?
+    @Published var workspaceThemeStatus: WorkspaceThemeStatus?
+    @Published var unresolvedRecovery: String?
+    var latestSetupReport: SetupReport?
+    var latestApplyReport: DurableApplyReport?
+
+    var workspaceStatusPublisher: AnyPublisher<Void, Never> {
+        objectWillChange.map { _ in () }.eraseToAnyPublisher()
+    }
 
     var startResult: WorkspaceTargetSnapshot?
     var startError: (any Error)?
@@ -65,6 +72,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
     var onApplyExecution: ((UUID, (@Sendable (ApplyProgress) -> Void)?) async throws -> DurableApplyReport?)?
     private(set) var prepareCalls = 0
     private(set) var applyCalls: [UUID] = []
+    private(set) var applyTargetInstanceIDSets: [Set<TargetInstanceID>?] = []
     private(set) var undoCalls = 0
     private(set) var undoAvailabilityCalls = 0
     private(set) var setTargetOptInCalls: [(instanceID: TargetInstanceID, isOptedIn: Bool)] = []
@@ -410,9 +418,11 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
 
     func apply(
         planID: UUID,
+        targetInstanceIDs: Set<TargetInstanceID>? = nil,
         onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
     ) async throws -> DurableApplyReport {
         applyCalls.append(planID)
+        applyTargetInstanceIDSets.append(targetInstanceIDs)
         if let applyError {
             throw applyError
         }
@@ -421,6 +431,7 @@ final class FakeWorkspaceRuntime: WorkspaceRuntime {
             return customReport
         }
         if let applyResult {
+            latestApplyReport = applyResult
             _ = try? await verifyThemeStatus()
             return applyResult
         }

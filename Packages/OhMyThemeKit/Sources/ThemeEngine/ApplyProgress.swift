@@ -78,20 +78,19 @@ public struct ApplyProgress: Codable, Equatable, Sendable {
         steps.filter { $0.status.isFinished }.count
     }
 
-    public var completedCount: Int {
-        finishedCount
-    }
+    /// Includes skipped and failed steps because progress measures terminal work.
+    public var completedCount: Int { finishedCount }
 
     public var totalCount: Int {
         steps.count
     }
 
     public var fractionCompleted: Double {
-        totalCount == 0 ? 1.0 : Double(completedCount) / Double(totalCount)
+        totalCount == 0 ? 1.0 : Double(finishedCount) / Double(totalCount)
     }
 
     public var isComplete: Bool {
-        completedCount == totalCount && totalCount > 0
+        finishedCount == totalCount && totalCount > 0
     }
 
     public var activeStepName: String? {

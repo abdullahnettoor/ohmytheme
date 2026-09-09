@@ -1667,6 +1667,7 @@ extension ThemeEngine {
     public func applyDurable(
         planID: UUID,
         workspace: Workspace,
+        targetInstanceIDs: Set<TargetInstanceID>? = nil,
         onProgress: (@Sendable (ApplyProgress) -> Void)? = nil
     ) async throws -> DurableApplyReport {
         guard let persistence = self.persistenceStore else {
@@ -1696,6 +1697,15 @@ extension ThemeEngine {
         guard let plan = self.consumePlan(planID) else {
             throw ThemeEngineError.planNotFound(planID)
         }
+        let targetPlans: [AdapterPlan]
+        if let targetInstanceIDs {
+            guard targetInstanceIDs.isSubset(of: Set(plan.readyTargetInstanceIDs)) else {
+                throw ThemeEngineError.planWorkspaceChanged(planID)
+            }
+            targetPlans = plan.targetPlans.filter { targetInstanceIDs.contains($0.targetInstanceID) }
+        } else {
+            targetPlans = plan.targetPlans
+        }
 
         let operation = try persistence.journalStartOperation(
             id: planID,
@@ -1711,7 +1721,7 @@ extension ThemeEngine {
             targetDisplayNames[instance.id] = instance.displayName
         }
         var initialSteps: [ApplyProgress.TargetStep] = []
-        for targetPlan in plan.targetPlans {
+        for targetPlan in targetPlans {
             let name = targetDisplayNames[targetPlan.targetInstanceID] ?? targetPlan.targetInstanceID.rawValue
             initialSteps.append(
                 ApplyProgress.TargetStep(
@@ -1730,7 +1740,7 @@ extension ThemeEngine {
 
         // Durably persist all Adapter Plans before any external mutation.
         var planReferences: [TargetInstanceID: ContentReference] = [:]
-        for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
+        for (ordinal, targetPlan) in targetPlans.enumerated() {
             let planPayload = try JSONEncoder().encode(targetPlan)
             let reference = try persistence.journalStorePlanPayload(
                 planPayload,
@@ -1760,7 +1770,7 @@ extension ThemeEngine {
             || ((try? persistence.journalIsCancellationRequested(operationID: operation.id)) ?? false)
 
         if isPreCancelled {
-            for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
+            for (ordinal, targetPlan) in targetPlans.enumerated() {
                 let detail = "Skipped after Cancel Remaining."
                 try persistence.journalSaveRecord(
                     JournaledRecord(
@@ -1788,11 +1798,11 @@ extension ThemeEngine {
             throw DurableOperationError.operationCancelled
         }
 
-        // Iterate in the deterministic order of plan.targetPlans.
+        // Iterate in the deterministic order of the reviewed target plans.
         var outcomes: [TargetCapabilityOutcome] = []
         var anyMutated = false
         var cancellationRequested = false
-        for (ordinal, targetPlan) in plan.targetPlans.enumerated() {
+        for (ordinal, targetPlan) in targetPlans.enumerated() {
             if consumeApplyCancellation(operation.id) {
                 cancellationRequested = true
                 break
@@ -1819,6 +1829,9 @@ extension ThemeEngine {
                 persistence: persistence
             )
             outcomes.append(outcome)
+            if (try? persistence.journalIsCancellationRequested(operationID: operation.id)) == true {
+                cancellationRequested = true
+            }
             if outcome.configurationState == .updated {
                 anyMutated = true
             }
@@ -1837,11 +1850,14 @@ extension ThemeEngine {
                 currentProgress.steps[ordinal].currentAction = nil
             }
             onProgress?(currentProgress)
+            if cancellationRequested {
+                break
+            }
         }
 
         if cancellationRequested {
             let completedIDs = Set(outcomes.map(\.targetInstanceID))
-            for (ordinal, targetPlan) in plan.targetPlans.enumerated() where !completedIDs.contains(targetPlan.targetInstanceID) {
+            for (ordinal, targetPlan) in targetPlans.enumerated() where !completedIDs.contains(targetPlan.targetInstanceID) {
                 let detail = "Skipped after Cancel Remaining."
                 try persistence.journalSaveRecord(
                     JournaledRecord(
@@ -2076,6 +2092,36 @@ extension ThemeEngine {
                     )
                 )
             }
+        }
+
+        if (try? persistence.journalIsCancellationRequested(operationID: operationID)) == true {
+            let detail = "Skipped after Cancel Remaining."
+            try persistence.journalSaveRecord(
+                JournaledRecord(
+                    operationID: operationID,
+                    targetInstanceID: plan.targetInstanceID,
+                    ordinal: ordinal,
+                    adapterID: plan.adapterID,
+                    adapterVersion: plan.adapterVersion,
+                    capabilityID: plan.capabilityID,
+                    phase: .skipped,
+                    intendedChangeDigest: plan.intendedChangeDigest,
+                    staleStateToken: plan.staleStateToken,
+                    planDigest: planReference?.digest,
+                    receiptJSON: nil,
+                    detail: detail
+                )
+            )
+            return TargetCapabilityOutcome(
+                targetInstanceID: plan.targetInstanceID,
+                adapterID: plan.adapterID,
+                capabilityID: plan.capabilityID,
+                sourceType: plan.sourceType,
+                sourceRevision: plan.sourceRevision,
+                configurationState: .unchanged,
+                runningInstanceReach: .unavailable,
+                detail: detail
+            )
         }
 
         try persistence.journalSaveRecord(
